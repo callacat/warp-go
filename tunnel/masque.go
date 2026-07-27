@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -25,6 +26,7 @@ import (
 	"golang.org/x/net/dns/dnsmessage"
 	"golang.org/x/net/http2"
 )
+
 
 // DoH endpoints, tried in order. These are the addresses warp-svc compiles in as
 // its consumer defaults (a 4-entry IpAddr blob read out of dns_proxy) — not the
@@ -76,7 +78,7 @@ const connectionIDLength = 20
 
 // perAddrDialTimeout bounds a single edge address attempt so an unreachable
 // port falls through to the next candidate quickly.
-const perAddrDialTimeout = 2 * time.Second
+const perAddrDialTimeout = 8 * time.Second
 
 // relayDrainGrace bounds how long a tunnel waits for the response direction
 // after the client has half-closed. Generous enough for the legitimate
@@ -84,57 +86,45 @@ const perAddrDialTimeout = 2 * time.Second
 // is returned to the edge's concurrent-stream grant promptly.
 const relayDrainGrace = 30 * time.Second
 
-const (
-	// connectExchangeTimeout bounds each H3 CONNECT attempt. A second attempt is
-	// made on a fresh QUIC connection when the first one exposes a dead path, so
-	// this must leave enough of socksSetupTimeout for redial and retry.
-	connectExchangeTimeout = 10 * time.Second
-	socksSetupTimeout      = 35 * time.Second
-	streamOpenTimeout      = 10 * time.Second
-	connectFailureWindow   = 30 * time.Second
-	connectFailureTargets  = 3
-	reconnectRetryInitial  = 100 * time.Millisecond
-	reconnectRetryMax      = 5 * time.Second
-)
+// connectExchangeTimeout bounds an H3 CONNECT exchange when the caller supplied
+// no deadline of its own. SendRequestHeader and ReadResponse have no timeout of
+// their own, so without this an edge that accepts a stream and never answers
+// would park the handler indefinitely.
+const connectExchangeTimeout = 15 * time.Second
 
 // connBundle groups everything owned by a single QUIC connection attempt so the
 // whole set can be torn down together on reconnect.
 type connBundle struct {
-udpConn           net.PacketConn
-	qtr               *quic.Transport
-	quicConn          *quic.Conn
-	h3Client          *http3.ClientConn
-	h3Trans           *http3.Transport
-	closeOnce         sync.Once
-	healthMu          sync.Mutex
-	failureSince      time.Time
-	failureTargets    map[string]struct{}
+	// udpConn 是 quic.Transport 占有的 PacketConn：直连路径下为 *net.UDPConn，
+	// socks5 路径下为 *socks5.UDPConn（实现 net.PacketConn）。此命名保留以减小
+	// 改动面；类型为 net.PacketConn 仅为接纳 socks5 包装器，二者 Close 均可用。
+	// 全仓仅 close() 调其 Close()、dialAddr 构造时传给 quic.Transport——未调用任何
+	// *net.UDPConn 专有方法，故放宽类型安全。
+	udpConn  net.PacketConn
+	qtr      *quic.Transport
+	quicConn *quic.Conn
+	h3Client *http3.ClientConn
+	h3Trans  *http3.Transport
 }
 
-// close abortively tears down the bundle. Safe on a nil receiver, concurrent
-// calls, and partially-constructed bundles.
+// close tears down the bundle in dependency order. Safe on a nil receiver and
+// on partially-constructed bundles.
 func (b *connBundle) close(reason string) {
 	if b == nil {
 		return
 	}
-	b.closeOnce.Do(func() {
-		// Close the socket and Transport before touching higher layers. This is
-		// intentionally an abortive close: quic.Conn.CloseWithError waits for the
-		// connection run loop, which is exactly the component that may be wedged
-		// when a path has gone black. Transport.Close destroys its connections and
-		// guarantees all stream reads and writes are unblocked.
-		if b.udpConn != nil {
-			_ = b.udpConn.Close()
-		}
-		if b.qtr != nil {
-			_ = b.qtr.Close()
-		} else if b.quicConn != nil {
-			_ = b.quicConn.CloseWithError(0, reason)
-		}
-		if b.h3Trans != nil {
-			_ = b.h3Trans.Close()
-		}
-	})
+	if b.h3Trans != nil {
+		b.h3Trans.Close()
+	}
+	if b.quicConn != nil {
+		b.quicConn.CloseWithError(0, reason)
+	}
+	if b.qtr != nil {
+		b.qtr.Close()
+	}
+	if b.udpConn != nil {
+		b.udpConn.Close()
+	}
 }
 
 // MasqueClient manages a QUIC/H3 connection to WARP edge
@@ -143,24 +133,28 @@ type MasqueClient struct {
 	// preference order. Ports are tried in turn until one completes a QUIC
 	// handshake — 443 in particular is blocked or blackholed on some networks.
 	// addrIdx remembers the last address that worked so reconnects start there.
-	// Both are only touched during dial, which runs either at construction or as
-	// the sole reconnect flight.
+	// Both are only touched during dial, which runs either at construction or
+	// under reconnectMu.
 	edgeAddrs  []string
 	addrIdx    int
 	tlsConfig  *tls.Config
 	quicConfig *quic.Config
 	token      string
 
-socks5Addr   string
+	// socks5Addr / socks5Dialer：上游 SOCKS5 出口，让去往 WARP 边缘的 QUIC 流量
+	// 先经此代理转发。两者皆空时走直连（原有行为）。仅作用于正式隧道拨号路径；
+	// scanner 探针不受影响。
+	//
+	// socks5Dialer 在 NewMasqueClient 构造期一次性建好并校验，每次 dialAddr 调用其
+	// DialContext（有状态：每次建一条新的 TCP 控制连接 + 本地 UDP socket）。
+	socks5Addr   string
 	socks5Dialer *socks5.Dialer
-	connMu    sync.RWMutex
-	cur       *connBundle
-	closed    bool
-	closeOnce sync.Once
-	lifeCtx   context.Context
-	lifeStop  context.CancelFunc
-	reconnectMu     sync.Mutex
-	reconnectFlight *reconnectFlight
+
+	connMu      sync.RWMutex
+	reconnectMu sync.Mutex
+	cur         *connBundle
+	closed      bool
+	closeOnce   sync.Once
 
 	// Shared HTTP/2 DoH connection; created on first lookup, replaced when a
 	// query finds it unusable. dohDial coalesces cold-start dials so a burst of
@@ -174,9 +168,6 @@ socks5Addr   string
 	// logic without a live tunnel.
 	dialDoHFn func(context.Context) (*dohConn, error)
 
-	// dialFn overrides the edge dial in lifecycle tests. Nil in production.
-	dialFn func(context.Context) (*connBundle, error)
-
 	// DNS cache to avoid redundant DoH queries for the same host
 	dnsCache   map[string]dnsCacheEntry
 	dnsCacheMu sync.RWMutex
@@ -184,6 +175,20 @@ socks5Addr   string
 	// singleflight for DNS: coalesce concurrent queries for the same host
 	dnsFlight   map[string]*dnsFlightResult
 	dnsFlightMu sync.Mutex
+
+	// —— 端点轮询（rotate）池化字段。rotateSize==0 时整个池不启用：上面 cur/connMu/
+	// reconnectMu 的单连接退化路径原样工作，下面字段全部不被触及（零代价回退）。
+	//
+	// rotateSize 是池容量（= -scan-top，默认 0 关闭 / 启用时通常 4）。pool 是 N 条独立
+	// QUIC 连接各承一个 bundle；rotateIdx 是 per-request round-robin 的游标；perSlotReconnect
+	// 为每个槽位单独配一把锁，让 reconnectSlot 互不打架（防风暴）。dialFn 仅供注入式测试
+	// 覆盖拨号行为，nil 时走生产 dialAddr——与 socks5 测试同一注入哲学（struct 字段注入，
+	// 不引包级可变 seam，少一个污染点）。
+	rotateSize      int
+	pool            []*connBundle
+	rotateIdx       atomic.Uint64
+	perSlotReconnect []sync.Mutex
+	dialFn          func(ctx context.Context, addr string) (*connBundle, error)
 }
 
 type dnsCacheEntry struct {
@@ -197,18 +202,21 @@ type dnsFlightResult struct {
 	done chan struct{}
 }
 
-type reconnectFlight struct {
-	done chan struct{}
-	err  error
-}
-
 // NewMasqueClient establishes a QUIC/H3 connection to the WARP edge.
 // edgeAddrs are candidate host:port addresses tried in order.
 //
 // socks5Addr 在非空时启用上游 SOCKS5 出口：去往边缘的 QUIC/UDP 流量先经此代理。
 // 仅作用于正式拨号路径，scanner 不受影响。"socks5://" 前缀在此自动补全，调用方
 // 传裸 host:port 即可。空串 = 直连（原有行为）。
-func NewMasqueClient(edgeAddrs []string, tlsConfig *tls.Config, token string, socks5Addr string) (*MasqueClient, error) {
+//
+// rotateSize 启用端点轮询池：>1 时建 N 条独立 QUIC 连接（每条绑 edgeAddrs[i%len]，
+// per-request round-robin 选下一条开 H3 流，实现「换端点 → 换出口 IP」）。0 或 <=1
+// 走原有单连接行为（cur 单 bundle）。建池前置：edgeAddrs 至少要有 rotateSize 个不同
+// 端点，否则不建池（不够多端点，轮不出不同 IP）。建池串行（防 socks5 上游并发限），
+// 任一槽失败整池放弃 + warning + 退回单连接路径——与 runEndpointScan「失败回退、不致命」
+// 同语义。空 socks5 下 rotateSize>1 也不建池（直连 anycast 同 colo，轮询无换 IP 收益）；
+// main 层 decideRotate 已在启动期拦这种组合，此处再防一道是纵深防御。
+func NewMasqueClient(edgeAddrs []string, tlsConfig *tls.Config, token string, socks5Addr string, rotateSize int) (*MasqueClient, error) {
 	if len(edgeAddrs) == 0 {
 		return nil, errors.New("未提供任何边缘地址")
 	}
@@ -248,48 +256,102 @@ func NewMasqueClient(edgeAddrs []string, tlsConfig *tls.Config, token string, so
 		InitialPacketSize:              1350,
 	}
 
-	lifeCtx, lifeStop := context.WithCancel(context.Background())
 	c := &MasqueClient{
-edgeAddrs:    edgeAddrs,
+		edgeAddrs:    edgeAddrs,
 		tlsConfig:    tlsConfig.Clone(),
 		quicConfig:   quicConfig,
 		token:        token,
-		lifeCtx:      lifeCtx,
-		lifeStop:     lifeStop,
 		socks5Addr:   socks5Addr,
 		socks5Dialer: socks5Dialer,
 		dnsCache:     make(map[string]dnsCacheEntry),
 		dnsFlight:    make(map[string]*dnsFlightResult),
 	}
 
-	// Initial dial loop: same exponential-backoff pattern as runReconnect so that
-	// a transient network outage at start — e.g. routing not ready on boot — does
-	// not kill the process. The loop runs until dial succeeds or the process
-	// receives a signal (SIGINT/SIGTERM kills the process by default before the
-	// signal handler is installed below).
-	backoff := reconnectRetryInitial
-	for {
-		bundle, err := c.dial(context.Background())
-		if err == nil {
-			c.cur = bundle
-			return c, nil
+	// buildPool 在条件满足时建 N 条池连接；返回 nil 表示未建池（调用方走单连接 dial 兜底）。
+	// 建池失败（任一槽拨号错）也回 nil + warning，已建 bundle 全部 close 释放——
+	// 与 runEndpointScan 同语义：失败回退，不致命。
+	if built := c.buildPool(context.Background(), rotateSize); built {
+		// DoH 挂 pool[0] 的 H3 流上（与原单连接挂 cur 同一机制），保留现有 DoH 路径不变。
+		c.cur = c.pool[0]
+		return c, nil
+	}
+
+	// 退化路径：池未启用 / 不够端点 / 建池失败 → 单连接回退。
+	bundle, err := c.dial(context.Background())
+	if err != nil {
+		return nil, err
+	}
+	c.cur = bundle
+	return c, nil
+}
+
+// buildPool 串行建立 rotateSize 条独立 QUIC 连接填池。返回 true 表示池已建好（
+// c.pool/c.rotateSize/perSlotReconnect 已就位、c.cur 已指向 pool[0]）；false 表示未建池，
+// 调用方走单连接回退。建池失败时把已建 bundle 全部 close，避免半成品泄漏。
+//
+// 不建池的条件（任一即返 false，silent 或 warning）：
+//   - rotateSize <= 1：池大小过小，per-request 轮转无意义。
+//   - edgeAddrs 数量 < rotateSize：不够端点填池。
+//   - 唯一 host 数 < rotateSize：建池要「换端点换出口 IP」，edge IP 不分散则轮询无换 IP 收益。
+//     典型触发：-scan 失败回退到注册端点（reg.json 单 host 多 port，见 registration.go:44-49），
+//     此时 edgeAddrs 满足数量但 host 集中在一个 WARP IP——decideRotate 不感知 scan 是否真的成功，
+//     仍返 size=N，main 日志打了「轮询自动启用 池=N」却实际不轮换。此处唯一 host 校验是这条
+//     语义漏检的最后一道闸，warning 提醒用户「池建不起来、回退单连接」与日志自洽。
+//   - socks5 上游未启用（socks5Dialer 为 nil）：直连 anycast 同 colo，轮询无换 IP 收益；
+//     main 层 decideRotate 已拦此组合，此处再防一道是纵深防御。
+//
+// 串行建池（非并发）：socks5 上游并发 TCP 控制连接数常有上限（典型 <10），N=4 串行
+// 安全；并发建池可能撞上游限。建一条失败即整池放弃——避免「半池」难推理状态。
+func (c *MasqueClient) buildPool(ctx context.Context, rotateSize int) bool {
+	if rotateSize <= 1 || len(c.edgeAddrs) < rotateSize || c.socks5Dialer == nil {
+		if rotateSize > 1 && c.socks5Dialer == nil {
+			// 显式开了轮询却没 socks5——理论上 main 已 fatal 拦，此处兜底防逻辑漏。
+			log.Printf("⚠ 轮询未启用：未启用 -socks5，直连下轮询无换 IP 收益")
 		}
-		log.Printf("MASQUE 连接失败（%v），%s 后重试 ...", err, backoff)
-		timer := time.NewTimer(backoff)
-		select {
-		case <-timer.C:
-		case <-lifeCtx.Done():
-			timer.Stop()
-			lifeStop()
-			return nil, net.ErrClosed
-		}
-		if backoff < reconnectRetryMax {
-			backoff *= 2
-			if backoff > reconnectRetryMax {
-				backoff = reconnectRetryMax
-			}
+		return false
+	}
+
+	// 唯一 host 计数：edgeAddrs 前 rotateSize 个端点（建池用这部分）的不同 host 数。
+	// 不足则建池没意义（多槽同 IP，不轮换出口 IP）——回退单连接 + warning，与 main 日志自洽。
+	uniqueHosts := make(map[string]struct{}, rotateSize)
+	for i := 0; i < rotateSize; i++ {
+		if host, _, err := net.SplitHostPort(c.edgeAddrs[i]); err == nil {
+			uniqueHosts[host] = struct{}{}
+		} else {
+			// SplitHostPort 失败（地址格式异常）是 buildPool 不应容忍的，记入并跳过此槽计数。
+			// 仍允许后续拨号尝试——若多端点都非法，dialForRotate 会在拨号时返错自然降级。
+			uniqueHosts[c.edgeAddrs[i]] = struct{}{}
 		}
 	}
+	if len(uniqueHosts) < rotateSize {
+		log.Printf("⚠ 端点轮询未启用：前 %d 个端点只有 %d 个唯一 host（多数同 IP，轮询无换 IP 收益）；回退到单连接",
+			rotateSize, len(uniqueHosts))
+		return false
+	}
+
+	pool := make([]*connBundle, rotateSize)
+	for i := 0; i < rotateSize; i++ {
+		// 每槽绑固定端点 edgeAddrs[i]（已保证 len(edgeAddrs) >= rotateSize，不用模）。
+		// 走 dialForRotate 而非直调 dialAddr：让测试可经 dialFn 注入假拨号覆盖建池路径。
+		bundle, err := c.dialForRotate(ctx, c.edgeAddrs[i])
+		if err != nil {
+			// 整池放弃：先 close 已建好的 bundle，避免半成品泄漏。
+			for j := 0; j < i; j++ {
+				if pool[j] != nil {
+					pool[j].close("buildPool failed")
+				}
+			}
+			log.Printf("⚠ 端点轮询建池第 %d 槽（%s）失败：%v；回退到单连接", i, c.edgeAddrs[i], err)
+			return false
+		}
+		pool[i] = bundle
+	}
+
+	c.rotateSize = rotateSize
+	c.pool = pool
+	c.perSlotReconnect = make([]sync.Mutex, rotateSize)
+	log.Printf("✓ 端点轮询已就绪（池大小=%d，端点=%v，per-request round-robin）", rotateSize, c.edgeAddrs[:rotateSize])
+	return true
 }
 
 // dial tries each candidate edge address in turn, starting from the one that
@@ -465,9 +527,6 @@ func (c *MasqueClient) currentConnection() (*connBundle, error) {
 	if c.closed || c.cur == nil {
 		return nil, net.ErrClosed
 	}
-	if c.cur.quicConn == nil || c.cur.h3Client == nil {
-		return nil, net.ErrClosed
-	}
 	// Check if the QUIC connection is still alive — the context is canceled
 	// when the connection is closed by either side or reaches idle timeout.
 	select {
@@ -478,248 +537,114 @@ func (c *MasqueClient) currentConnection() (*connBundle, error) {
 	return c.cur, nil
 }
 
-// openRequestStream opens an H3 request stream and returns the bundle that owns
-// it. Keeping that identity is important: a failure on an old stream must never
-// retire a connection another goroutine has already installed.
-func (c *MasqueClient) openRequestStream(ctx context.Context) (*http3.RequestStream, *connBundle, error) {
-	var firstErr error
-	for attempt := 0; attempt < 2; attempt++ {
-		bundle, err := c.currentConnection()
+// openRequestStream opens an H3 request stream. If the underlying connection is
+// dead or unresponsive, it triggers a single automatic reconnection.
+//
+// 池模式（rotateSize>0）与退化模式（rotateSize==0）的差别仅在此处汇聚：
+//   - pickBundle 返回 (bundle, idx)：idx>=0 走池、idx==-1 走退化（currentConnection 路径）。
+//   - 重连分发：池走 reconnectSlot(idx, stale)（槽位级、不阻塞他槽），退化走 reconnect(stale)
+//     （全局 reconnectMu、byte-for-byte 原行为）。两条路径在 openRequestStream 这里靠 idx
+//     路由，主流程在此之外不变——重试一次策略保留。
+func (c *MasqueClient) openRequestStream(ctx context.Context) (*http3.RequestStream, error) {
+	bundle, idx, err := c.pickBundle()
+	if err != nil {
+		// Connection is dead — reconnect immediately.
+		log.Printf("HTTP/3 连接已失效，正在重连 ...")
+		if reconnectErr := c.reconnectBundle(ctx, idx, nil); reconnectErr != nil {
+			return nil, fmt.Errorf("连接已失效，重连失败：%w", reconnectErr)
+		}
+		bundle, idx, err = c.pickBundle()
 		if err != nil {
-			log.Printf("HTTP/3 连接已失效，正在重连 ...")
-			if reconnectErr := c.reconnect(ctx, nil); reconnectErr != nil {
-				return nil, nil, fmt.Errorf("连接已失效，重连失败：%w", reconnectErr)
-			}
-			bundle, err = c.currentConnection()
-			if err != nil {
-				return nil, nil, err
-			}
+			return nil, err
 		}
-
-		openCtx, cancel := context.WithTimeout(ctx, streamOpenTimeout)
-		stream, err := bundle.h3Client.OpenRequestStream(openCtx)
-		cancel()
-		if err == nil {
-			return stream, bundle, nil
-		}
-		if ctx.Err() != nil {
-			return nil, nil, context.Cause(ctx)
-		}
-		if firstErr == nil {
-			firstErr = err
-		}
-
-		// OpenStreamSync also waits when the peer's concurrent-stream grant is
-		// exhausted. Its timeout is therefore not evidence that the shared
-		// connection is bad: fail only this request and preserve every existing
-		// tunnel. A stream that actually opens still gets the CONNECT exchange
-		// health check below, where a path blackhole is unambiguous.
-		if !bundle.streamOpenRequiresReconnect(err) {
-			return nil, nil, fmt.Errorf("等待 HTTP/3 流容量失败：%w", err)
-		}
-		retired := c.retireConnection(bundle)
-		if attempt != 0 {
-			if retired {
-				log.Printf("重连后 HTTP/3 流仍无法打开（%v），淘汰连接", err)
-			}
-			return nil, nil, fmt.Errorf("首次打开流失败：%v；重连后仍失败：%w", firstErr, err)
-		}
-		if retired {
-			log.Printf("HTTP/3 流打开失败（%v），淘汰当前连接并重连 ...", err)
-		}
-		if reconnectErr := c.reconnect(ctx, bundle); reconnectErr != nil {
-			return nil, nil, fmt.Errorf("打开请求流失败：%v；重连失败：%w", err, reconnectErr)
-		}
+		return bundle.h3Client.OpenRequestStream(ctx)
 	}
-	return nil, nil, firstErr
-}
 
-func (b *connBundle) streamOpenRequiresReconnect(err error) bool {
+	// Use a derived context with 10s timeout so if the H3 connection is in a bad
+	// state (server GOAWAY, stream limit exhaustion, etc.) we don't hang forever.
+	openCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	stream, err := bundle.h3Client.OpenRequestStream(openCtx)
 	if err == nil {
-		return false
+		return stream, nil
 	}
-	return !isTimeout(err)
+
+	// If the outer context (caller) is done, propagate immediately.
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+
+	// Stream open failed (incl. timeout) — reconnect and retry once.
+	log.Printf("HTTP/3 流打开失败（%v），正在重连 ...", err)
+	if reconnectErr := c.reconnectBundle(ctx, idx, bundle); reconnectErr != nil {
+		return nil, fmt.Errorf("打开请求流失败：%v；重连失败：%w", err, reconnectErr)
+	}
+	bundle, idx, err = c.pickBundle()
+	if err != nil {
+		return nil, err
+	}
+	return bundle.h3Client.OpenRequestStream(ctx)
 }
 
-// reconnect coalesces every concurrent recovery attempt and lets each caller
-// stop waiting independently. A caller whose context has expired can therefore
-// return its SOCKS error promptly while the one shared recovery continues for
-// future requests.
-func (c *MasqueClient) reconnect(ctx context.Context, stale *connBundle) error {
-	current, err := c.currentConnection()
-	if err == nil && current != stale {
-		return nil // another goroutine already replaced stale
+// reconnectBundle 是 openRequestStream 的重连路由分发：按 idx 选池或退化路径。
+//   - idx >= 0：池模式，走 reconnectSlot(idx, stale)，传与原超时一致的 35s background ctx
+//     （原 reconnect 内部即用 35s），让槽位重连与单连接重连等待时间对齐。
+//   - idx == -1：退化模式，走 reconnect(stale)（全局 reconnectMu + 原 dial-by-addrIdx 序试行为）。
+//
+// 抽此 helper 是为把「路由分发」从 openRequestStream 主流程剥离——两处重连点（死-on-pick
+// 与 stream-open-fail）共用同一路由逻辑，主流程保持清晰。
+func (c *MasqueClient) reconnectBundle(ctx context.Context, idx int, stale *connBundle) error {
+	if idx >= 0 {
+		// 透传调用方 ctx 并叠加 35s 上限：当调用方（如 SOCKS5 HandleSOCKS5 的请求超时）取消
+		// 时，槽位拨号也立即取消、释放 perSlotReconnect[idx] 锁，避免「调用方已放弃、拨号仍在
+		// 背景占锁 35s」的尾部锁占用（被二期 review code 报为 H2）。退化 reconnect 路径维持
+		// 一期 background+35s 行为不动——改它需扩散到原 currentConnection 等调用点，本期范围外。
+		dialCtx, cancel := context.WithTimeout(ctx, 35*time.Second)
+		defer cancel()
+		return c.reconnectSlot(dialCtx, idx, stale)
 	}
-	if c.isClosed() {
-		return net.ErrClosed
-	}
+	return c.reconnect(stale)
+}
 
+func (c *MasqueClient) reconnect(stale *connBundle) error {
 	c.reconnectMu.Lock()
-	// Recheck after taking reconnectMu: a flight may have completed between the
-	// optimistic check above and this critical section.
-	current, err = c.currentConnection()
-	if err == nil && current != stale {
-		c.reconnectMu.Unlock()
+	defer c.reconnectMu.Unlock()
+
+	current, err := c.currentConnection()
+	if err != nil {
+		// Connection already dead — proceed to dial a new one.
+	} else if current != stale {
+		// Another goroutine already reconnected.
 		return nil
 	}
-	if c.isClosed() {
-		c.reconnectMu.Unlock()
-		return net.ErrClosed
+
+	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
+	defer cancel()
+	bundle, err := c.dial(ctx)
+	if err != nil {
+		return err
 	}
 
-	flight := c.reconnectFlight
-	if flight == nil {
-		flight = &reconnectFlight{done: make(chan struct{})}
-		c.reconnectFlight = flight
-		go c.runReconnect(flight)
-	}
-	c.reconnectMu.Unlock()
-
-	select {
-	case <-flight.done:
-		return flight.err
-	case <-ctx.Done():
-		return context.Cause(ctx)
-	case <-c.lifeCtx.Done():
-		return net.ErrClosed
-	}
-}
-
-func (c *MasqueClient) runReconnect(flight *reconnectFlight) {
-	dial := c.dial
-	if c.dialFn != nil {
-		dial = c.dialFn
-	}
-
-	var err error
-	backoff := reconnectRetryInitial
-	for {
-		var bundle *connBundle
-		bundle, err = dial(c.lifeCtx)
-		if err == nil && bundle == nil {
-			err = errors.New("边缘拨号返回了空连接")
-		}
-		if err == nil {
-			c.connMu.Lock()
-			if c.closed {
-				c.connMu.Unlock()
-				bundle.close("client closed")
-				err = net.ErrClosed
-			} else {
-				old := c.cur
-				c.cur = bundle
-				c.connMu.Unlock()
-
-				// Abort the old QUIC transport before closing protocol layers nested in
-				// its streams. This makes TLS close_notify writes fail immediately rather
-				// than blocking forever on a blackholed connection.
-				old.close("replaced")
-				c.invalidateDoHBundle(old)
-				log.Println("HTTP/3 连接已重建")
-			}
-			break
-		}
-		if c.lifeCtx.Err() != nil || c.isClosed() {
-			err = net.ErrClosed
-			break
-		}
-
-		// Keep one recovery flight alive across a network outage. This both avoids a
-		// dial storm from concurrent SOCKS requests and means the client heals as
-		// soon as connectivity returns, even if the request that noticed the outage
-		// has already timed out.
-		log.Printf("HTTP/3 重连失败（%v），%s 后重试", err, backoff)
-		timer := time.NewTimer(backoff)
-		select {
-		case <-timer.C:
-		case <-c.lifeCtx.Done():
-			timer.Stop()
-			err = net.ErrClosed
-		}
-		if c.lifeCtx.Err() != nil {
-			break
-		}
-		if backoff < reconnectRetryMax {
-			backoff *= 2
-			if backoff > reconnectRetryMax {
-				backoff = reconnectRetryMax
-			}
-		}
-	}
-
-	c.reconnectMu.Lock()
-	flight.err = err
-	if c.reconnectFlight == flight {
-		c.reconnectFlight = nil
-	}
-	close(flight.done)
-	c.reconnectMu.Unlock()
-}
-
-// retireConnection atomically removes stale from service and then aborts it.
-// New requests will join the reconnect flight instead of opening more streams
-// on a connection already proven unable to complete CONNECT exchanges.
-func (c *MasqueClient) retireConnection(stale *connBundle) bool {
-	if stale == nil {
-		return false
-	}
 	c.connMu.Lock()
-	if c.closed || c.cur != stale {
+	if c.closed {
 		c.connMu.Unlock()
-		return false
+		bundle.close("client closed")
+		return net.ErrClosed
 	}
-	c.cur = nil
+	old := c.cur
+	c.cur = bundle
 	c.connMu.Unlock()
 
-	stale.close("unresponsive")
-	c.invalidateDoHBundle(stale)
-	return true
-}
+	old.close("replaced")
 
-func (b *connBundle) receivedPackets() uint64 {
-	if b == nil || b.quicConn == nil {
-		return 0
-	}
-	return b.quicConn.ConnectionStats().PacketsReceived
-}
+	// The DoH connection rode inside a stream on the connection we just dropped,
+	// so it is dead too. Clear it now rather than leaving the next lookup to
+	// discover that and pay a failed round trip.
+	c.invalidateDoH(nil)
 
-// connectFailureRequiresReconnect applies the transport-vs-target distinction
-// to a CONNECT exchange failure. No received QUIC packet during the whole
-// exchange is strong evidence of a path blackhole and recovers immediately. If
-// the path made progress, require several distinct target failures in one short
-// window before declaring the shared H3 session bad.
-func (b *connBundle) connectFailureRequiresReconnect(err, callerErr error, target string, packetsBefore uint64) bool {
-	if !shouldReconnectH3(err, callerErr) {
-		return false
-	}
-	if !isTimeout(err) {
-		return true
-	}
-	if b.receivedPackets() <= packetsBefore {
-		return true
-	}
-	return b.noteProgressingCONNECTFailure(target, time.Now())
-}
-
-func (b *connBundle) noteProgressingCONNECTFailure(target string, now time.Time) bool {
-	b.healthMu.Lock()
-	defer b.healthMu.Unlock()
-	if b.failureSince.IsZero() || now.Sub(b.failureSince) > connectFailureWindow {
-		b.failureSince = now
-		b.failureTargets = make(map[string]struct{})
-	}
-	b.failureTargets[target] = struct{}{}
-	return len(b.failureTargets) >= connectFailureTargets
-}
-
-func (b *connBundle) noteCONNECTSuccess() {
-	if b == nil {
-		return
-	}
-	b.healthMu.Lock()
-	b.failureSince = time.Time{}
-	b.failureTargets = nil
-	b.healthMu.Unlock()
+	log.Println("HTTP/3 连接已重建")
+	return nil
 }
 
 // SOCKS5 request commands (RFC 1928 §4).
@@ -845,7 +770,7 @@ func (c *MasqueClient) HandleSOCKS5(ctx context.Context, conn net.Conn, cfg SOCK
 		return
 	}
 
-	targetAddr, err := parseSOCKS5Addr(data)
+	targetAddr, _, err := parseSOCKS5Addr(data)
 	if err != nil {
 		sendSocks5Err(conn, 0x08)
 		return
@@ -854,11 +779,10 @@ func (c *MasqueClient) HandleSOCKS5(ctx context.Context, conn net.Conn, cfg SOCK
 	log.Printf("SOCKS5 CONNECT %s", targetAddr)
 	conn.SetDeadline(time.Time{})
 
-	// Bound DNS resolution + tunnel setup. Derived from the caller's
+	// Bound DNS resolution + tunnel setup at 20s. Derived from the caller's
 	// context so a shutdown cancels setup that is still in flight instead of
-	// letting it run to the full timeout. The budget includes one reconnect and
-	// retry when a stale H3 session is detected.
-	setupCtx, setupCancel := context.WithTimeout(ctx, socksSetupTimeout)
+	// letting it run to the full timeout.
+	setupCtx, setupCancel := context.WithTimeout(ctx, 20*time.Second)
 	defer setupCancel()
 
 	connectTarget, hostHeader, err := c.resolveTarget(setupCtx, targetAddr)
@@ -868,6 +792,14 @@ func (c *MasqueClient) HandleSOCKS5(ctx context.Context, conn net.Conn, cfg SOCK
 		return
 	}
 	log.Printf("目标已解析：%s（主机名：%s）", connectTarget, hostHeader)
+
+	// H3 CONNECT
+	reqStream, err := c.openRequestStream(setupCtx)
+	if err != nil {
+		log.Printf("打开请求流失败：%v", err)
+		sendSocks5Err(conn, 0x04)
+		return
+	}
 
 	req := &http.Request{
 		Method: "CONNECT",
@@ -883,15 +815,14 @@ func (c *MasqueClient) HandleSOCKS5(ctx context.Context, conn net.Conn, cfg SOCK
 		req.Header.Set("Host", hostHeader+":"+hostPort)
 	}
 
-	// H3 CONNECT. If a locally-opened stream gets no response, the QUIC path can
-	// be dead even while quicConn.Context still says it is alive. Retire that
-	// exact connection generation, redial once, and retry the exchange.
-	reqStream, _, resp, err := c.establishCONNECT(setupCtx, req, connectExchangeTimeout)
+	resp, err := connectThroughEdge(reqStream, req, connectDeadline(setupCtx, connectExchangeTimeout))
 	if err != nil {
 		log.Printf("H3 CONNECT %s 失败：%v", connectTarget, err)
+		releaseStream(reqStream)
 		sendSocks5Err(conn, 0x04)
 		return
 	}
+
 	if resp.StatusCode != 200 {
 		log.Printf("H3 CONNECT %s -> %d", connectTarget, resp.StatusCode)
 
@@ -916,12 +847,11 @@ func (c *MasqueClient) HandleSOCKS5(ctx context.Context, conn net.Conn, cfg SOCK
 	var once sync.Once
 	release := func() {
 		once.Do(func() {
-			// Both directions must be canceled. Close only sends FIN and does not
-			// unblock a Write parked on QUIC flow control after the path dies.
+			// CancelRead unblocks a reader parked on a stream the edge will never
+			// close; Close ends the send side; conn.Close unblocks the other copy.
 			reqStream.CancelRead(quic.StreamErrorCode(http3.ErrCodeNoError))
-			reqStream.CancelWrite(quic.StreamErrorCode(http3.ErrCodeNoError))
-			_ = reqStream.Close()
-			_ = conn.Close()
+			reqStream.Close()
+			conn.Close()
 		})
 	}
 	defer release()
@@ -945,7 +875,7 @@ func (c *MasqueClient) HandleSOCKS5(ctx context.Context, conn net.Conn, cfg SOCK
 		// A clean EOF may be a half-close: the client is done sending but still
 		// reading. Let the response drain, bounded so an abandoned tunnel cannot
 		// hold a stream indefinitely.
-		_ = reqStream.Close()
+		reqStream.Close()
 		select {
 		case <-drained:
 		case <-time.After(relayDrainGrace):
@@ -964,88 +894,8 @@ func (c *MasqueClient) HandleSOCKS5(ctx context.Context, conn net.Conn, cfg SOCK
 // the target closes — so a stream abandoned that way is never returned to the
 // edge's finite concurrent-stream grant.
 func releaseStream(s *http3.RequestStream) {
-	if s == nil {
-		return
-	}
 	s.CancelRead(quic.StreamErrorCode(http3.ErrCodeNoError))
-	s.CancelWrite(quic.StreamErrorCode(http3.ErrCodeNoError))
-	_ = s.Close()
-}
-
-// establishCONNECT performs a CONNECT exchange and retries once on a fresh H3
-// connection when the error indicates that the shared connection, rather than
-// the requested target, became unusable. The returned bundle owns stream.
-func (c *MasqueClient) establishCONNECT(ctx context.Context, req *http.Request, timeout time.Duration) (*http3.RequestStream, *connBundle, *http.Response, error) {
-	var firstErr error
-	for attempt := 0; attempt < 2; attempt++ {
-		stream, bundle, err := c.openRequestStream(ctx)
-		if err != nil {
-			if firstErr != nil {
-				return nil, nil, nil, fmt.Errorf("首次 CONNECT 失败：%v；重连后打开流失败：%w", firstErr, err)
-			}
-			return nil, nil, nil, err
-		}
-
-		packetsBefore := bundle.receivedPackets()
-		resp, err := connectThroughEdge(stream, req, connectDeadline(ctx, timeout))
-		if err == nil {
-			bundle.noteCONNECTSuccess()
-			return stream, bundle, resp, nil
-		}
-		releaseStream(stream)
-		if firstErr == nil {
-			firstErr = err
-		}
-		if !bundle.connectFailureRequiresReconnect(err, ctx.Err(), req.Host, packetsBefore) {
-			return nil, nil, nil, err
-		}
-
-		retired := c.retireConnection(bundle)
-		if attempt != 0 {
-			// The retry budget is exhausted, but leave no connection that this
-			// attempt proved unhealthy in service. The next request starts a fresh
-			// singleflight reconnect instead of repeating the timeout on it.
-			if retired {
-				log.Printf("重试的 HTTP/3 CONNECT 仍失败（%v），淘汰连接", err)
-			}
-			return nil, nil, nil, err
-		}
-		if retired {
-			log.Printf("HTTP/3 CONNECT 交换失败（%v），淘汰当前连接并重连 ...", err)
-		}
-		if reconnectErr := c.reconnect(ctx, bundle); reconnectErr != nil {
-			return nil, nil, nil, fmt.Errorf("%v；恢复 HTTP/3 连接失败：%w", err, reconnectErr)
-		}
-	}
-	return nil, nil, nil, firstErr
-}
-
-// shouldReconnectH3 distinguishes a dead shared transport from a target-level
-// stream rejection. CONNECT response deadlines are the important case: QUIC
-// can remain locally "alive" during a path blackhole and still allow new stream
-// objects, while no request bytes or response frames reach the edge.
-func shouldReconnectH3(err, callerErr error) bool {
-	if err == nil || callerErr != nil {
-		return false
-	}
-	if isTimeout(err) {
-		return true
-	}
-
-	// A stream reset is scoped to one CONNECT (for example, the edge rejected a
-	// target). Other H3/QUIC I/O failures imply connection-level state and are
-	// safe to recover by generation: if another goroutine already reconnected,
-	// reconnect observes bundle != current and becomes a no-op.
-	var streamErr *quic.StreamError
-	return !errors.As(err, &streamErr)
-}
-
-func isTimeout(err error) bool {
-	if errors.Is(err, context.DeadlineExceeded) {
-		return true
-	}
-	var netErr net.Error
-	return errors.As(err, &netErr) && netErr.Timeout()
+	s.Close()
 }
 
 // connectThroughEdge runs the H3 CONNECT exchange on stream and returns the edge's
@@ -1077,13 +927,10 @@ func connectThroughEdge(stream *http3.RequestStream, req *http.Request, deadline
 // caller's remaining budget when it has one, otherwise a fixed fallback so the
 // exchange can never be unbounded.
 func connectDeadline(ctx context.Context, fallback time.Duration) time.Time {
-	deadline := time.Now().Add(fallback)
 	if dl, ok := ctx.Deadline(); ok {
-		if dl.Before(deadline) {
-			return dl
-		}
+		return dl
 	}
-	return deadline
+	return time.Now().Add(fallback)
 }
 
 // resolveTarget resolves through WARP tunnel DNS
@@ -1246,60 +1093,25 @@ type dohConn struct {
 	stream *http3.RequestStream
 	tls    *tls.Conn
 	h2     *http2.ClientConn
-	bundle *connBundle
-	once   sync.Once
-
-	healthMu       sync.Mutex
-	failureSince   time.Time
-	failureTargets map[string]struct{}
 }
 
 func (d *dohConn) close() {
 	if d == nil {
 		return
 	}
-	d.once.Do(func() {
-		// Abort the carrier first. Closing H2/TLS first can make tls.Close block
-		// writing close_notify to a flow-controlled H3 stream on a dead path.
-		releaseStream(d.stream)
-		if d.h2 != nil {
-			_ = d.h2.Close()
-		}
-		if d.tls != nil {
-			_ = d.tls.Close()
-		}
-	})
-}
-
-func (d *dohConn) queryTimeoutRequiresReconnect(callerErr error, target string, packetsBefore uint64) bool {
-	if d == nil || callerErr != nil {
-		return false
+	if d.h2 != nil {
+		d.h2.Close()
 	}
-	if d.bundle == nil || d.bundle.receivedPackets() <= packetsBefore {
-		return true
+	if d.tls != nil {
+		d.tls.Close()
 	}
-	return d.noteProgressingQueryTimeout(target, time.Now())
-}
-
-func (d *dohConn) noteProgressingQueryTimeout(target string, now time.Time) bool {
-	d.healthMu.Lock()
-	defer d.healthMu.Unlock()
-	if d.failureSince.IsZero() || now.Sub(d.failureSince) > connectFailureWindow {
-		d.failureSince = now
-		d.failureTargets = make(map[string]struct{})
+	if d.stream != nil {
+		// Close() only shuts the send direction. Without cancelling the receive
+		// direction too, the stream stays half-open and keeps holding its share
+		// of the connection-level flow-control window.
+		d.stream.CancelRead(quic.StreamErrorCode(http3.ErrCodeNoError))
+		d.stream.Close()
 	}
-	d.failureTargets[target] = struct{}{}
-	return len(d.failureTargets) >= connectFailureTargets
-}
-
-func (d *dohConn) noteQuerySuccess() {
-	if d == nil {
-		return
-	}
-	d.healthMu.Lock()
-	d.failureSince = time.Time{}
-	d.failureTargets = nil
-	d.healthMu.Unlock()
 }
 
 // dohDialFlight is one in-progress DoH dial that other callers wait on instead
@@ -1351,45 +1163,36 @@ func (c *MasqueClient) dohConnection(ctx context.Context) (*dohConn, error) {
 			dial = c.dialDoHFn
 		}
 		d, err := dial(ctx)
-		if err == nil && d == nil {
-			err = errors.New("DoH 拨号返回了空连接")
+
+		// closed is guarded by connMu, so it is read through isClosed() rather
+		// than under dohMu. The two checks are deliberately sequential, never
+		// nested: Close() runs invalidateDoH (dohMu) and then takes connMu, so
+		// acquiring connMu while holding dohMu would invert that order.
+		if err == nil && c.isClosed() {
+			d.close()
+			d, err = nil, net.ErrClosed
 		}
 
-		// Validate and install while holding connMu for reading. Reconnect and Close
-		// both take it for writing before invalidating DoH, so neither can swap the
-		// carrier between this generation check and the install. Without this, a
-		// dial that completed alongside reconnect could orphan a dead DoH connection
-		// after old-generation cleanup had already run.
-		if err == nil {
-			c.connMu.RLock()
-			switch {
-			case c.closed:
-				c.connMu.RUnlock()
-				d.close()
-				d, err = nil, net.ErrClosed
-			case d.bundle != nil && c.cur != d.bundle:
-				c.connMu.RUnlock()
-				d.close()
-				d, err = nil, fmt.Errorf("%w：DoH 所属的 HTTP/3 连接已被替换", errDoHTransport)
-			default:
-				c.dohMu.Lock()
-				c.doh = d
-				c.dohDial = nil
-				flight.conn, flight.err = d, nil
-				c.dohMu.Unlock()
-				c.connMu.RUnlock()
-				close(flight.done)
-				return d, nil
-			}
-		}
-
-		// Error publication does not need connMu: no connection was installed.
 		c.dohMu.Lock()
+		if err == nil {
+			c.doh = d
+		}
 		c.dohDial = nil
 		flight.conn, flight.err = d, err
 		c.dohMu.Unlock()
 		close(flight.done)
-		return nil, err
+
+		if err != nil {
+			return nil, err
+		}
+
+		// Close() may have run while we were dialing, in which case its
+		// invalidateDoH happened before this install and would leave d orphaned.
+		if c.isClosed() {
+			c.invalidateDoH(d)
+			return nil, net.ErrClosed
+		}
+		return d, nil
 	}
 }
 
@@ -1459,25 +1262,12 @@ func (c *MasqueClient) invalidateDoH(stale *dohConn) {
 	victim.close()
 }
 
-// invalidateDoHBundle retires only a DoH connection carried by stale. A new
-// DoH connection may already have been installed on the replacement bundle by
-// the time old cleanup runs, and must not be torn down with it.
-func (c *MasqueClient) invalidateDoHBundle(stale *connBundle) {
-	if stale == nil {
-		return
-	}
-	c.dohMu.Lock()
-	victim := c.doh
-	if victim == nil || victim.bundle != stale {
-		c.dohMu.Unlock()
-		return
-	}
-	c.doh = nil
-	c.dohMu.Unlock()
-	victim.close()
-}
-
 func (c *MasqueClient) dialDoH(ctx context.Context, addr string) (*dohConn, error) {
+	reqStream, err := c.openRequestStream(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("打开 DoH 流失败：%w", err)
+	}
+
 	req := &http.Request{
 		Method: "CONNECT",
 		Host:   addr,
@@ -1486,8 +1276,9 @@ func (c *MasqueClient) dialDoH(ctx context.Context, addr string) (*dohConn, erro
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
 
-	reqStream, bundle, resp, err := c.establishCONNECT(ctx, req, dohHandshakeTimeout)
+	resp, err := connectThroughEdge(reqStream, req, connectDeadline(ctx, dohHandshakeTimeout))
 	if err != nil {
+		releaseStream(reqStream)
 		return nil, fmt.Errorf("到 %s 的 DoH CONNECT 失败：%w", addr, err)
 	}
 	if resp.StatusCode != 200 {
@@ -1542,7 +1333,7 @@ func (c *MasqueClient) dialDoH(ctx context.Context, addr string) (*dohConn, erro
 	}
 
 	log.Printf("DoH 连接就绪：%s（h2 多路复用）", addr)
-	return &dohConn{addr: addr, stream: reqStream, tls: tlsConn, h2: h2Conn, bundle: bundle}, nil
+	return &dohConn{addr: addr, stream: reqStream, tls: tlsConn, h2: h2Conn}, nil
 }
 
 // dnsQuery resolves host over the shared DoH connection, asking for A and AAAA
@@ -1644,18 +1435,11 @@ func (c *MasqueClient) dnsQueryType(ctx context.Context, d *dohConn, host string
 	req.Header.Set("user-agent", "")
 
 	// Concurrent RoundTrips are multiplexed onto separate H2 streams.
-	packetsBefore := d.bundle.receivedPackets()
 	resp, err := d.h2.RoundTrip(req)
 	if err != nil {
+		// A deadline or cancellation is this query's problem, not the shared
+		// connection's — retiring it here would abort every sibling lookup.
 		if queryCtx.Err() != nil {
-			// A caller cancellation says nothing about connection health. A query's
-			// own timeout is different: no QUIC progress, or timeouts for several
-			// distinct names, means this long-lived H2 carrier is half-dead. Retire it
-			// so resolveDNS retries on a fresh DoH connection.
-			if d.queryTimeoutRequiresReconnect(ctx.Err(), host, packetsBefore) {
-				c.invalidateDoH(d)
-				return nil, 0, fmt.Errorf("%w：%s 的查询超时：%v", errDoHTransport, host, err)
-			}
 			return nil, 0, fmt.Errorf("%s 的 DoH 查询失败：%w", host, err)
 		}
 		c.invalidateDoH(d)
@@ -1665,21 +1449,15 @@ func (c *MasqueClient) dnsQueryType(ctx context.Context, d *dohConn, host string
 	resp.Body.Close()
 	if readErr != nil {
 		if queryCtx.Err() != nil {
-			if d.queryTimeoutRequiresReconnect(ctx.Err(), host, packetsBefore) {
-				c.invalidateDoH(d)
-				return nil, 0, fmt.Errorf("%w：读取 %s 的响应超时：%v", errDoHTransport, host, readErr)
-			}
 			return nil, 0, fmt.Errorf("读取 %s 的 DoH 响应失败：%w", host, readErr)
 		}
 		c.invalidateDoH(d)
 		return nil, 0, fmt.Errorf("%w：读取响应失败：%v", errDoHTransport, readErr)
 	}
 	if resp.StatusCode != http.StatusOK {
-		d.noteQuerySuccess()
 		return nil, 0, fmt.Errorf("%s 的 DoH 请求返回状态 %d", host, resp.StatusCode)
 	}
 
-	d.noteQuerySuccess()
 	return parseDoHAnswer(body, host, qtype)
 }
 
@@ -1732,26 +1510,32 @@ func parseDoHAnswer(body []byte, host string, qtype dnsmessage.Type) (net.IP, ti
 
 func (c *MasqueClient) Close() error {
 	c.closeOnce.Do(func() {
+		c.invalidateDoH(nil)
+
 		c.connMu.Lock()
 		c.closed = true
-		bundle := c.cur
+		// 池模式遍历全池关闭；退化模式关 c.cur。把待关 bundle 收集后释放锁再 close——
+		// 避免持 connMu 期间 close（close 触发 quicConn.CloseWithError 回调可能逆入锁）。
+		var toClose []*connBundle
+		if c.rotateSize > 0 && len(c.pool) > 0 {
+			toClose = c.pool
+			c.pool = nil
+		} else if c.cur != nil {
+			toClose = []*connBundle{c.cur}
+		}
 		c.cur = nil
 		c.connMu.Unlock()
 
-		// Cancel reconnect dials first, then abort QUIC so every nested H3 stream
-		// becomes non-writable before TLS/H2 cleanup attempts close_notify.
-		if c.lifeStop != nil {
-			c.lifeStop()
+		for _, b := range toClose {
+			b.close("bye")
 		}
-		bundle.close("bye")
-		c.invalidateDoH(nil)
 	})
 	return nil
 }
 
-func parseSOCKS5Addr(data []byte) (string, error) {
+func parseSOCKS5Addr(data []byte) (addr string, hostOnly string, err error) {
 	if len(data) < 4 {
-		return "", fmt.Errorf("数据过短")
+		return "", "", fmt.Errorf("数据过短")
 	}
 	addrType := data[3]
 	var host string
@@ -1759,33 +1543,33 @@ func parseSOCKS5Addr(data []byte) (string, error) {
 	switch addrType {
 	case 0x01:
 		if len(data) < 10 {
-			return "", fmt.Errorf("IPv4 地址数据过短")
+			return "", "", fmt.Errorf("IPv4 地址数据过短")
 		}
 		host = net.IP(data[4:8]).String()
 		port = int(data[8])<<8 | int(data[9])
 	case 0x03:
 		addrLen := int(data[4])
 		if len(data) < 5+addrLen+2 {
-			return "", fmt.Errorf("域名数据过短")
+			return "", "", fmt.Errorf("域名数据过短")
 		}
 		host = string(data[5 : 5+addrLen])
 		port = int(data[5+addrLen])<<8 | int(data[5+addrLen+1])
 	case 0x04:
 		if len(data) < 22 {
-			return "", fmt.Errorf("IPv6 地址数据过短")
+			return "", "", fmt.Errorf("IPv6 地址数据过短")
 		}
 		host = net.IP(data[4:20]).String()
 		port = int(data[20])<<8 | int(data[21])
 	default:
-		return "", fmt.Errorf("未知的地址类型：%d", addrType)
+		return "", "", fmt.Errorf("未知的地址类型：%d", addrType)
 	}
 	if port == 0 {
-		return "", fmt.Errorf("目标端口为 0")
+		return "", "", fmt.Errorf("目标端口为 0")
 	}
 	// JoinHostPort, not Sprintf("%s:%d"): an IPv6 literal needs brackets. Without
 	// them the result ("2606:4700::1:443") is not a parseable host:port at all,
 	// and the edge answers such a CONNECT by cancelling the stream.
-	return net.JoinHostPort(host, strconv.Itoa(port)), nil
+	return net.JoinHostPort(host, strconv.Itoa(port)), host, nil
 }
 
 func sendSocks5Err(conn net.Conn, code byte) {

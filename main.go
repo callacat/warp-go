@@ -58,6 +58,16 @@ func usage() {
                         仅作用于正式隧道拨号路径；-scan 的探针仍直连边缘（设计如此）。
                         启用后会失去 quic-go 的 DF/ECN/GSO 等内核级 UDP 优化——经
                         中继的隧道瓶颈在代理，可接受。已知限制见项目计划文档。
+  -rotate             端点轮询换 IP（默认 auto，无需显式传）。与 -socks5 + -scan 同开时
+                        自动启用：把 -scan 选出的 top-N 端点建成 N 条独立 QUIC 连接，按
+                        per-request round-robin 轮转发 H3 流，因不同端点经 socks5 出口
+                        IP 不同，从而实现代理池式 IP 轮换。池大小 = -scan-top（默认 4）。
+                        buildPool 串行建 N 条 socks5 控制连接（稳态常驻 N 次拨号；每次槽位重连
+                        再 +1 条常驻控制连接，同一期 socks5 单连接每次重连 +1 的「有界泄漏」模式
+                        已接受）；任一槽拨号失败整池回退单连接 + warning（不致命）。
+                        显式传 -rotate=true 时强制要求 -socks5 与 -scan，否则启动失败
+                        （fail-fast）。不满足自动启用条件（无 socks5 / 无 scan / 显式
+                        -ip 端点 / scan-top<=1）时 -rotate 完全关闭，行为与未加本特性等价。
 
 注册：
   -config <路径>    注册信息文件路径（默认 reg.json）；多实例部署时指定不同文件
@@ -82,6 +92,8 @@ func usage() {
   warp -l 0.0.0.0:1080 -user u -pass s    对外提供服务并要求认证
   warp -del && warp -reg                  更换注册
   warp -socks5 your-socks5-host:7890          通过上游 SOCKS5 代理连接 WARP 边缘
+  warp -socks5 your-socks5-host:7890 -scan             上游 socks5 + 边缘优选，轮询自动启用换 IP
+  warp -socks5 your-socks5-host:7890 -scan -scan-top 8 同上但池大小增至 8（更多端点更频繁换 IP）
 
 扫描（可选，默认关闭）：
   扫描用与正式连接同一协议栈的轻量 QUIC 握手探针，对 WARP 边缘全段测真实往返
@@ -103,6 +115,7 @@ func usage() {
   -scan-timeout <dur>      扫描总超时（默认 45s）
   -scan-per-probe <dur>    单探针超时（默认 3s）
   -scan-top <n>            选用 RTT 最低的 N 个端点前置（默认 4）
+  -rotate                  端点轮询换 IP（默认 auto：socks5+scan 同开自动启用；显式开启强制要求 -socks5 + -scan）
 
 注意：
   UDP ASSOCIATE 的数据报不经过 WARP 隧道。plain CONNECT 是字节流隧道，无法
@@ -136,11 +149,61 @@ func validateHostPort(spec string) error {
 	return nil
 }
 
+// decideRotate 把 -rotate 的「显式开关 + 智能默认」编排成「建池大小 + 是否自动 + 错误」三元组。
+// 纯函数：取所有相关 flag 原值，不触 I/O、不读全局，便于 main 包单测覆盖矩阵分支。
+//
+// 语义（与 plan 锁定决策一致）：
+//   - rotateArg=false（用户未显式要）→ 走 auto：socks5+scan 都开且 ip ∈ {4,6} 且 scanTop>1 时
+//     自动启用，池大小 = scanTop；否则不启用（size=0）。auto=true 表示「由智能默认打开」，
+//     日志打「轮询=自动」；auto=false 表示「未启用」，日志打「轮询=关」。
+//   - rotateArg=true（用户显式要）→ 强制校验前置条件，任一缺失即 err（fail-fast，与
+//     validateHostPort 同语义），调用方 log.Fatalf。满足时 size=scanTop、auto=false（日志
+//     打「轮询=手动」以区分自动开）。
+//
+// 错误矩阵（rotateArg==true 时）：
+//   - socks5==""            → "-rotate 需 -socks5：直连下 WARP 同端点 IP 固定，轮询无换 IP 收益"
+//   - !scan                 → "-rotate 需 -scan：reg.json 单 host 多端口不构成多端点池"
+//   - ip ∉ {"4","6"}        → "-rotate 需 -scan 扫描结果，-ip <显式端点> 不轮询"
+//   - scanTop<=1            → "-rotate 需 -scan-top≥2：池大小过小无轮转意义"
+//
+// 「两层默认各管一段」：rotateArg 的默认（false）由 flag 管，auto 启用与否由本函数管——
+// 两层各管一段，用户传 -rotate 仅表示「我明确要」，不绕过自动判定的内置默认（即 auto 也能
+// 在没传 -rotate 时自己开）。
+func decideRotate(socks5 string, scan bool, ip string, rotateArg bool, scanTop int) (size int, auto bool, err error) {
+	ipIsAutoFamily := ip == "4" || ip == "6"
+
+	// auto 启用条件：socks5 + scan + ip∈{4,6} + scanTop>1 全满足。任一不满足则 auto=false。
+	rotateEligible := socks5 != "" && scan && ipIsAutoFamily && scanTop > 1
+
+	if rotateArg {
+		// 用户显式要 —— fail-fast 校验前置条件，给出确切缺失项的错误信息。
+		switch {
+		case socks5 == "":
+			return 0, false, errors.New("-rotate 需 -socks5：直连下 WARP 同端点 IP 固定，轮询无换 IP 收益")
+		case !scan:
+			return 0, false, errors.New("-rotate 需 -scan：reg.json 单 host 多端口不构成多端点池")
+		case !ipIsAutoFamily:
+			return 0, false, fmt.Errorf("-rotate 需 -scan 扫描结果，-ip %q 指定显式端点不轮询", ip)
+		case scanTop <= 1:
+			return 0, false, fmt.Errorf("-rotate 需 -scan-top≥2：当前 -scan-top=%d 池大小过小无轮转意义", scanTop)
+		}
+		// 全部满足：手动开启，size=scanTop。
+		return scanTop, false, nil
+	}
+
+	// 用户未显式要 —— auto 判定。
+	if rotateEligible {
+		return scanTop, true, nil
+	}
+	// auto 不启用：size=0，NewMasqueClient 走单连接退化路径（零代价回退）。
+	return 0, false, nil
+}
+
 // resolveEdge turns an explicit -ip value into the candidate address list.
 //
 // A hostname has to be resolved by the system resolver: this runs before the
 // tunnel exists, so the in-tunnel DoH client is not available yet. That means a
-// hostname here is visible to the local resolver — the same exposure the
+// hostname here is visible to the local resolver — the same exposure the the
 // registration API call already has, but worth knowing about. An IP literal
 // avoids it entirely.
 //
@@ -204,6 +267,10 @@ func main() {
 		scanTimeout  = flag.Duration("scan-timeout", 45*time.Second, "扫描总超时（硬上限）")
 		scanPerProbe = flag.Duration("scan-per-probe", 3*time.Second, "单探针超时")
 		scanTop      = flag.Int("scan-top", 4, "选用 RTT 最低的 N 个端点前置")
+		// -rotate 端点轮询换 IP（可选，默认 auto）：与 -socks5 + -scan 同开时自动启用，
+		// 把 -scan 选出的 top-N 端点建成 N 条独立 QUIC 连接做 per-request round-robin。
+		// 用户显式传 -rotate=true 时强制要求 -socks5 与 -scan（否则 fail-fast）。
+		rotate = flag.Bool("rotate", false, "端点轮询换 IP：与 -socks5 + -scan 同开时自动启用；显式开启则强制要求 -socks5 与 -scan")
 	)
 	flag.Usage = usage
 	flag.Parse()
@@ -355,8 +422,24 @@ func main() {
 		log.Printf("⚠ -socks5 已启用但仅作用于隧道拨号；-scan 的探针仍直连边缘（设计如此）")
 	}
 
+	// 端点轮询编排：decideRotate 把 -rotate（显式）与 socks5+scan+ip+scanTop（自动判定）
+	// 折算成池大小。显式 -rotate 但条件不足时 fail-fast（与 validateHostPort 同语义）。
+	// rotateSize=0 → NewMasqueClient 走单连接退化路径（零代价回退，行为与未加本特性等价）。
+	rotateSize, rotateAuto, err := decideRotate(*socks5, *scan, *ip, *rotate, *scanTop)
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
+	switch {
+	case rotateSize > 0 && rotateAuto:
+		log.Printf("✓ 端点轮询自动启用（池大小=%d，per-request round-robin）", rotateSize)
+	case rotateSize > 0 && !rotateAuto:
+		log.Printf("✓ 端点轮询手动启用（池大小=%d，per-request round-robin）", rotateSize)
+	default:
+		log.Printf("端点轮询=关（单连接）")
+	}
+
 	// Connect to WARP edge via QUIC/H3
-	proxyClient, err := tunnel.NewMasqueClient(edgeAddrs, tlsConfig, regData.Token, *socks5)
+	proxyClient, err := tunnel.NewMasqueClient(edgeAddrs, tlsConfig, regData.Token, *socks5, rotateSize)
 	if err != nil {
 		// NewMasqueClient now retries forever with backoff. The only way it
 		// returns an error is if lifeCtx is cancelled (Close()), which has
