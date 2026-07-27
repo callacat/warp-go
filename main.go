@@ -52,6 +52,13 @@ func usage() {
                    时只使用该端口。域名由系统解析器解析（此时隧道尚未建立），
                    解析出的每个地址都会作为候选。
 
+上游代理（可选）：
+  -socks5 <host:port>  上游 SOCKS5 代理，所有到 WARP 边缘的 QUIC/UDP 流量经此转发
+                        （无认证；空=直连）。例：-socks5 your-socks5-host:7890
+                        仅作用于正式隧道拨号路径；-scan 的探针仍直连边缘（设计如此）。
+                        启用后会失去 quic-go 的 DF/ECN/GSO 等内核级 UDP 优化——经
+                        中继的隧道瓶颈在代理，可接受。已知限制见项目计划文档。
+
 注册：
   -config <路径>    注册信息文件路径（默认 reg.json）；多实例部署时指定不同文件
   -reg             尚未注册时执行注册，然后退出
@@ -74,6 +81,7 @@ func usage() {
   warp -l 127.0.0.1:1080                  只监听回环地址
   warp -l 0.0.0.0:1080 -user u -pass s    对外提供服务并要求认证
   warp -del && warp -reg                  更换注册
+  warp -socks5 your-socks5-host:7890          通过上游 SOCKS5 代理连接 WARP 边缘
 
 扫描（可选，默认关闭）：
   扫描用与正式连接同一协议栈的轻量 QUIC 握手探针，对 WARP 边缘全段测真实往返
@@ -87,6 +95,7 @@ func usage() {
   warp -scan -scan-top 8                  选用 8 个端点而非默认 4
 
 参数：
+  -socks5 <host:port>      上游 SOCKS5 代理（空=直连；仅作用于正式拨号，不作用于 -scan）
   -scan                    启动前扫描 WARP 边缘全段并选用最低延迟的端点
   -scan-cidr <cidr,...>    追加自定义 CIDR 到默认段（默认 5 个 WARP IPv4 段或 2 个 IPv6 段）
   -scan-ports <p,p,...>    覆盖扫描端口（空则读 reg.json 的 endpoint_ports）
@@ -108,6 +117,24 @@ func usage() {
 
 // edgeLookupTimeout bounds the bootstrap name lookup for an -ip hostname.
 const edgeLookupTimeout = 10 * time.Second
+
+// validateHostPort 校验 -socks5 取值为 host:port 形式：host 非空、端口为 1-65535 的
+// 数字。host 可为 IP 字面量或域名（域名不在此解析——由 wzshiming 在拨号时走系统
+// 解析器解析，与 -ip example.com:443 同等暴露面）。仅做格式校验，不做 DNS 预查，
+// 避免在代理根本不会连接的失败模式下多一次 DNS 往返。
+func validateHostPort(spec string) error {
+	host, port, err := net.SplitHostPort(spec)
+	if err != nil {
+		return fmt.Errorf("需要 host:port 形式，例如 your-socks5-host:7890（%w）", err)
+	}
+	if host == "" {
+		return errors.New("host 部分为空")
+	}
+	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+		return fmt.Errorf("端口 %q 不是 1-65535 范围内的数字", port)
+	}
+	return nil
+}
 
 // resolveEdge turns an explicit -ip value into the candidate address list.
 //
@@ -159,6 +186,9 @@ func main() {
 		listen = flag.String("l", ":40000", "SOCKS5 监听地址 host:port")
 		user   = flag.String("user", "", "SOCKS5 用户名（与 -pass 同时给出才启用认证）")
 		pass   = flag.String("pass", "", "SOCKS5 密码（与 -user 同时给出才启用认证）")
+		// 上游 SOCKS5 出口（可选）：让去往 WARP 边缘的 QUIC 流量先经此代理转发。
+		// 仅作用于正式隧道拨号路径，不作用于 -scan。空 = 直连（原有行为）。
+		socks5 = flag.String("socks5", "", "上游 SOCKS5 代理 host:port，所有到 WARP 边缘的 QUIC 流量经此转发（无认证；空=直连）。仅作用于正式隧道拨号，不作用于 -scan")
 		ip     = flag.String("ip", "4", "WARP 边缘：4、6，或显式 host:port")
 		config  = flag.String("config", defaultStateFile, "注册信息文件路径")
 		reg     = flag.Bool("reg", false, "尚未注册时执行注册，然后退出")
@@ -229,6 +259,19 @@ func main() {
 	}
 	log.Printf("✓ 已注册：id=%s", regData.ID)
 
+	// -socks5 校验：非空时必须是 host:port 形式（host 可为 IP 或域名——域名由
+	// wzshiming 走系统解析器解析，与 -ip example.com:443 同等暴露面）。与 -ip 正交：
+	// -ip 决定连哪个边缘、-socks5 决定怎么到那里。认证字段本期不暴露，结构已预留。
+	if *socks5 != "" {
+		if err := validateHostPort(*socks5); err != nil {
+			log.Fatalf("-socks5 %q 不是 host:port：%v", *socks5, err)
+		}
+	}
+	upstreamSocks5 := *socks5
+	if upstreamSocks5 == "" {
+		upstreamSocks5 = "关闭"
+	}
+
 	// -ip selects the edge: "4"/"6" pick the family from the registration —
 	// which hands out both, though a host reaches only the families its network
 	// carries — and anything else is an explicit address that replaces it.
@@ -251,15 +294,16 @@ func main() {
 		for _, p := range ports {
 			edgeAddrs = append(edgeAddrs, net.JoinHostPort(endpointHost, strconv.Itoa(p)))
 		}
-		log.Printf("WARP 代理启动中（边缘=IPv%s %s 端口=%v，socks5=%s）",
-			*ip, endpointHost, ports, *listen)
+		log.Printf("WARP 代理启动中（边缘=IPv%s %s 端口=%v，前端 socks5=%s，上游 socks5=%s）",
+			*ip, endpointHost, ports, *listen, upstreamSocks5)
 
 	default:
 		var err error
 		if edgeAddrs, err = resolveEdge(*ip); err != nil {
 			log.Fatalf("-ip %q 既不是 4 或 6，也不是可用地址：%v", *ip, err)
 		}
-		log.Printf("WARP 代理启动中（边缘=%s → %v，socks5=%s）", *ip, edgeAddrs, *listen)
+		log.Printf("WARP 代理启动中（边缘=%s → %v，前端 socks5=%s，上游 socks5=%s）",
+			*ip, edgeAddrs, *listen, upstreamSocks5)
 	}
 
 	// Pin the edge to the endpoint public key from registration, like warp-svc does.
@@ -305,8 +349,14 @@ func main() {
 		}
 	}
 
+	// -socks5 仅作用于正式隧道拨号，scanner 探针不受影响（设计如此）。同时启用时
+	// 显式提示，避免用户误以为探针也走了上游代理——探针仍直连边缘。
+	if *socks5 != "" && *scan && (*ip == "4" || *ip == "6") {
+		log.Printf("⚠ -socks5 已启用但仅作用于隧道拨号；-scan 的探针仍直连边缘（设计如此）")
+	}
+
 	// Connect to WARP edge via QUIC/H3
-	proxyClient, err := tunnel.NewMasqueClient(edgeAddrs, tlsConfig, regData.Token)
+	proxyClient, err := tunnel.NewMasqueClient(edgeAddrs, tlsConfig, regData.Token, *socks5)
 	if err != nil {
 		// NewMasqueClient now retries forever with backoff. The only way it
 		// returns an error is if lifeCtx is cancelled (Close()), which has

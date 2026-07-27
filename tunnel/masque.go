@@ -21,6 +21,7 @@ import (
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 	h3qlog "github.com/quic-go/quic-go/http3/qlog"
+	"github.com/wzshiming/socks5"
 	"golang.org/x/net/dns/dnsmessage"
 	"golang.org/x/net/http2"
 )
@@ -99,19 +100,15 @@ const (
 // connBundle groups everything owned by a single QUIC connection attempt so the
 // whole set can be torn down together on reconnect.
 type connBundle struct {
-	udpConn   *net.UDPConn
-	qtr       *quic.Transport
-	quicConn  *quic.Conn
-	h3Client  *http3.ClientConn
-	h3Trans   *http3.Transport
-	closeOnce sync.Once
-	healthMu  sync.Mutex
-
-	// A live QUIC path can coexist with a wedged H3 session. Track distinct
-	// targets that timed out in one short window so a single unreachable target
-	// doesn't cause collateral reconnects, while session-wide failures still do.
-	failureSince   time.Time
-	failureTargets map[string]struct{}
+udpConn           net.PacketConn
+	qtr               *quic.Transport
+	quicConn          *quic.Conn
+	h3Client          *http3.ClientConn
+	h3Trans           *http3.Transport
+	closeOnce         sync.Once
+	healthMu          sync.Mutex
+	failureSince      time.Time
+	failureTargets    map[string]struct{}
 }
 
 // close abortively tears down the bundle. Safe on a nil receiver, concurrent
@@ -154,17 +151,14 @@ type MasqueClient struct {
 	quicConfig *quic.Config
 	token      string
 
+socks5Addr   string
+	socks5Dialer *socks5.Dialer
 	connMu    sync.RWMutex
 	cur       *connBundle
 	closed    bool
 	closeOnce sync.Once
 	lifeCtx   context.Context
 	lifeStop  context.CancelFunc
-
-	// Reconnects are singleflight. The dial itself runs outside the requesting
-	// handler, so a canceled SOCKS request can stop waiting without abandoning a
-	// half-built shared connection. lifeCtx still cancels it immediately on
-	// client shutdown.
 	reconnectMu     sync.Mutex
 	reconnectFlight *reconnectFlight
 
@@ -210,9 +204,26 @@ type reconnectFlight struct {
 
 // NewMasqueClient establishes a QUIC/H3 connection to the WARP edge.
 // edgeAddrs are candidate host:port addresses tried in order.
-func NewMasqueClient(edgeAddrs []string, tlsConfig *tls.Config, token string) (*MasqueClient, error) {
+//
+// socks5Addr 在非空时启用上游 SOCKS5 出口：去往边缘的 QUIC/UDP 流量先经此代理。
+// 仅作用于正式拨号路径，scanner 不受影响。"socks5://" 前缀在此自动补全，调用方
+// 传裸 host:port 即可。空串 = 直连（原有行为）。
+func NewMasqueClient(edgeAddrs []string, tlsConfig *tls.Config, token string, socks5Addr string) (*MasqueClient, error) {
 	if len(edgeAddrs) == 0 {
 		return nil, errors.New("未提供任何边缘地址")
+	}
+
+	// fail-fast：构造期即校验代理地址，避免拖到首次拨号才暴露格式错误。地址形如
+	// "host:port"（IP 或域名；域名由 wzshiming 走系统解析器解析，与现有 -ip
+	// example.com:443 同等暴露面）。认证字段在此预留——未来加 d.Username/Password
+	// 即可，无需改签名。
+	var socks5Dialer *socks5.Dialer
+	if socks5Addr != "" {
+		d, err := socks5.NewDialer("socks5://" + socks5Addr)
+		if err != nil {
+			return nil, fmt.Errorf("解析 SOCKS5 代理地址 %q 失败：%w", socks5Addr, err)
+		}
+		socks5Dialer = d
 	}
 	quicConfig := &quic.Config{
 		KeepAlivePeriod:      10 * time.Second,
@@ -239,14 +250,16 @@ func NewMasqueClient(edgeAddrs []string, tlsConfig *tls.Config, token string) (*
 
 	lifeCtx, lifeStop := context.WithCancel(context.Background())
 	c := &MasqueClient{
-		edgeAddrs:  edgeAddrs,
-		tlsConfig:  tlsConfig.Clone(),
-		quicConfig: quicConfig,
-		token:      token,
-		lifeCtx:    lifeCtx,
-		lifeStop:   lifeStop,
-		dnsCache:   make(map[string]dnsCacheEntry),
-		dnsFlight:  make(map[string]*dnsFlightResult),
+edgeAddrs:    edgeAddrs,
+		tlsConfig:    tlsConfig.Clone(),
+		quicConfig:   quicConfig,
+		token:        token,
+		lifeCtx:      lifeCtx,
+		lifeStop:     lifeStop,
+		socks5Addr:   socks5Addr,
+		socks5Dialer: socks5Dialer,
+		dnsCache:     make(map[string]dnsCacheEntry),
+		dnsFlight:    make(map[string]*dnsFlightResult),
 	}
 
 	// Initial dial loop: same exponential-backoff pattern as runReconnect so that
@@ -321,22 +334,75 @@ func unroutableFamily(err error) bool {
 		errors.Is(err, syscall.EHOSTUNREACH)
 }
 
-func (c *MasqueClient) dialAddr(ctx context.Context, edgeAddr string) (*connBundle, error) {
-	log.Printf("QUIC 拨号 %s（SNI=%s）...", edgeAddr, c.tlsConfig.ServerName)
-
+// acquirePacketConn 返回 quic.Transport 将占有的 PacketConn 与 QUIC 目的地址。
+// c.socks5Dialer 为 nil → 直连：按 edge 地址族匹配本地 ListenUDP（原有行为）。
+// 非 nil → 上游 SOCKS5：委托 wzshiming 完成 UDP ASSOCIATE，返回 *socks5.UDPConn
+// （实现 net.PacketConn，datagram 语义；一个 Read = 一个 SOCKS5 帧数据报）。
+//
+// 两分支共用同一解析出的 udpAddr 作 qtr.Dial 的目的地址：直连路径下它就是真实
+// edge；socks5 路径下 quic-go 据此构 QUIC Initial 目的 IP，wzshiming 的 WriteTo
+// 将其写进 SOCKS5 per-datagram 头，由 relay 转发到该 edge IP，与该 conn 在构造
+// 期设的 defaultTarget 一致（edge候选均为 main.go 已落地的 IP 字面量）。
+//
+// 已知泄漏（一期接受）：socks5 分支每次 DialContext 会额外建立 1 条到代理的 TCP
+// 控制连接 + 1 个监控 goroutine（wzshiming 内部），二者不暴露给调用方、调用方
+// 关闭返回的 conn 时也不被回收，仅随代理侧关闭控制连接而终止。WARP 重连率低，
+// 泄漏有界，见计划「已知泄漏」。二期自实现可持有控制连接引用显式关闭。
+//
+// 已知边界（一期接受）：socks5 分支的 ReadFrom 会丢弃源地址 ≠ relay 的包；若 relay
+// 在 ASSOCIATE 应答中报 BND.ADDR=0.0.0.0，wzshiming 不按 RFC 1928 §6 替换为实际
+// 代理 host，则 relay 回包会被全部丢弃。用户示例 relay 预期回复真实 BND.ADDR。
+func (c *MasqueClient) acquirePacketConn(ctx context.Context, edgeAddr string) (net.PacketConn, *net.UDPAddr, error) {
 	udpAddr, err := net.ResolveUDPAddr("udp", edgeAddr)
 	if err != nil {
-		return nil, fmt.Errorf("解析边缘地址 %s 失败：%w", edgeAddr, err)
+		return nil, nil, fmt.Errorf("解析边缘地址 %s 失败：%w", edgeAddr, err)
 	}
 
-	// Bind the local socket in the same address family as the edge.
+	if c.socks5Dialer != nil {
+		conn, err := c.socks5Dialer.DialContext(ctx, "udp", edgeAddr)
+		if err != nil {
+			return nil, nil, fmt.Errorf("SOCKS5 UDP ASSOCIATE 到 %s 失败：%w", edgeAddr, err)
+		}
+		pc, ok := conn.(net.PacketConn)
+		if !ok {
+			conn.Close()
+			return nil, nil, fmt.Errorf("SOCKS5 返回非 PacketConn：%T", conn)
+		}
+		log.Printf("  → QUIC 经 SOCKS5 代理 %s 转发", c.socks5Addr)
+		return pc, udpAddr, nil
+	}
+
+	// 直连：按 edge 地址族绑本地 socket，IPv4 候选绑 IPv4zero、IPv6 候选绑 IPv6zero，
+	// 确保发包的源地址族正确，避免双栈环境下的选源歧义。
 	listenAddr := &net.UDPAddr{IP: net.IPv4zero}
 	if udpAddr.IP.To4() == nil {
 		listenAddr = &net.UDPAddr{IP: net.IPv6zero}
 	}
-	udpConn, err := net.ListenUDP("udp", listenAddr)
+	uc, err := net.ListenUDP("udp", listenAddr)
 	if err != nil {
-		return nil, fmt.Errorf("监听 UDP 失败：%w", err)
+		return nil, nil, fmt.Errorf("监听 UDP 失败：%w", err)
+	}
+	return uc, udpAddr, nil
+}
+
+// socks5Label 把空 socks5 地址显示为「关闭」，仅用于日志可读性。
+func socks5Label(addr string) string {
+	if addr == "" {
+		return "关闭"
+	}
+	return addr
+}
+
+func (c *MasqueClient) dialAddr(ctx context.Context, edgeAddr string) (*connBundle, error) {
+	log.Printf("QUIC 拨号 %s（SNI=%s，socks5=%s）...",
+		edgeAddr, c.tlsConfig.ServerName, socks5Label(c.socks5Addr))
+
+	// 获取 quic.Transport 将占有的 PacketConn 与 QUIC 目的地址。直连路径沿用
+	// family-matched ListenUDP；socks5 路径委托给代理的 UDP ASSOCIATE，返回
+	// *socks5.UDPConn（实现 net.PacketConn，datagram 语义）。
+	udpConn, udpAddr, err := c.acquirePacketConn(ctx, edgeAddr)
+	if err != nil {
+		return nil, err
 	}
 
 	// Dial through an explicit Transport so the source connection ID length can
@@ -344,7 +410,9 @@ func (c *MasqueClient) dialAddr(ctx context.Context, edgeAddr string) (*connBund
 	qtr := &quic.Transport{Conn: udpConn, ConnectionIDLength: connectionIDLength}
 
 	// Bound each attempt so a blackholed port fails fast and the next candidate
-	// gets tried, instead of burning the full handshake idle timeout.
+	// gets tried, instead of burning the full handshake idle timeout.两分支共用
+	// 同一解析出的 udpAddr 作 QUIC 目的：quic-go 据此构 Initial 目的 IP；socks5
+	// 路径下 WriteTo 将其编进 per-datagram 头由 relay 转发到该 edge。
 	dialCtx, cancelDial := context.WithTimeout(ctx, perAddrDialTimeout)
 	defer cancelDial()
 
