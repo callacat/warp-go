@@ -67,6 +67,15 @@ warp —— Cloudflare WARP 客户端（MASQUE over QUIC/HTTP-3，SOCKS5 前端�
 注册：
   -reg             尚未注册时执行注册，然后退出
   -del             向 API 注销并删除本地注册信息
+
+扫描（可选，默认关闭）：
+  -scan                启动前扫描 WARP 边缘全段并选用最低延迟的端点
+  -scan-cidr <c,...>   追加自定义 CIDR 到默认段（IPv4 5 段或 IPv6 2 段）
+  -scan-ports <p,...>  覆盖扫描端口（空则读 reg.json 的 endpoint_ports）
+  -scan-concurrency <n> 并发探针数（0=自动 min(64, NumCPU×8)，下限 16）
+  -scan-timeout <dur>  扫描总超时（默认 45s）
+  -scan-per-probe <dur> 单探针超时（默认 3s）
+  -scan-top <n>        选用 RTT 最低的 N 个端点前置（默认 4）
 ```
 
 ### 行为准则
@@ -75,6 +84,7 @@ warp —— Cloudflare WARP 客户端（MASQUE over QUIC/HTTP-3，SOCKS5 前端�
 - **`-reg` 幂等**——已有注册时只报告并退出，**不替换**。替换会让旧注册在 Cloudflare 侧失去本地凭据，再也无法注销。要换注册，请先 `warp -del` 再 `warp -reg`。
 - **`-del` 走 API 注销**——仅需 `id` 与 `token`，**不**依赖能解析密钥材料。即使本构建已无法解析该文件的私钥，仍可从 API 侧移除，避免把注册孤立在 Cloudflare 侧。
 - **Accept 循环不因瞬时错误退出**——EMFILE、ECONNABORTED 这类瞬态错误按 5ms→1s 指数退避重试，仅在 `net.ErrClosed` 或收到关停信号时退出。
+- **`-scan` 不致命、不写回 `reg.json`**——扫描用与正式连接同一协议栈的轻量 QUIC 握手探针，按 RTT 升序取 top-N 端点前置到候选列表，注册端点尾接作兜底。全失败时回退到注册端点并继续启动，而非退出。`-ip 4` 扫 IPv4 段、`-ip 6` 扫 IPv6 段；`-ip <host:port>` 指定显式端点时扫描被忽略（显式端点优先）。这是本项目相对官方 `warp-svc` 的有意增强——官方不做边缘全段延迟优选（详见逆向文档 §11 末的 `[未对齐增强]` 注记）。
 
 ## 常用示例
 
@@ -102,6 +112,15 @@ warp -l 0.0.0.0:1080 -user u -pass s
 
 # 更换注册
 warp -del && warp -reg
+
+# 扫描边缘并选用最低延迟的 IPv4 端点（前置到候选，注册端点兜底）
+warp -scan
+
+# 扫描 IPv6 段
+warp -scan -ip 6
+
+# 只扫 443 端口（更快覆盖更广），选用 8 个端点
+warp -scan -scan-ports 443 -scan-top 8
 ```
 
 ## 配置
@@ -116,7 +135,7 @@ warp -del && warp -reg
 | `private_key` | base64 SEC1 DER | ECDSA P-256 私钥，加载时再派生公钥 |
 | `peer_public_key` | base64 PKIX DER | 边缘公钥，用于**证书固定**；旧文件无此字段时降级为警告 |
 | `endpoint_v4` / `endpoint_v6` | string | 边缘 IP，`-ip 4/6` 二选一 |
-| `endpoint_ports` | `[]int` | 端口列表（默认从中读取，如 `[443,500,1701,4500,4443,8443,8095]`） |
+| `endpoint_ports` | `[]int` | 端口列表（默认从中读取，如 `[443,500,1701,4500,4443,8443,8095]`）；`-scan` 默认也复用此列表扫描，`-scan-ports` 可覆盖 |
 | `assigned_ipv4` / `assigned_ipv6` | string | 注册时分配的隧道内地址（本项目不直接使用） |
 
 > [!NOTE]
@@ -132,6 +151,10 @@ warp-go/
 ├── tunnel/
 │   ├── masque.go                 # QUIC/H3 连接管理、SOCKS5 TCP、隧道内 DoH 解析
 │   └── udp.go                     # SOCKS5 UDP ASSOCIATE（直连，不走隧道）
+├── scanner/                       # 边缘延迟扫描（-scan）：QUIC 握手探针测 RTT，选 top-N 端点前置
+│   ├── endpoints.go              #   默认 WARP CIDR/端口常量、候选展开（BuildCandidates）
+│   ├── probe.go                   #   单端点 QUIC 握手探针（probeEdge）、unroutableFamily 判定
+│   └── scanner.go                  #   并发编排（Scan）：信号量、族级预探、RTT 排序、TopN 截断
 ├── docs/
 │   └── warp-masque-reverse-engineering.md   # 官方 warp-svc 逆向分析 + 本实现对齐说明
 ├── go.mod / go.sum
@@ -140,10 +163,13 @@ warp-go/
 
 | 文件 | 行数 | 职责 |
 |---|---|---|
-| `main.go` | 336 | 参数解析、注册编排、TLS 配置组装、SOCKS5 监听循环 |
+| `main.go` | 513 | 参数解析、注册编排、TLS 配置组装、`-scan` 扫描衔接、SOCKS5 监听循环 |
 | `registration/registration.go` | 560 | 两步注册、状态持久化、边缘公钥固定 |
 | `tunnel/masque.go` | 1370 | QUIC/H3 连接管理（重连/端口回退）、SOCKS5 TCP 转发、隧道内 DoH |
 | `tunnel/udp.go` | 344 | SOCKS5 UDP ASSOCIATE（中继，不经隧道） |
+| `scanner/endpoints.go` | 192 | 默认 WARP CIDR/端口常量、候选展开（BuildCandidates、expandCIDR） |
+| `scanner/probe.go` | 170 | 单端点 QUIC 握手探针（probeEdge）、unroutableFamily 判定 |
+| `scanner/scanner.go` | 409 | 并发编排（Scan）：信号量、族级预探、RTT 排序、TopN 截断 |
 
 ## 设计要点
 
@@ -154,6 +180,7 @@ warp-go/
 - **等待 HTTP/3 SETTINGS**：QUIC 握手完成 ≠ H3 可用，需阻塞直到 `ReceivedSettings()`。
 - **惰性重连**：空闲期间断线不会后台恢复，由 `openRequestStream` 在发现连接已死时触发，`reconnectMu` 串行化并用 `current != stale` 判断避免重复拨号——下一个请求承担重连延迟。
 - **`connBundle` 单元**：udpConn、`quic.Transport`、QUIC 连接、H3 transport 打包为一组，重连时整组拆除，避免部分残留。
+- **端点延迟扫描（`-scan`，可选）**：启动前对 WARP 边缘全段（IPv4 默认 5 个 /24、IPv6 默认 2 个 /48）做与正式连接同一协议栈的**轻量 QUIC 握手探针**测 RTT——握手完成即 `CloseWithError` 干净释放，不等 H3 SETTINGS（排序相关性≈1，省 H3 资源）。按 RTT 升序取 top-4 前置到候选列表，注册端点尾接兜底；族级预探对 `ENETUNREACH` 等整族跳过避免刷爆总超时。并发受信号量约束（`min(64, NumCPU×8)`、下限 16），总超时 45s 硬上限，全失败回退注册端点不致命。不写回 `reg.json`（保留 `-reg`/`-del` 幂等）。这是对官方的有意增强，非对齐——详见逆向文档 §11。
 
 ### SOCKS5 与流释放
 
@@ -220,6 +247,7 @@ MASQUE 的 SNI 是固定通用名（`consumer-masque-proxy.cloudflareclient.com`
 | DNS 健康跟踪 | 比率 0.8 | 未实现 | — |
 | H2 隧道回退 | 有（仅 Connect-IP） | 无 | 对代理模式不适用 |
 | TUN / Connect-IP | 有 | 无 | 超出项目范围 |
+| 端点延迟优选 | 无 | `-scan` 手动触发 | **有意增强，非对齐**（官方不扫边缘全段测延迟，详见逆向文档 §11）|
 
 ## 已知限制
 
@@ -230,7 +258,8 @@ MASQUE 的 SNI 是固定通用名（`consumer-masque-proxy.cloudflareclient.com`
 5. **无 DNS 健康跟踪与故障转移**——上游列表按序尝试，失败仅按传输错误分类处理。
 6. **隧道内无 Happy Eyeballs**——有 A 记录就一律用 IPv4，不做连通性探测（与 `-ip` 无关）。
 7. **没有并发上限**——默认 `:40000` 且默认不要求认证；UDP 关联没有任何限制（每个占 2 个 socket + 4 个 goroutine）。不可信网络中务必绑回环或设认证。
-8. **注册信息不会刷新**——端点一直沿用，需 `-del` 后重新 `-reg` 更新。
+8. **注册信息不会刷新**——端点一直沿用，需 `-del` 后重新 `-reg` 更新。可用 `-scan` 在每次启动时临时优选最低延迟端点（结果不写回 `reg.json`，仅本次运行有效）。
+9. **扫描延迟与正式连接可能不完全一致**——`-scan` 用轻量 QUIC 握手 RTT 排序，不等 H3 SETTINGS；正式连接仍走完整流程并在失败时回退。每次启动付一次扫描开销（默认 ≤45s，可 `-scan-ports 443` 加快）。
 
 ## 文档
 

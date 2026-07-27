@@ -12,10 +12,12 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"warp/registration"
+	"warp/scanner"
 	"warp/tunnel"
 )
 
@@ -71,6 +73,26 @@ func usage() {
   warp -l 127.0.0.1:1080                  只监听回环地址
   warp -l 0.0.0.0:1080 -user u -pass s    对外提供服务并要求认证
   warp -del && warp -reg                  更换注册
+
+扫描（可选，默认关闭）：
+  扫描用与正式连接同一协议栈的轻量 QUIC 握手探针，对 WARP 边缘全段测真实往返
+  延迟，按 RTT 升序取最低的 N 个端点前置到候选列表；注册端点作兜底尾接。不修改
+  reg.json，失败回退到注册端点，不致命。-ip 4 扫 IPv4 段、-ip 6 扫 IPv6 段；
+  -ip <host:port> 指定显式端点时扫描被忽略（显式端点优先）。详见用法末尾。
+
+  warp -scan                              扫描并选用最低延迟的 IPv4 端点
+  warp -scan -ip 6                        扫描 IPv6 段
+  warp -scan -scan-ports 443              只扫 443 端口（更快覆盖更广）
+  warp -scan -scan-top 8                  选用 8 个端点而非默认 4
+
+参数：
+  -scan                    启动前扫描 WARP 边缘全段并选用最低延迟的端点
+  -scan-cidr <cidr,...>    追加自定义 CIDR 到默认段（默认 5 个 WARP IPv4 段或 2 个 IPv6 段）
+  -scan-ports <p,p,...>    覆盖扫描端口（空则读 reg.json 的 endpoint_ports）
+  -scan-concurrency <n>    并发探针数（0=自动 min(64, NumCPU*8)，下限 16）
+  -scan-timeout <dur>      扫描总超时（默认 45s）
+  -scan-per-probe <dur>    单探针超时（默认 3s）
+  -scan-top <n>            选用 RTT 最低的 N 个端点前置（默认 4）
 
 注意：
   UDP ASSOCIATE 的数据报不经过 WARP 隧道。plain CONNECT 是字节流隧道，无法
@@ -139,6 +161,17 @@ func main() {
 		ip     = flag.String("ip", "4", "WARP 边缘：4、6，或显式 host:port")
 		reg    = flag.Bool("reg", false, "尚未注册时执行注册，然后退出")
 		del    = flag.Bool("del", false, "向 API 注销并删除本地注册信息")
+
+		// 扫描（可选，默认关闭）：启动前对 WARP 边缘全段做真实 QUIC 握手探针，
+		// 按 RTT 升序取 top-N 端点前置到 edgeAddrs，注册端点作兜底尾接。失败回退
+		// 到注册端点，不致命（与方案 §5.4 一致：不写回 reg.json，保留 -reg/-del 幂等）。
+		scan         = flag.Bool("scan", false, "启动前扫描 WARP 边缘全段并选用最低延迟的端点")
+		scanCidr     = flag.String("scan-cidr", "", "逗号分隔，追加自定义 CIDR 到默认段（4 或 6）")
+		scanPorts    = flag.String("scan-ports", "", "覆盖扫描端口（空则读 reg.json 的 endpoint_ports）")
+		scanConc     = flag.Int("scan-concurrency", 0, "并发探针数（0 为自动 min(64, NumCPU*8)，下限 16）")
+		scanTimeout  = flag.Duration("scan-timeout", 45*time.Second, "扫描总超时（硬上限）")
+		scanPerProbe = flag.Duration("scan-per-probe", 3*time.Second, "单探针超时")
+		scanTop      = flag.Int("scan-top", 4, "选用 RTT 最低的 N 个端点前置")
 	)
 	flag.Usage = usage
 	flag.Parse()
@@ -257,6 +290,19 @@ func main() {
 		log.Println("⚠ 注册信息中没有边缘公钥，公钥固定已禁用（请重新执行 -reg）")
 	}
 
+	// 可选：启动前扫描 WARP 边缘全段，按 RTT 升序把 top-N 端点前置到 edgeAddrs。
+	// 注册端点尾接作兜底，扫描全失败时 edgeAddrs 原样保留（回退注册端点，不致命）。
+	// -ip 为显式 host:port 时扫描被忽略 —— 显式端点优先于自动优选。
+	if *scan {
+		switch *ip {
+		case "4", "6":
+			edgeAddrs = runEndpointScan(*ip == "6", edgeAddrs, regData, tlsConfig,
+				*scanCidr, *scanPorts, *scanConc, *scanTimeout, *scanPerProbe, *scanTop)
+		default:
+			log.Printf("⚠ -ip %q 指定了显式端点，-scan 被忽略（显式端点优于自动优选）", *ip)
+		}
+	}
+
 	// Connect to WARP edge via QUIC/H3
 	proxyClient, err := tunnel.NewMasqueClient(edgeAddrs, tlsConfig, regData.Token)
 	if err != nil {
@@ -333,4 +379,135 @@ func main() {
 		acceptBackoff = 0
 		go proxyClient.HandleSOCKS5(ctx, conn, socksCfg)
 	}
+}
+
+// runEndpointScan 在启动前对 WARP 边缘全段做扫描优选，返回替换后的 edgeAddrs。
+//
+// 行为契约（与方案 §5 对齐）：
+//   - v6=true 扫描 IPv6 默认段，否则扫描 IPv4 默认段。额外段经 -scan-cidr 追加。
+//   - 端口集合：-scan-ports 非空时覆盖，否则复用 regData.EndpointPorts（与正式
+//     连接的端口回退候选集一致，语义自洽）。
+//   - 成功：top-N 端点前置 + 注册端点尾接兜底，返回新 edgeAddrs。
+//   - 失败：edgeAddrs 原样返回，打 warning，不致命 —— 上层照常用注册端点。
+//   - 公钥固定：tlsConfig 由 scanner 透传给每个探针，探针内部在 QUIC 握手阶段会
+//     调用 VerifyPeerCertificate，故扫描就在 WARP 同组边缘内进行（方案 §7.4）。
+//
+// 这是 main.go 的私有编排，不含扫描算法本身 —— 算法在 scanner.Scan。
+func runEndpointScan(
+	v6 bool,
+	fallback []string, // 注册端点（尾接兜底）
+	reg *registration.Registration,
+	tlsConfig *tls.Config,
+	scanCidr, scanPorts string,
+	scanConc int,
+	scanTimeout, scanPerProbe time.Duration,
+	scanTop int,
+) []string {
+	// 默认段 + 用户追加段。
+	cidrs := scanner.DefaultV4CIDRs()
+	fam := "IPv4"
+	if v6 {
+		cidrs = scanner.DefaultV6CIDRs()
+		fam = "IPv6"
+	}
+	if extra, ok := parseCIDRList(scanCidr); ok {
+		cidrs = append(cidrs, extra...)
+	}
+
+	// 端口：-scan-ports 优先，否则复用注册端口。
+	ports := reg.EndpointPorts
+	if pv, ok := parsePortList(scanPorts); ok {
+		ports = pv
+	}
+	if len(ports) == 0 {
+		ports = []int{443}
+	}
+
+	// 并发数：钳到"自动 min(64, NumCPU*8)、下限 16"由 scanner.ClampConcurrency 统一负责，
+	// main.go 不重复实现同一算法（"两层默认各管一段"）。scanConc<=0 触发自动。
+	conc := scanner.ClampConcurrency(scanConc)
+
+	log.Printf("扫描 WARP %s 边缘（段=%d 个，端口=%v，并发=%d，总超时=%s，单探针=%s，top=%d）...",
+		fam, len(cidrs), ports, conc, scanTimeout, scanPerProbe, scanTop)
+
+	results, err := scanner.Scan(context.Background(), scanner.Config{
+		CIDRs:           cidrs,
+		Ports:           ports,
+		TLSConfig:       tlsConfig,
+		QUICConfig:      scanner.ProbeQuicConfig(),
+		Concurrency:     conc,
+		PerProbeTimeout: scanPerProbe,
+		TotalTimeout:    scanTimeout,
+		TopN:            scanTop,
+		PerIPLimit:      scanner.DefaultPerIPLimit,
+	})
+	if err != nil {
+		log.Printf("⚠ 扫描未得到可用端点（%v），回退到注册端点 %v", err, fallback)
+		return fallback
+	}
+
+	// top-N 前置，注册端点尾接兜底。
+	out := make([]string, 0, len(results)+len(fallback))
+	topAddrs := make([]string, 0, len(results))
+	for _, r := range results {
+		out = append(out, r.Addr)
+		topAddrs = append(topAddrs, r.Addr)
+	}
+	out = append(out, fallback...)
+	log.Printf("✓ 扫描完成，选用 %d 个最低延迟 %s 端点：%s", len(results), fam, topAddrs)
+	if len(fallback) > 0 {
+		log.Printf("  注册端点尾接兜底：%v", fallback)
+	}
+	return out
+}
+
+// parseCIDRList 把逗号分隔的 CIDR 字符串解析成切片。空串返回 (nil,false) 表示
+// "用户没有指定"，与"用户指定了空列表"区分。非法条目静默丢弃：一个坏段不应让
+// 整个扫描停摆（与 BuildCandidates 对非法 CIDR 的处理一致）。
+func parseCIDRList(s string) ([]string, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil, false
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if _, _, err := net.ParseCIDR(p); err != nil {
+			log.Printf("⚠ 忽略非法 CIDR 段 %q（%v）", p, err)
+			continue
+		}
+		out = append(out, p)
+	}
+	if len(out) == 0 {
+		return nil, false
+	}
+	return out, true
+}
+
+// parsePortList 把逗号分隔的端口字符串解析成切片。空串返回 (nil,false)。
+// 非法端口静默丢弃，全部非法则返回 (nil,false) 让上层回退到注册端口。
+func parsePortList(s string) ([]int, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil, false
+	}
+	parts := strings.Split(s, ",")
+	out := make([]int, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		n, err := strconv.Atoi(p)
+		if err != nil || n < 1 || n > 65535 {
+			log.Printf("⚠ 忽略非法端口 %q", p)
+			continue
+		}
+		out = append(out, n)
+	}
+	if len(out) == 0 {
+		return nil, false
+	}
+	return out, true
 }
