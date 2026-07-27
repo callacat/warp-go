@@ -2,6 +2,8 @@
 warp
 warp.exe
 *.exe
+/protopkg
+/frontproxy/mihomo/proto/proto
 
 # 注册信息含私钥与 Bearer token，绝不应入库
 reg.json
