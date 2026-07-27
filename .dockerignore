@@ -1,0 +1,17 @@
+# 注册信息含私钥与 Bearer token，绝不应进镜像
+reg.json
+instances/
+
+# 宿主构建产物（镜像内重新编译，不需要）
+warp
+warp.exe
+*.exe
+
+# 仓库元数据与文档，构建不需
+.git/
+.gitignore
+docs/
+*.log
+.TMP
+README.md
+LICENSE

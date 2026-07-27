@@ -9,3 +9,6 @@ reg.json
 # 本地测试 / 临时
 *.log
 .TMP
+
+# 各实例独立注册文件（含私钥，绝不入库）
+instances/
