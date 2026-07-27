@@ -4,6 +4,7 @@ warp.exe
 *.exe
 /protopkg
 /frontproxy/mihomo/proto/proto
+/proto
 
 # 注册信息含私钥与 Bearer token，绝不应入库
 reg.json
@@ -14,3 +15,6 @@ reg.json
 
 # 各实例独立注册文件（含私钥，绝不入库）
 instances/
+
+# Claude Code 本地 session 目录（transcript/状态），不入仓
+.claude/
