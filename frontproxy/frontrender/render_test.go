@@ -491,6 +491,88 @@ func TestRender_OutputIsParseableYAML(t *testing.T) {
 	}
 }
 
+// --- P3 (#7) external-ui 段 ------------------------------------------------
+// P3 把 metacubexd 面板经 //go:embed 嵌入二进制，启动时解压到 mihomo homeDir/ui/ 再喂
+// external-ui 路径。frontrender 这一层负责把 external-ui 段渲染进 YAML，并焊死两条
+// mihomo 自动下载触发口（防"2025-06 GitHub 黑名单运行时拉取"红线，
+// 见 VENDORING.md 与交接文件安全红线段）：
+//
+//   - external-ui-url: ""   钉死空字面。mihomo DefaultRawConfig() 把 external-ui-url 默认
+//     填成 metacubexd gh-pages.zip URL；不显式渲染会被默认填回，AutoDownloadUI 拿到非空
+//     URL 即"随时会下载覆盖 embed 资源"状态。空字面是擦掉默认的唯一手段。
+//   - external-ui-name: ""  钉死空字面。NewUiUpdater 见非空 name 会把 serve 路径改成
+//     ui/<name>，与 embed 解压点 homeDir/ui 错位 → 面板 404。
+//
+// 默认（无 WithExternalUIPath option）不渲染 UI 段——保护未启用 P3 时老输出形态不变
+// （不污染 17 个旧测的断言语境）。
+
+// constExternalUIPath 是 P3 测试用的固定 external-ui 路径替身。生产里它是 mihomo homeDir
+// 的 ui/ 子目录（filepath.Join(homeDir,"ui")），frontrender 只原样嵌进 YAML 不处理合法性。
+const constExternalUIPath = "/tmp/warp-go-mihomo-home/ui"
+
+// renderWithUI 是 P3 切片共享的 happy path：喂 7 国 + 固定 URL + secret + WithExternalUIPath，
+// 断言无错并返回 YAML。它把 P3 option 调用收敛到一处，让各切片专注断言自己关心的那行。
+func renderWithUI(t *testing.T) []byte {
+	t.Helper()
+	out, err := Render(sevenCountries(), constProviderURL, constControllerSecret, WithExternalUIPath(constExternalUIPath))
+	if err != nil {
+		t.Fatalf("Render 带 WithExternalUIPath 返回错误：%v", err)
+	}
+	if len(out) == 0 {
+		t.Fatal("Render 带 WithExternalUIPath 返回空 YAML")
+	}
+	return out
+}
+
+// TestRender_ExternalUISectionPresent 验证喂 WithExternalUIPath 后输出含 external-ui 行
+// 且行尾含传入路径。这是 P3 option 生效的基线断言。
+func TestRender_ExternalUISectionPresent(t *testing.T) {
+	yaml := renderWithUI(t)
+	contains(t, yaml, "external-ui:", "external-ui 段标识")
+	contains(t, yaml, constExternalUIPath, "external-ui 路径嵌入 YAML")
+}
+
+// TestRender_ExternalUIURLAlwaysEmpty 验证 external-ui-url 显式渲染成空字面 ""。
+// 这是陷阱 #3 的防线——擦掉 mihomo DefaultRawConfig 的 gh-pages.zip 默认，防 AutoDownloadUI
+// 触发运行时拉取（#7 acceptance"避开 2025-06 GitHub 黑名单风险"）。
+func TestRender_ExternalUIURLAlwaysEmpty(t *testing.T) {
+	yaml := renderWithUI(t)
+	contains(t, yaml, "external-ui-url:", "external-ui-url 字段标识（显式渲染）")
+	line := findLineWith(yaml, "external-ui-url:")
+	line = strings.TrimSpace(line)
+	val := strings.TrimSpace(strings.TrimPrefix(line, "external-ui-url:"))
+	// 值应为空字面（"" 或 ''）—— 视模板 用哪种引号；剥引号后必须空。
+	val = strings.Trim(val, "\"'")
+	if val != "" {
+		t.Errorf("external-ui-url 应为空字面，got %q（mihomo DefaultRawConfig 默认未被擦干净 → 黑名单拉取风险）", val)
+	}
+}
+
+// TestRender_ExternalUINameEmpty 验证 external-ui-name 显式渲染成空字面 ""。
+// 这是陷阱 #4 的防线——防 NewUiUpdater 见非空 name 把 serve 路径改成 ui/<name> 与 embed
+// 解压点错位（面板 404）。
+func TestRender_ExternalUINameEmpty(t *testing.T) {
+	yaml := renderWithUI(t)
+	contains(t, yaml, "external-ui-name:", "external-ui-name 字段标识（显式渲染）")
+	line := findLineWith(yaml, "external-ui-name:")
+	line = strings.TrimSpace(line)
+	val := strings.TrimSpace(strings.TrimPrefix(line, "external-ui-name:"))
+	val = strings.Trim(val, "\"'")
+	if val != "" {
+		t.Errorf("external-ui-name 应为空字面，got %q（非空会让 mihomo serve 路径错位 → 面板 404）", val)
+	}
+}
+
+// TestRender_NoExternalUISectionByDefault 验证默认（无 WithExternalUIPath）不渲染 external-ui
+// 段。这条保护未启用 P3 的老部署：他们的输出 YAML 形态不变，不会因 P3 落地而多出未知段。
+// 也是回归守门——与全部 17 个旧测的"renderOK 不带 option"语境对齐。
+func TestRender_NoExternalUISectionByDefault(t *testing.T) {
+	yaml := renderOK(t)
+	notContains(t, yaml, "external-ui:", "默认不渲染 external-ui 段（未启用 P3）")
+	notContains(t, yaml, "external-ui-url:", "默认不渲染 external-ui-url 段（未启用 P3）")
+	notContains(t, yaml, "external-ui-name:", "默认不渲染 external-ui-name 段（未启用 P3）")
+}
+
 // itoa 是为让本测试文件不依赖 strconv 包、避免在断言里反复 strconv.Itoa 的简写。
 func itoa(i int) string {
 	if i == 0 {

@@ -3,6 +3,12 @@ FROM golang:1.26-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
+# P3 (#7) metacubexd 面板经 //go:embed all:assets/metacubexd 打进二进制。
+# 真产物（155 文件 / 7.56 MiB）不入 git，被 .gitignore 忽略；fresh clone 后
+# frontproxy/frontui/assets/metacubexd/ 只有占位。build 前必须先在宿主跑
+# `bash scripts/vendor-metacubexd.sh` 把真产物落到该目录，否则 docker build
+# 把占位 embed 进去 → 面板空。详见 VENDORING.md 与 scripts/vendor-metacubexd.sh。
+# CI 应把 vendoring 当 build 前置步骤。
 COPY . .
 # CGO 纯静态：alpine 无 glibc 也能直接跑；-trimpath/-s/-w 去调试信息缩体积
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/warp .

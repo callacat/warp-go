@@ -1,0 +1,4 @@
+# Placeholder so the directory exists in a fresh clone.
+# Run scripts/vendor-metacubexd.sh to populate the real metacubexd assets here.
+# The real 155-file vendor output is gitignored (see .gitignore + VENDORING.md);
+# only this file and the sibling index.html placeholder are tracked.

@@ -2,6 +2,8 @@ package mihomo
 
 import (
 	"errors"
+	"fmt"
+	"io/fs"
 	"net"
 	"path/filepath"
 	"sync"
@@ -9,6 +11,9 @@ import (
 	"github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/hub"
 	"github.com/metacubex/mihomo/hub/executor"
+	"github.com/metacubex/mihomo/hub/route"
+
+	"warp/frontproxy/frontui"
 )
 
 // engine.go is the B-1 code-layer integration gate (#4): it hosts mihomo via
@@ -49,6 +54,11 @@ var ErrEmptyConfig = errors.New("mihomo engine: 配置为空")
 type Engine struct {
 	cfg     []byte
 	homeDir string
+	// embeddedUI 是可选的 fs.FS（通常是 frontui.DistFS 即 //go:embed 进来的
+	// metacubexd 静态产物）。Start 在 hub.Parse 前把它解压到 homeDir/ui/ 并把
+	// 该路径喂给 hub.WithExternalUI，同时 route.SetEmbedMode(true) 关 mutate 路由。
+	// 零值 fs.FS（nil）= 未启用 P3 → Start 不碰 UI（opt-in，见 P3 切片 D 测）。
+	embeddedUI fs.FS
 
 	// options is the list of hub.Option applied at Start (e.g. WithSecret on the
 	// frontrender config). It is kept rather than applied at NewEngine because
@@ -93,6 +103,27 @@ func WithHubOption(opt hub.Option) Option {
 	return func(e *Engine) {
 		if opt != nil {
 			e.options = append(e.options, opt)
+		}
+	}
+}
+
+// WithEmbeddedUI enables P3 (#7): the Engine will, at Start, extract the given
+// fs.FS's metacubexd subtree into homeDir/ui/ and wire mihomo to serve it from
+// there as external-controller-ui. efs is typically frontui.DistFS (the
+// //go:embed all:assets/metacubexd FS); passing nil is a no-op so the option can
+// be conditionally appended without a caller-side nil guard.
+//
+// The three-step wiring (Extract → hub.WithExternalUI → route.SetEmbedMode) runs
+// in Start, NOT here: it must happen after homeDir is fixed (constant.SetHomeDir)
+// and before hub.Parse (so config resolution sees external-ui pointing at the
+// real disk path, and so the router reads embedMode=true when it is built). See
+// the homeDir/ui extraction site in Start and frontui.Extract's contract for the
+// safety-path reasoning (homeDir/ui is a homeDir subtree by construction → passes
+// mihomo IsSafePath).
+func WithEmbeddedUI(efs fs.FS) Option {
+	return func(e *Engine) {
+		if efs != nil {
+			e.embeddedUI = efs
 		}
 	}
 }
@@ -158,12 +189,45 @@ func (e *Engine) Start() error {
 	cfg := e.cfg
 	homeDir := e.homeDir
 	hubOpts := append([]hub.Option(nil), e.options...)
+	embeddedUI := e.embeddedUI
 	e.mu.Unlock()
 
 	// Point mihomo at our home dir before any path-relative artifact is written.
 	// SetHomeDir is the documented entry; must run before hub.Parse so config
 	// resolution and geodata use it.
 	constant.SetHomeDir(homeDir)
+
+	// P3 (#7) embedded UI wiring — runs only when WithEmbeddedUI was passed.
+	// Order is a hard constraint: each step must complete before hub.Parse
+	// below, because hub.Parse → executor.ApplyConfig builds mihomo's router
+	// and listeners, which read both external-ui (for the /ui file server) and
+	// route.embedMode (to gate /restart /configs /rules /upgrade mutate routes).
+	//   1. frontui.Extract: write the embed.FS subtree to homeDir/ui/. dest is a
+	//      homeDir child by construction, so it passes mihomo constant.IsSafePath
+	//      (constant/path.go:88 — path must be under homeDir). Extract is itself
+	//      idempotent (skips when homeDir/ui/index.html already exists & non-empty),
+	//      so a repeated Start-of-a-fresh-Engine against the same homeDir does not
+	//      rewrite 155 files. frontui has zero mihomo import; dependency arrow is
+	//      mihomo → frontui (one-way, like frontrender before it).
+	//   2. hub.WithExternalUI(homeDir/ui): tell mihomo where the disk UI lives, so
+	//      http.FileServer(http.Dir(uiPath)) serves the extracted files at /ui.
+	//   3. route.SetEmbedMode(true): switch the /api surface to read-only (no
+	//      restart/configs/rules/upgrade). This is the single-binary embed-mode
+	//      contract — the binary's UI never comes from a runtime fetch, so neither
+	//      should its control surface accept mutation that assumes one.
+	//
+	// external-ui-url and external-ui-name are NOT set here: frontrender pins them
+	// to "" in the rendered YAML (DefaultRawConfig otherwise defaults
+	// external-ui-url to a metacubexd gh-pages.zip URL → a runtime fetch that
+	// both defeats embed and risks the 2025-06 GitHub blacklist).
+	if embeddedUI != nil {
+		uiPath := filepath.Join(homeDir, "ui")
+		if err := frontui.Extract(embeddedUI, "assets/metacubexd", uiPath); err != nil {
+			return fmt.Errorf("mihomo engine: 解压嵌入 UI 到 %s 失败：%w", uiPath, err)
+		}
+		hubOpts = append(hubOpts, hub.WithExternalUI(uiPath))
+		route.SetEmbedMode(true)
+	}
 
 	// hub.Parse parses the YAML and applies the config into mihomo's globals
 	// (listeners, DNS, rules, providers). It is the library-mode boot the

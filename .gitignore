@@ -22,7 +22,18 @@ instances/
 # B-1 前置代理机密与落盘缓存，绝不入库（#1 user story 24 / P1-C #3）：
 # secret.env —— mihomo controller secret / per-country auth 凭据等机密，启动时生成。
 # mihomo/proxy_providers/ —— 远程 HTTP provider 的落盘缓存 YAML（frontrender 渲染的 path）。
-# mihomo/ui/ —— metacubexd 面板解压目录（P3 //go:embed 前的本地副本），含面板静态资源。
 secret.env
 mihomo/proxy_providers/
+
+# P3 (#7) metacubexd 面板真产物 vendored 后落到 frontproxy/frontui/assets/metacubexd/，
+# 不入 git（157 文件 / 7.56 MiB，每次上游升级会变）。用 path/* + 反向 unignore 占位，
+# 让目录在 fresh clone 后存在（//go:embed all: 不报 "no matching files"），产物文件被忽略，
+# 占位 index.html + .gitkeep 可 commit。复现步骤见 scripts/vendor-metacubexd.sh 与 VENDORING.md。
+frontproxy/frontui/assets/metacubexd/*
+!frontproxy/frontui/assets/metacubexd/.gitkeep
+!frontproxy/frontui/assets/metacubexd/index.html
+
+# mihomo/ui/ —— P3 前遗留的运行时解压副本约定（裸口只锚仓库根 mihomo/ui/，不误伤
+# frontproxy/ 下的同命目录）。P3 真落点是上方的 frontproxy/frontui/assets/metacubexd/，
+# 此行仅保留历史 P1-C 约定不删。
 mihomo/ui/

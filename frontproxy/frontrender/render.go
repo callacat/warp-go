@@ -89,12 +89,22 @@ const minSecretLen = 32
 // template references so the template has a single, complete data root, and so
 // adding a field forces an explicit model change rather than a stray template
 // action reaching into something unmodeled.
+//
+// P3 (#7) fields: ExternalUIPath / ExternalUIURL / ExternalUIName render the
+// mihomo external-ui 段. ExternalUIPath is set only when WithExternalUIPath is
+// passed (guard 条件 {{if .ExternalUIPath}} 控制整段渲染与否，未启用 P3 时整段不渲染，
+// 老输出形态不变)。ExternalUIURL 与 ExternalUIName 恒为空字面 "" —— 这是焊死 mihomo
+// DefaultRawConfig 默认（gh-pages.zip URL）与 NewUiUpdater 路径错位（非空 name）两条
+// 自动下载触发口的防线（见 render_test.go P3 切片注释 + VENDORING.md）。
 type renderModel struct {
 	Countries        []CountrySpec
 	ProviderURL      string
 	ControllerSecret string
 	PrivateCIDRs     []string
 	CorsAllowOrigins []string
+	ExternalUIPath   string // P3：external-ui 磁盘路径；空 = 未启用 P3，整段不渲染
+	ExternalUIURL    string // P3：恒空字面，擦掉 mihomo gh-pages.zip 默认
+	ExternalUIName   string // P3：恒空字面，防 NewUiUpdater serve 路径错位
 }
 
 // yamlTemplate is the single source of truth for the rendered output shape.
@@ -147,6 +157,17 @@ external-controller-cors:
     - {{.}}
 {{- end}}
   allow-private-network: false
+{{- if .ExternalUIPath}}
+# external-controller-ui（P3 #7）：metacubexd 面板经 //go:embed 嵌入二进制，启动时
+# 由 frontui.Extract 解压到此磁盘路径（mihomo homeDir/ui/），mihomo 用 http.FileServer
+# 从该目录 serve。external-ui-url 与 external-ui-name 显式空字面焊死两条自动下载触发口：
+# external-ui-url 空 擦掉 mihomo DefaultRawConfig 的 gh-pages.zip 默认（防 2025-06 黑名单
+#   运行时拉取覆盖 embed 资源——#7 acceptance）；
+# external-ui-name 空 防 NewUiUpdater 把 serve 路径改成 ui/<name> 与解压点错位（面板 404）。
+external-ui: {{.ExternalUIPath}}
+external-ui-url: ""
+external-ui-name: ""
+{{- end}}
 # firewall：controller 段白名单源段，与 secret/CORS 三件套并立；默认 deny-all ingress。
 firewall:
   deny-all-ingress: true
@@ -203,7 +224,35 @@ rules:
 // a later slice) can surface it; today the only failure modes are a too-weak
 // controller secret or a template execution failure (the latter is a programmer
 // bug, not a run-time condition, but we still surface it rather than panic).
-func Render(countries []CountrySpec, providerURL string, controllerSecret string) ([]byte, error) {
+// Option configures a Render call's optional behavior (functional-option
+// pattern). It keeps Render's positional arg list stable so the P1-C contract
+// (countries + providerURL + controllerSecret) is not broken when P3 (#7) needs
+// to inject the external-ui path. Render accepts opts as a variadic, so every
+// existing call site `Render(a, b, c)` compiles unchanged (zero opts = default
+// behavior = no external-ui segment rendered).
+type Option func(*renderModel)
+
+// WithExternalUIPath enables P3 (#7): render an `external-ui:` segment pointing
+// at the disk path the mihomo kernel serves metacubexd from. It also pins
+// `external-ui-url: ""` and `external-ui-name: ""` (see renderModel doc) to weld
+// shut mihomo's two auto-download triggers — the 2025-06 GitHub-blacklist
+// runtime fetch (DefaultRawConfig defaults external-ui-url to a gh-pages.zip
+// URL) and the NewUiUpdater path-mismatch when external-ui-name is non-empty.
+//
+// path is embedded verbatim; frontrender does not validate it is a mihomo
+// IsSafePath (that is the caller / mihomo-side wiring's job, see
+// frontproxy/mihomo Engine WithEmbeddedUI). Empty path is a no-op (the option
+// is dropped) so passing WithExternalUIPath("") does not spuriously render a UI
+// segment.
+func WithExternalUIPath(path string) Option {
+	return func(m *renderModel) {
+		if path != "" {
+			m.ExternalUIPath = path
+		}
+	}
+}
+
+func Render(countries []CountrySpec, providerURL string, controllerSecret string, opts ...Option) ([]byte, error) {
 	if len(controllerSecret) < minSecretLen {
 		return nil, fmt.Errorf("frontrender：controller secret 长度 %d < %d（弱 secret，#1 user story 21 红线）",
 			len(controllerSecret), minSecretLen)
@@ -238,14 +287,23 @@ func Render(countries []CountrySpec, providerURL string, controllerSecret string
 		// yamlTemplate is a package constant; a parse error is a programmer bug.
 		return nil, fmt.Errorf("frontrender：模板解析失败：%w", err)
 	}
-	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, renderModel{
+	// 构造 base model：countries/providerURL/secret 走位置参数，P3 三字段零值
+	// （ExternalUIPath 空 = 不渲染 external-ui 段；URL/Name 恒空仅在 WithExternalUIPath
+	// 启用整段后由模板字面 "" 落地）。
+	model := renderModel{
 		Countries:        uniq,
 		ProviderURL:      providerURL,
 		ControllerSecret: controllerSecret,
 		PrivateCIDRs:     privateCIDRs,
 		CorsAllowOrigins: corsAllowOrigins,
-	}); err != nil {
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&model)
+		}
+	}
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, model); err != nil {
 		return nil, fmt.Errorf("frontrender：模板执行失败：%w", err)
 	}
 	return buf.Bytes(), nil
