@@ -9,13 +9,11 @@ import (
 	"io/fs"
 	"log"
 	"net"
-	"os"
-	"os/signal"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
+	"warp/internal/warpserver"
 	"warp/registration"
 	"warp/scanner"
 	"warp/tunnel"
@@ -38,7 +36,7 @@ func usage() {
   warp [选项]
 
 代理：
-  -l <host:port>   SOCKS5 监听地址（默认 :40000，同时接受 IPv4 与 IPv6 客户端）
+  -l <host:port>   SOCKS5 监听地址（默认 127.0.0.1:40000 仅绑回环；对外监听须配 -user/-pass 或前置 TLS 反代）
   -user <用户名>   SOCKS5 用户名；必须同时给出 -user 和 -pass 才启用认证
   -pass <密码>     SOCKS5 密码
   -ip <取值>       连接哪个边缘（默认 4）：
@@ -52,29 +50,11 @@ func usage() {
                    时只使用该端口。域名由系统解析器解析（此时隧道尚未建立），
                    解析出的每个地址都会作为候选。
 
-上游代理（可选）：
-  -socks5 <host:port>  上游 SOCKS5 代理，所有到 WARP 边缘的 QUIC/UDP 流量经此转发
-                        （无认证；空=直连）。例：-socks5 your-socks5-host:7890
-                        仅作用于正式隧道拨号路径；-scan 的探针仍直连边缘（设计如此）。
-                        启用后会失去 quic-go 的 DF/ECN/GSO 等内核级 UDP 优化——经
-                        中继的隧道瓶颈在代理，可接受。已知限制见项目计划文档。
-  -rotate             端点轮询换 IP（默认 auto，无需显式传）。与 -socks5 + -scan 同开时
-                        自动启用：把 -scan 选出的 top-N 端点建成 N 条独立 QUIC 连接，按
-                        per-request round-robin 轮转发 H3 流，因不同端点经 socks5 出口
-                        IP 不同，从而实现代理池式 IP 轮换。池大小 = -scan-top（默认 4）。
-                        buildPool 串行建 N 条 socks5 控制连接（稳态常驻 N 次拨号；每次槽位重连
-                        再 +1 条常驻控制连接，同一期 socks5 单连接每次重连 +1 的「有界泄漏」模式
-                        已接受）；任一槽拨号失败整池回退单连接 + warning（不致命）。
-                        显式传 -rotate=true 时强制要求 -socks5 与 -scan，否则启动失败
-                        （fail-fast）。不满足自动启用条件（无 socks5 / 无 scan / 显式
-                        -ip 端点 / scan-top<=1）时 -rotate 完全关闭，行为与未加本特性等价。
-
 注册：
-  -config <路径>    注册信息文件路径（默认 reg.json）；多实例部署时指定不同文件
   -reg             尚未注册时执行注册，然后退出
   -del             向 API 注销并删除本地注册信息
 
-注册信息保存在 -config 指定的文件（默认工作目录下的 reg.json）。首次使用需先注册：
+注册信息保存在工作目录下的 reg.json。首次使用需先注册：启动本身从不注册，
 因为创建账号是一个需要明确表达的动作。-reg 是幂等的 —— 已有注册时只报告并
 退出，而不是替换掉它；替换会让旧注册在 Cloudflare 侧失去本地凭据，再也无法
 注销。要更换注册，请先用 -del。
@@ -88,12 +68,8 @@ func usage() {
   warp -ip 6                              通过 IPv6 连接边缘
   warp -ip 162.159.198.2:4500             指定边缘地址与端口
   warp -ip example.com:443                通过域名连接自定义边缘
-  warp -l 127.0.0.1:1080                  只监听回环地址
-  warp -l 0.0.0.0:1080 -user u -pass s    对外提供服务并要求认证
+  warp -l 0.0.0.0:1080 -user u -pass s    对外提供服务并要求认证（非回环须配 -user/-pass）
   warp -del && warp -reg                  更换注册
-  warp -socks5 your-socks5-host:7890          通过上游 SOCKS5 代理连接 WARP 边缘
-  warp -socks5 your-socks5-host:7890 -scan             上游 socks5 + 边缘优选，轮询自动启用换 IP
-  warp -socks5 your-socks5-host:7890 -scan -scan-top 8 同上但池大小增至 8（更多端点更频繁换 IP）
 
 扫描（可选，默认关闭）：
   扫描用与正式连接同一协议栈的轻量 QUIC 握手探针，对 WARP 边缘全段测真实往返
@@ -107,7 +83,6 @@ func usage() {
   warp -scan -scan-top 8                  选用 8 个端点而非默认 4
 
 参数：
-  -socks5 <host:port>      上游 SOCKS5 代理（空=直连；仅作用于正式拨号，不作用于 -scan）
   -scan                    启动前扫描 WARP 边缘全段并选用最低延迟的端点
   -scan-cidr <cidr,...>    追加自定义 CIDR 到默认段（默认 5 个 WARP IPv4 段或 2 个 IPv6 段）
   -scan-ports <p,p,...>    覆盖扫描端口（空则读 reg.json 的 endpoint_ports）
@@ -115,15 +90,15 @@ func usage() {
   -scan-timeout <dur>      扫描总超时（默认 45s）
   -scan-per-probe <dur>    单探针超时（默认 3s）
   -scan-top <n>            选用 RTT 最低的 N 个端点前置（默认 4）
-  -rotate                  端点轮询换 IP（默认 auto：socks5+scan 同开自动启用；显式开启强制要求 -socks5 + -scan）
 
 注意：
   UDP ASSOCIATE 的数据报不经过 WARP 隧道。plain CONNECT 是字节流隧道，无法
   承载数据报，因此它们从本机网络栈直接发出，对端看到的是你的真实地址。
   TCP 走隧道，UDP 不走。
 
-  默认监听地址接受来自任何位置的连接，且不要求认证。在不可信网络中请绑定
-  回环地址（-l 127.0.0.1:40000），或设置 -user 与 -pass。
+  默认监听地址（127.0.0.1:40000）只绑回环，不接受公网连接，且不要求认证。
+  对外监听时务必同时给出 -user 与 -pass（或加前置 TLS 反代），否则裸 SOCKS5
+  口在公网明文暴露会被拒绝启动。
 
 `)
 }
@@ -131,79 +106,11 @@ func usage() {
 // edgeLookupTimeout bounds the bootstrap name lookup for an -ip hostname.
 const edgeLookupTimeout = 10 * time.Second
 
-// validateHostPort 校验 -socks5 取值为 host:port 形式：host 非空、端口为 1-65535 的
-// 数字。host 可为 IP 字面量或域名（域名不在此解析——由 wzshiming 在拨号时走系统
-// 解析器解析，与 -ip example.com:443 同等暴露面）。仅做格式校验，不做 DNS 预查，
-// 避免在代理根本不会连接的失败模式下多一次 DNS 往返。
-func validateHostPort(spec string) error {
-	host, port, err := net.SplitHostPort(spec)
-	if err != nil {
-		return fmt.Errorf("需要 host:port 形式，例如 your-socks5-host:7890（%w）", err)
-	}
-	if host == "" {
-		return errors.New("host 部分为空")
-	}
-	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
-		return fmt.Errorf("端口 %q 不是 1-65535 范围内的数字", port)
-	}
-	return nil
-}
-
-// decideRotate 把 -rotate 的「显式开关 + 智能默认」编排成「建池大小 + 是否自动 + 错误」三元组。
-// 纯函数：取所有相关 flag 原值，不触 I/O、不读全局，便于 main 包单测覆盖矩阵分支。
-//
-// 语义（与 plan 锁定决策一致）：
-//   - rotateArg=false（用户未显式要）→ 走 auto：socks5+scan 都开且 ip ∈ {4,6} 且 scanTop>1 时
-//     自动启用，池大小 = scanTop；否则不启用（size=0）。auto=true 表示「由智能默认打开」，
-//     日志打「轮询=自动」；auto=false 表示「未启用」，日志打「轮询=关」。
-//   - rotateArg=true（用户显式要）→ 强制校验前置条件，任一缺失即 err（fail-fast，与
-//     validateHostPort 同语义），调用方 log.Fatalf。满足时 size=scanTop、auto=false（日志
-//     打「轮询=手动」以区分自动开）。
-//
-// 错误矩阵（rotateArg==true 时）：
-//   - socks5==""            → "-rotate 需 -socks5：直连下 WARP 同端点 IP 固定，轮询无换 IP 收益"
-//   - !scan                 → "-rotate 需 -scan：reg.json 单 host 多端口不构成多端点池"
-//   - ip ∉ {"4","6"}        → "-rotate 需 -scan 扫描结果，-ip <显式端点> 不轮询"
-//   - scanTop<=1            → "-rotate 需 -scan-top≥2：池大小过小无轮转意义"
-//
-// 「两层默认各管一段」：rotateArg 的默认（false）由 flag 管，auto 启用与否由本函数管——
-// 两层各管一段，用户传 -rotate 仅表示「我明确要」，不绕过自动判定的内置默认（即 auto 也能
-// 在没传 -rotate 时自己开）。
-func decideRotate(socks5 string, scan bool, ip string, rotateArg bool, scanTop int) (size int, auto bool, err error) {
-	ipIsAutoFamily := ip == "4" || ip == "6"
-
-	// auto 启用条件：socks5 + scan + ip∈{4,6} + scanTop>1 全满足。任一不满足则 auto=false。
-	rotateEligible := socks5 != "" && scan && ipIsAutoFamily && scanTop > 1
-
-	if rotateArg {
-		// 用户显式要 —— fail-fast 校验前置条件，给出确切缺失项的错误信息。
-		switch {
-		case socks5 == "":
-			return 0, false, errors.New("-rotate 需 -socks5：直连下 WARP 同端点 IP 固定，轮询无换 IP 收益")
-		case !scan:
-			return 0, false, errors.New("-rotate 需 -scan：reg.json 单 host 多端口不构成多端点池")
-		case !ipIsAutoFamily:
-			return 0, false, fmt.Errorf("-rotate 需 -scan 扫描结果，-ip %q 指定显式端点不轮询", ip)
-		case scanTop <= 1:
-			return 0, false, fmt.Errorf("-rotate 需 -scan-top≥2：当前 -scan-top=%d 池大小过小无轮转意义", scanTop)
-		}
-		// 全部满足：手动开启，size=scanTop。
-		return scanTop, false, nil
-	}
-
-	// 用户未显式要 —— auto 判定。
-	if rotateEligible {
-		return scanTop, true, nil
-	}
-	// auto 不启用：size=0，NewMasqueClient 走单连接退化路径（零代价回退）。
-	return 0, false, nil
-}
-
 // resolveEdge turns an explicit -ip value into the candidate address list.
 //
 // A hostname has to be resolved by the system resolver: this runs before the
 // tunnel exists, so the in-tunnel DoH client is not available yet. That means a
-// hostname here is visible to the local resolver — the same exposure the the
+// hostname here is visible to the local resolver — the same exposure the
 // registration API call already has, but worth knowing about. An IP literal
 // avoids it entirely.
 //
@@ -246,15 +153,12 @@ func resolveEdge(spec string) ([]string, error) {
 
 func main() {
 	var (
-		listen = flag.String("l", ":40000", "SOCKS5 监听地址 host:port")
+		// 默认绑回环，避免裸 SOCKS5 口暴露公网（P1-A 裸口收紧）。
+		listen = flag.String("l", "127.0.0.1:40000", "SOCKS5 监听地址 host:port（默认绑回环，对外请配 -user/-pass 或前置 TLS 反代）")
 		user   = flag.String("user", "", "SOCKS5 用户名（与 -pass 同时给出才启用认证）")
 		pass   = flag.String("pass", "", "SOCKS5 密码（与 -user 同时给出才启用认证）")
-		// 上游 SOCKS5 出口（可选）：让去往 WARP 边缘的 QUIC 流量先经此代理转发。
-		// 仅作用于正式隧道拨号路径，不作用于 -scan。空 = 直连（原有行为）。
-		socks5 = flag.String("socks5", "", "上游 SOCKS5 代理 host:port，所有到 WARP 边缘的 QUIC 流量经此转发（无认证；空=直连）。仅作用于正式隧道拨号，不作用于 -scan")
 		ip     = flag.String("ip", "4", "WARP 边缘：4、6，或显式 host:port")
-		config  = flag.String("config", defaultStateFile, "注册信息文件路径")
-		reg     = flag.Bool("reg", false, "尚未注册时执行注册，然后退出")
+		reg    = flag.Bool("reg", false, "尚未注册时执行注册，然后退出")
 		del    = flag.Bool("del", false, "向 API 注销并删除本地注册信息")
 
 		// 扫描（可选，默认关闭）：启动前对 WARP 边缘全段做真实 QUIC 握手探针，
@@ -267,10 +171,6 @@ func main() {
 		scanTimeout  = flag.Duration("scan-timeout", 45*time.Second, "扫描总超时（硬上限）")
 		scanPerProbe = flag.Duration("scan-per-probe", 3*time.Second, "单探针超时")
 		scanTop      = flag.Int("scan-top", 4, "选用 RTT 最低的 N 个端点前置")
-		// -rotate 端点轮询换 IP（可选，默认 auto）：与 -socks5 + -scan 同开时自动启用，
-		// 把 -scan 选出的 top-N 端点建成 N 条独立 QUIC 连接做 per-request round-robin。
-		// 用户显式传 -rotate=true 时强制要求 -socks5 与 -scan（否则 fail-fast）。
-		rotate = flag.Bool("rotate", false, "端点轮询换 IP：与 -socks5 + -scan 同开时自动启用；显式开启则强制要求 -socks5 与 -scan")
 	)
 	flag.Usage = usage
 	flag.Parse()
@@ -281,7 +181,7 @@ func main() {
 	// registering cannot be confused with starting the proxy.
 	if *del {
 		log.Println("正在注销...")
-		if err := registration.DeleteRegistration(*config); err != nil {
+		if err := registration.DeleteRegistration(defaultStateFile); err != nil {
 			log.Fatalf("注销失败：%v", err)
 		}
 		log.Println("✓ 注销成功")
@@ -292,24 +192,24 @@ func main() {
 		// Registering is idempotent: an existing registration is left alone.
 		// Replacing it silently would strand the old one on Cloudflare's side
 		// with no local credential left to delete it.
-		switch existing, err := registration.Load(*config); {
+		switch existing, err := registration.Load(defaultStateFile); {
 		case err == nil:
-			log.Printf("已注册：id=%s（%s）", existing.ID, *config)
+			log.Printf("已注册：id=%s（%s）", existing.ID, defaultStateFile)
 			log.Println("无需操作。要换一个注册，请先用 -del 注销。")
 			return
 		case !errors.Is(err, fs.ErrNotExist):
 			log.Fatalf("%s 存在但无法读取（%v）。\n"+
-				"拒绝覆盖：请删除该文件，或先执行 -del。", *config, err)
+				"拒绝覆盖：请删除该文件，或先执行 -del。", defaultStateFile, err)
 		}
 
 		regData, err := registration.Register()
 		if err != nil {
 			log.Fatalf("注册失败：%v", err)
 		}
-		if err := regData.Save(*config); err != nil {
-			log.Fatalf("注册信息写入 %s 失败：%v", *config, err)
+		if err := regData.Save(defaultStateFile); err != nil {
+			log.Fatalf("注册信息写入 %s 失败：%v", defaultStateFile, err)
 		}
-		log.Printf("✓ 注册信息已保存到 %s（id=%s）", *config, regData.ID)
+		log.Printf("✓ 注册信息已保存到 %s（id=%s）", defaultStateFile, regData.ID)
 		log.Println("不带 -reg 运行即可启动代理。")
 		return
 	}
@@ -317,27 +217,14 @@ func main() {
 	// Starting never registers: creating an account is an explicit act, and
 	// doing it implicitly would leave a registration on Cloudflare's side that
 	// the user never asked for.
-	regData, err := registration.Load(*config)
+	regData, err := registration.Load(defaultStateFile)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			log.Fatalf("%s 中没有注册信息。请先执行 warp -reg。", *config)
+			log.Fatalf("%s 中没有注册信息。请先执行 warp -reg。", defaultStateFile)
 		}
-		log.Fatalf("无法读取注册文件 %s：%v", *config, err)
+		log.Fatalf("无法读取注册文件 %s：%v", defaultStateFile, err)
 	}
 	log.Printf("✓ 已注册：id=%s", regData.ID)
-
-	// -socks5 校验：非空时必须是 host:port 形式（host 可为 IP 或域名——域名由
-	// wzshiming 走系统解析器解析，与 -ip example.com:443 同等暴露面）。与 -ip 正交：
-	// -ip 决定连哪个边缘、-socks5 决定怎么到那里。认证字段本期不暴露，结构已预留。
-	if *socks5 != "" {
-		if err := validateHostPort(*socks5); err != nil {
-			log.Fatalf("-socks5 %q 不是 host:port：%v", *socks5, err)
-		}
-	}
-	upstreamSocks5 := *socks5
-	if upstreamSocks5 == "" {
-		upstreamSocks5 = "关闭"
-	}
 
 	// -ip selects the edge: "4"/"6" pick the family from the registration —
 	// which hands out both, though a host reaches only the families its network
@@ -361,16 +248,15 @@ func main() {
 		for _, p := range ports {
 			edgeAddrs = append(edgeAddrs, net.JoinHostPort(endpointHost, strconv.Itoa(p)))
 		}
-		log.Printf("WARP 代理启动中（边缘=IPv%s %s 端口=%v，前端 socks5=%s，上游 socks5=%s）",
-			*ip, endpointHost, ports, *listen, upstreamSocks5)
+		log.Printf("WARP 代理启动中（边缘=IPv%s %s 端口=%v，socks5=%s）",
+			*ip, endpointHost, ports, *listen)
 
 	default:
 		var err error
 		if edgeAddrs, err = resolveEdge(*ip); err != nil {
 			log.Fatalf("-ip %q 既不是 4 或 6，也不是可用地址：%v", *ip, err)
 		}
-		log.Printf("WARP 代理启动中（边缘=%s → %v，前端 socks5=%s，上游 socks5=%s）",
-			*ip, edgeAddrs, *listen, upstreamSocks5)
+		log.Printf("WARP 代理启动中（边缘=%s → %v，socks5=%s）", *ip, edgeAddrs, *listen)
 	}
 
 	// Pin the edge to the endpoint public key from registration, like warp-svc does.
@@ -416,44 +302,25 @@ func main() {
 		}
 	}
 
-	// -socks5 仅作用于正式隧道拨号，scanner 探针不受影响（设计如此）。同时启用时
-	// 显式提示，避免用户误以为探针也走了上游代理——探针仍直连边缘。
-	if *socks5 != "" && *scan && (*ip == "4" || *ip == "6") {
-		log.Printf("⚠ -socks5 已启用但仅作用于隧道拨号；-scan 的探针仍直连边缘（设计如此）")
-	}
-
-	// 端点轮询编排：decideRotate 把 -rotate（显式）与 socks5+scan+ip+scanTop（自动判定）
-	// 折算成池大小。显式 -rotate 但条件不足时 fail-fast（与 validateHostPort 同语义）。
-	// rotateSize=0 → NewMasqueClient 走单连接退化路径（零代价回退，行为与未加本特性等价）。
-	rotateSize, rotateAuto, err := decideRotate(*socks5, *scan, *ip, *rotate, *scanTop)
+	// Connect to WARP edge via QUIC/H3. proxyClient is held as a tunnel.ProxyClient
+	// so this surface can be a test double for B-1's frontproxy wiring; today the
+	// real *tunnel.MasqueClient satisfies it directly via its HandleSOCKS5.
+	proxyClient, err := tunnel.NewMasqueClient(edgeAddrs, tlsConfig, regData.Token)
 	if err != nil {
-		log.Fatalf("%v", err)
+		log.Fatalf("MASQUE 连接失败：%v", err)
 	}
-	switch {
-	case rotateSize > 0 && rotateAuto:
-		log.Printf("✓ 端点轮询自动启用（池大小=%d，per-request round-robin）", rotateSize)
-	case rotateSize > 0 && !rotateAuto:
-		log.Printf("✓ 端点轮询手动启用（池大小=%d，per-request round-robin）", rotateSize)
-	default:
-		log.Printf("端点轮询=关（单连接）")
-	}
-
-	// Connect to WARP edge via QUIC/H3
-	proxyClient, err := tunnel.NewMasqueClient(edgeAddrs, tlsConfig, regData.Token, *socks5, rotateSize)
-	if err != nil {
-		// NewMasqueClient now retries forever with backoff. The only way it
-		// returns an error is if lifeCtx is cancelled (Close()), which has
-		// not happened yet during startup.
-		log.Fatalf("MASQUE 连接失败（意外）：%v", err)
-	}
+	defer proxyClient.Close()
 	log.Println("✓ MASQUE 连接已建立")
 
-	// Start SOCKS5 proxy server
-	ln, err := net.Listen("tcp", *listen)
-	if err != nil {
-		log.Fatalf("SOCKS5 监听失败：%v", err)
+	// 裸口收紧：-l 默认 127.0.0.1:40000（不上公网）。当 -l 指向非回环且未配
+	// -user/-pass 时，明文 SOCKS5 将对外无认证暴露 —— 拒绝启动而不是带 warning
+	// 默许（warning 易被忽视，裸口一旦公网即不可逆）。
+	var proxy warpserver.ProxyClient = proxyClient
+	if !isLoopbackListen(*listen) && (*user == "" || *pass == "") {
+		log.Fatalf("拒绝启动：-l %q 绑在非回环地址但未配 -user/-pass —— "+
+			"裸 SOCKS5 口将在公网明文暴露。请改用 -l 127.0.0.1:40000（默认），"+
+			"或同时给出 -user/-pass 再对外监听。", *listen)
 	}
-	defer ln.Close()
 
 	socksCfg := tunnel.SOCKS5Config{
 		Username: *user,
@@ -468,59 +335,41 @@ func main() {
 	log.Printf("SOCKS5 代理监听于 %s%s", *listen, authInfo)
 	log.Println("UDP ASSOCIATE 已启用 —— 数据报从本机直接发出，不经过 WARP 隧道")
 
-	// Handle connections
-	sigCh := make(chan os.Signal, 2)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	defer signal.Stop(sigCh)
-
+	// SOCKS5 服务由 internal/warpserver.Server 持有（P1-A 抽取）：Listen + Accept
+	// 循环（transient 错指数 backoff 上限 1s 重试、Timeout continue、ErrClosed/ctx
+	// 终止走优雅退出）的逐行等价行为黑盒都搬到了 Server 里，并为 B-1 注入留好
+	// ProxyClient 接口缝。Serve 在收到 SIGINT/SIGTERM 或 parent ctx cancel 时：
+	// cancel ctx + ln.Close 解阻 Accept + 等所有 in-flight HandleSOCKS5 收尾后返回。
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
-	go func() {
-		<-sigCh
-		log.Println("正在关闭...")
-
-		cancel()            // unblock handlers waiting on ctx
-		_ = ln.Close()      // unblock Accept
-		proxyClient.Close() // abort QUIC, cancel reconnects (lifeStop), unblock streams
-	}()
-
-	// Accept errors are not all fatal. Running out of file descriptors or having
-	// a client vanish between the SYN and the accept is transient: backing off
-	// and continuing keeps the proxy alive, where returning from main would take
-	// the whole process down over a momentary condition.
-	const maxAcceptBackoff = time.Second
-	var acceptBackoff time.Duration
-
-acceptLoop:
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			if ctx.Err() != nil {
-				break
-			}
-			if ne, ok := err.(net.Error); ok && ne.Timeout() {
-				continue
-			}
-			if errors.Is(err, net.ErrClosed) {
-				break
-			}
-			if acceptBackoff == 0 {
-				acceptBackoff = 5 * time.Millisecond
-			} else if acceptBackoff *= 2; acceptBackoff > maxAcceptBackoff {
-				acceptBackoff = maxAcceptBackoff
-			}
-			log.Printf("Accept 出错：%v，%s 后重试", err, acceptBackoff)
-			select {
-			case <-time.After(acceptBackoff):
-			case <-ctx.Done():
-				break acceptLoop
-			}
-			continue
-		}
-		acceptBackoff = 0
-		go proxyClient.HandleSOCKS5(ctx, conn, socksCfg)
+	srv := warpserver.New(*listen, proxy, socksCfg, log.Printf)
+	if err := srv.Serve(ctx); err != nil {
+		log.Fatalf("SOCKS5 监听失败：%v", err)
 	}
+}
+
+// isLoopbackListen reports whether a -l value binds only to the loopback. It is
+// the bare-port guard: when -l names a non-loopback address and no auth is set,
+// main refuses to start rather than expose a plaintext SOCKS5 to the public
+// Internet. The check accepts the exact "127.0.0.1:..." / "[::1]:..." forms and
+// the wildcard-bound ":port" / "0.0.0.0:..." forms as non-loopback.
+func isLoopbackListen(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		// Unparseable -l will be caught by net.Listen later; treat as loopback
+		// here so we do not double-fault the user with a confusing message.
+		return true
+	}
+	if host == "" {
+		return false // ":port" binds all interfaces, includes non-loopback
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		// A hostname given to -l (e.g. example.com:1080) — resolves to whatever
+		// the resolver says, so treat as public-facing.
+		return false
+	}
+	return ip.IsLoopback()
 }
 
 // runEndpointScan 在启动前对 WARP 边缘全段做扫描优选，返回替换后的 edgeAddrs。
