@@ -14,6 +14,7 @@
 // Run: go run -tags with_gvisor ./frontproxy/mihomo/proto
 
 //go:build with_gvisor
+
 package main
 
 import (
@@ -37,10 +38,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	wg "github.com/metacubex/sing-wireguard"
 	"github.com/metacubex/sing/common/metadata"
 	wgTun "github.com/metacubex/wireguard-go/tun"
 	"github.com/quic-go/quic-go"
-	wg "github.com/metacubex/sing-wireguard"
 )
 
 func main() {
@@ -119,7 +120,7 @@ func main() {
 		return
 	}
 	defer clientPc.Close()
-	log.Printf("[client] netstack packetConn type=%T local=%v remote=%v", clientPc, clientPc.LocalAddr())
+	log.Printf("[client] netstack packetConn type=%T local=%v", clientPc, clientPc.LocalAddr())
 
 	tr := &quic.Transport{Conn: clientPc, ConnectionIDLength: 20}
 	defer tr.Close()
@@ -196,11 +197,13 @@ func main() {
 }
 
 // miniRouter bridges the netstack to a loopback socket pair.
-//   outConn  — the netstack's "wire". Outbound packets leave here toward
-//              listenAddr; listener replies land back here (only router reads it,
-//              the quic listener owns its own socket).
-//   listenAddr — the quic listener address. Outbound dst; inbound src.
-//   stackAddr — the netstack host address (172.31.0.2). Inbound dst IP.
+//
+//	outConn  — the netstack's "wire". Outbound packets leave here toward
+//	           listenAddr; listener replies land back here (only router reads it,
+//	           the quic listener owns its own socket).
+//	listenAddr — the quic listener address. Outbound dst; inbound src.
+//	stackAddr — the netstack host address (172.31.0.2). Inbound dst IP.
+//
 // The netstack client picks its own ephemeral source port (gonet.DialUDP).
 // We capture it from the first outbound IPv4/UDP packet and reuse it as the
 // dst port on inbound rewrites, so packets route back to the client's gonet
@@ -269,9 +272,9 @@ func miniRouter(dev wgTun.Device, outConn *net.UDPConn, stackAddr netip.Addr, ou
 		copy(out[ipHdr+udpHdr:], inbuf[ipHdr+udpHdr:ipHdr+udpHdr+n])
 		out[0] = 0x45 // IPv4, IHL 5
 		binary.BigEndian.PutUint16(out[2:4], uint16(total))
-		out[6] = 0x40 // DF
-		out[8] = 64   // TTL
-		out[9] = 17   // UDP
+		out[6] = 0x40                            // DF
+		out[8] = 64                              // TTL
+		out[9] = 17                              // UDP
 		copy(out[12:16], net.IPv4(127, 0, 0, 1)) // src = listener IP
 		copy(out[16:20], stackAddr.AsSlice())    // dst = netstack host
 		var csum uint32
@@ -283,7 +286,7 @@ func miniRouter(dev wgTun.Device, outConn *net.UDPConn, stackAddr netip.Addr, ou
 		}
 		binary.BigEndian.PutUint16(out[10:12], ^uint16(csum))
 		binary.BigEndian.PutUint16(out[ipHdr+0:ipHdr+2], uint16(listenAddr.Port)) // src port = listener
-		binary.BigEndian.PutUint16(out[ipHdr+2:ipHdr+4], uint16(cp))             // dst port = netstack client src
+		binary.BigEndian.PutUint16(out[ipHdr+2:ipHdr+4], uint16(cp))              // dst port = netstack client src
 		binary.BigEndian.PutUint16(out[ipHdr+4:ipHdr+6], uint16(n+udpHdr))        // length
 		binary.BigEndian.PutUint16(out[ipHdr+6:ipHdr+8], 0)                       // csum (optional)
 		_, _ = dev.Write([][]byte{out}, 0)
