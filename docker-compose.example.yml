@@ -1,0 +1,55 @@
+# docker-compose.example.yml
+# 多实例部署示例：每个实例独立注册，使用不同端口和 data 目录。
+# 复制此文件为 docker-compose.yml 后按需调整实例数量。
+#
+# 首次部署：
+#   1. 创建需要的实例数量（默认 3 个）
+#   2. 逐个注册：docker compose run --rm warp1 -reg
+#      （或直接在 docker-compose.yml 中临时把 command 改为 -reg 启动一次）
+#   3. 确认各 data 目录下已生成 reg.json
+#   4. 启动全部：docker compose up -d
+
+services:
+  warp1:
+    image: ghcr.io/callacat/warp-go:latest
+    container_name: warp-go-1
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./data/warp1:/data
+    command: >
+      -l 127.0.0.1:40001
+      -config /data/reg.json
+      -scan -scan-ports 443
+
+  warp2:
+    image: ghcr.io/callacat/warp-go:latest
+    container_name: warp-go-2
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./data/warp2:/data
+    command: >
+      -l 127.0.0.1:40002
+      -config /data/reg.json
+      -scan -scan-ports 443
+
+  warp3:
+    image: ghcr.io/callacat/warp-go:latest
+    container_name: warp-go-3
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./data/warp3:/data
+    command: >
+      -l 127.0.0.1:40003
+      -config /data/reg.json
+      -scan -scan-ports 443
+
+# 注册辅助（手动运行）：
+#   docker compose run --rm warp1 -reg
+#   docker compose run --rm warp2 -reg
+#   docker compose run --rm warp3 -reg
+#
+# 每个 warp-N 实例启动后会读取 ./data/warpN/reg.json，
+# 互不干扰，可独立删除/重新注册。

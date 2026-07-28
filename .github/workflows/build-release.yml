@@ -143,3 +143,47 @@ jobs:
           files: release/warp-*
           generate_release_notes: true
           prerelease: false
+
+  # ── 清理过期记录 ───────────────────────────────────────────────
+  cleanup:
+    needs: [docker]
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Delete old workflow runs, caches, and release drafts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          REPO="${{ github.repository }}"
+          RETENTION_DAYS=30
+          CUTOFF=$(date -d "${RETENTION_DAYS} days ago" -u +%Y-%m-%dT%H:%M:%SZ)
+
+          echo "→ 清理 ${RETENTION_DAYS}d 前的 workflow runs..."
+          gh run list -R "$REPO" --limit 200 --json databaseId,createdAt,status \
+            --jq ".[] | select(.createdAt < \"${CUTOFF}\") | .databaseId" \
+            | while read id; do
+              echo "  删除 run $id"
+              gh run delete "$id" -R "$REPO" || true
+            done
+
+          echo "→ 清理过期 caches..."
+          gh api "repos/$REPO/actions/caches" --jq \
+            ".actions_caches[]? | select(.last_accessed_at < \"${CUTOFF}\") | .id" \
+            | while read cid; do
+              echo "  删除 cache $cid"
+              gh api "repos/$REPO/actions/caches/$cid" -X DELETE || true
+            done
+
+          echo "→ 清理过期 release drafts..."
+          gh release list -R "$REPO" --limit 100 --json tagName,createdAt,isDraft \
+            --jq ".[] | select(.isDraft) | select(.createdAt < \"${CUTOFF}\") | .tagName" \
+            | while read tag; do
+              echo "  删除 release $tag"
+              gh release delete "$tag" -R "$REPO" --yes || true
+            done
+
+          echo "✓ 清理完成"

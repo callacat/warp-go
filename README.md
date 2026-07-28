@@ -78,6 +78,32 @@ docker compose up -d
 
 > `network_mode: host` 是必要的——SOCKS5 代理需要被宿主机（或同网络的其他容器）访问。如果只绑回环（`127.0.0.1:40000`），外部不可达，更安全。
 
+### 多实例部署
+
+每个实例需要独立注册和独立端口，通过 `-config` 指定各自的 `reg.json`，复制 `docker-compose.example.yml` 为 `docker-compose.yml` 即可：
+
+```bash
+# 1. 复制多实例编排
+cp docker-compose.example.yml docker-compose.yml
+
+# 2. 创建数据目录并逐个注册
+mkdir -p data/warp1 data/warp2 data/warp3
+docker compose run --rm warp1 -reg
+docker compose run --rm warp2 -reg
+docker compose run --rm warp3 -reg
+
+# 3. 启动全部实例
+docker compose up -d
+```
+
+每个实例在不同端口（40001/40002/40003）、读写各自的 `data/warpN/reg.json`，互不干扰。增加实例只需在编排文件中复制一个 service 块即可。
+
+新增命令行参数：
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `-config <path>` | `reg.json` | 指定注册信息文件路径，多实例部署时必用 |
+
 ## 快速开始
 
 ```bash

@@ -53,6 +53,7 @@ func usage() {
                    解析出的每个地址都会作为候选。
 
 注册：
+  -config <路径>    注册信息文件路径（默认 reg.json）；多实例部署时指定不同文件
   -reg             尚未注册时执行注册，然后退出
   -del             向 API 注销并删除本地注册信息
 
@@ -159,7 +160,8 @@ func main() {
 		user   = flag.String("user", "", "SOCKS5 用户名（与 -pass 同时给出才启用认证）")
 		pass   = flag.String("pass", "", "SOCKS5 密码（与 -user 同时给出才启用认证）")
 		ip     = flag.String("ip", "4", "WARP 边缘：4、6，或显式 host:port")
-		reg    = flag.Bool("reg", false, "尚未注册时执行注册，然后退出")
+		config  = flag.String("config", defaultStateFile, "注册信息文件路径")
+		reg     = flag.Bool("reg", false, "尚未注册时执行注册，然后退出")
 		del    = flag.Bool("del", false, "向 API 注销并删除本地注册信息")
 
 		// 扫描（可选，默认关闭）：启动前对 WARP 边缘全段做真实 QUIC 握手探针，
@@ -182,7 +184,7 @@ func main() {
 	// registering cannot be confused with starting the proxy.
 	if *del {
 		log.Println("正在注销...")
-		if err := registration.DeleteRegistration(defaultStateFile); err != nil {
+		if err := registration.DeleteRegistration(*config); err != nil {
 			log.Fatalf("注销失败：%v", err)
 		}
 		log.Println("✓ 注销成功")
@@ -193,24 +195,24 @@ func main() {
 		// Registering is idempotent: an existing registration is left alone.
 		// Replacing it silently would strand the old one on Cloudflare's side
 		// with no local credential left to delete it.
-		switch existing, err := registration.Load(defaultStateFile); {
+		switch existing, err := registration.Load(*config); {
 		case err == nil:
-			log.Printf("已注册：id=%s（%s）", existing.ID, defaultStateFile)
+			log.Printf("已注册：id=%s（%s）", existing.ID, *config)
 			log.Println("无需操作。要换一个注册，请先用 -del 注销。")
 			return
 		case !errors.Is(err, fs.ErrNotExist):
 			log.Fatalf("%s 存在但无法读取（%v）。\n"+
-				"拒绝覆盖：请删除该文件，或先执行 -del。", defaultStateFile, err)
+				"拒绝覆盖：请删除该文件，或先执行 -del。", *config, err)
 		}
 
 		regData, err := registration.Register()
 		if err != nil {
 			log.Fatalf("注册失败：%v", err)
 		}
-		if err := regData.Save(defaultStateFile); err != nil {
-			log.Fatalf("注册信息写入 %s 失败：%v", defaultStateFile, err)
+		if err := regData.Save(*config); err != nil {
+			log.Fatalf("注册信息写入 %s 失败：%v", *config, err)
 		}
-		log.Printf("✓ 注册信息已保存到 %s（id=%s）", defaultStateFile, regData.ID)
+		log.Printf("✓ 注册信息已保存到 %s（id=%s）", *config, regData.ID)
 		log.Println("不带 -reg 运行即可启动代理。")
 		return
 	}
@@ -218,12 +220,12 @@ func main() {
 	// Starting never registers: creating an account is an explicit act, and
 	// doing it implicitly would leave a registration on Cloudflare's side that
 	// the user never asked for.
-	regData, err := registration.Load(defaultStateFile)
+	regData, err := registration.Load(*config)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			log.Fatalf("%s 中没有注册信息。请先执行 warp -reg。", defaultStateFile)
+			log.Fatalf("%s 中没有注册信息。请先执行 warp -reg。", *config)
 		}
-		log.Fatalf("无法读取注册文件 %s：%v", defaultStateFile, err)
+		log.Fatalf("无法读取注册文件 %s：%v", *config, err)
 	}
 	log.Printf("✓ 已注册：id=%s", regData.ID)
 
