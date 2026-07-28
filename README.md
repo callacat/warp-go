@@ -36,7 +36,7 @@ go build -o warp .
 
 > **私有仓库认证**：本仓库为 private，拉取镜像前需先登录 GHCR：
 > ```bash
-> echo "$GH_TOKEN" | docker login ghcr.io -u <用户名> --password-stdin
+> echo "$GITHUB_TOKEN" | docker login ghcr.io -u <用户名> --password-stdin
 > # 或用 gh: gh auth token | docker login ghcr.io -u <用户名> --password-stdin
 > ```
 

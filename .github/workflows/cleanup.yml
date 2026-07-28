@@ -20,7 +20,6 @@ jobs:
           REPO="${{ github.repository }}"
           RETENTION_DAYS=30
           CUTOFF=$(date -d "${RETENTION_DAYS} days ago" -u +%Y-%m-%dT%H:%M:%SZ)
-          DELETED_RUNS=0
 
           echo "=== 清理 ${CUTOFF} 之前的 workflow runs ==="
           DELETED_RUNS=0
