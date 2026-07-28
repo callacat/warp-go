@@ -1,0 +1,61 @@
+# sync-upstream.yml
+# 每天检查上游更新，检测到变更时创建 PR 以便审查后合并。
+# PR 模式的好处：即使 fork 有自己的修改（CI 等），也能正常 merge 而不会被覆盖。
+name: Sync Upstream
+
+on:
+  schedule:
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Sync upstream
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          UPSTREAM_URL="https://github.com/6Kmfi6HP/warp-go.git"
+          SYNC_BRANCH="sync/upstream-$(date +%Y%m%d-%H%M)"
+
+          echo "→ 添加上游仓库"
+          git remote add upstream "$UPSTREAM_URL" || true
+
+          echo "→ 抓取上游"
+          git fetch upstream main || git fetch upstream master
+          UPSTREAM_REF=$(git branch -r | grep 'upstream/' | grep -E '(main|master)' | head -1 | xargs)
+
+          echo "→ 当前 HEAD:    $(git rev-parse HEAD)"
+          echo "→ 上游 HEAD:    $(git rev-parse "$UPSTREAM_REF")"
+
+          if git diff --quiet HEAD "upstream/main" 2>/dev/null || git diff --quiet HEAD "upstream/master" 2>/dev/null; then
+            echo "=== 已是最新，无需同步 ==="
+            exit 0
+          fi
+
+          echo "=== 上游有更新 ==="
+
+          # 创建同步分支并推送上游代码
+          git push origin "$(git rev-parse "$UPSTREAM_REF"):refs/heads/${SYNC_BRANCH}" --force
+
+          # 创建 PR（如果已存在同分支的 open PR 则报错但不致命）
+          gh pr create \
+            --base "$(git rev-parse --abbrev-ref HEAD)" \
+            --head "$SYNC_BRANCH" \
+            --title "⬆️ Sync upstream $(date +%Y-%m-%d)" \
+            --body "自动同步上游更新。请审查后合并。" \
+            || echo "(可能已有同类 PR 处于 open 状态)"
+
+          # 自动合并（无冲突时）
+          gh pr merge "$SYNC_BRANCH" --auto --merge \
+            --subject "Sync upstream $(date +%Y-%m-%d)" \
+            2>&1 || echo "(自动合并未启用或存在冲突)"
