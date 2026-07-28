@@ -2,6 +2,8 @@
 
 基于 Go 的 Cloudflare WARP 客户端，通过 **MASQUE over QUIC/HTTP-3** 建立隧道，前端以 **SOCKS5** 暴露。免 root、无 TUN、不改动路由——纯代理客户端实现，所有协议参数、注册流程、信任模型均对齐官方 `warp-svc`（详见 [`docs/warp-masque-reverse-engineering.md`](docs/warp-masque-reverse-engineering.md)）。
 
+> **上游仓库**: [6Kmfi6HP/warp-go](https://github.com/6Kmfi6HP/warp-go) — 本 fork 自动同步上游更新并通过 CI 构建 Docker 镜像与多平台二进制。
+
 ```
 SOCKS5 客户端 ──► tunnel/masque.go ──► QUIC/H3 ──► WARP 边缘 ──► 目标
                         ▲
@@ -27,6 +29,54 @@ SOCKS5 客户端 ──► tunnel/masque.go ──► QUIC/H3 ──► WARP 边
 cd warp-go
 go build -o warp .
 ```
+
+## Docker
+
+预构建镜像已推送至 GHCR，支持 `linux/amd64` 和 `linux/arm64`。
+
+```bash
+# 拉取镜像
+docker pull ghcr.io/callacat/warp-go:latest
+
+# 首次注册（会生成 reg.json 到当前目录）
+docker run --rm -v "$(pwd)/data:/data" ghcr.io/callacat/warp-go:latest -reg
+
+# 启动代理（绑定回环，仅本机使用）
+docker run -d --name warp \
+  --network host \
+  -v "$(pwd)/data:/data" \
+  ghcr.io/callacat/warp-go:latest \
+  -l 127.0.0.1:40000
+
+# 查看日志
+docker logs -f warp
+```
+
+也可以使用 Docker Compose：
+
+```yaml
+services:
+  warp:
+    image: ghcr.io/callacat/warp-go:latest
+    container_name: warp-go
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./data:/data
+    command: >
+      -l 127.0.0.1:40000
+      -scan
+      -scan-ports 443
+```
+
+```bash
+# 注册
+docker compose run --rm warp -reg
+# 启动
+docker compose up -d
+```
+
+> `network_mode: host` 是必要的——SOCKS5 代理需要被宿主机（或同网络的其他容器）访问。如果只绑回环（`127.0.0.1:40000`），外部不可达，更安全。
 
 ## 快速开始
 
