@@ -308,7 +308,10 @@ func main() {
 	// Connect to WARP edge via QUIC/H3
 	proxyClient, err := tunnel.NewMasqueClient(edgeAddrs, tlsConfig, regData.Token)
 	if err != nil {
-		log.Fatalf("MASQUE 连接失败：%v", err)
+		// NewMasqueClient now retries forever with backoff. The only way it
+		// returns an error is if lifeCtx is cancelled (Close()), which has
+		// not happened yet during startup.
+		log.Fatalf("MASQUE 连接失败（意外）：%v", err)
 	}
 	log.Println("✓ MASQUE 连接已建立")
 

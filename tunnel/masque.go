@@ -75,7 +75,7 @@ const connectionIDLength = 20
 
 // perAddrDialTimeout bounds a single edge address attempt so an unreachable
 // port falls through to the next candidate quickly.
-const perAddrDialTimeout = 8 * time.Second
+const perAddrDialTimeout = 2 * time.Second
 
 // relayDrainGrace bounds how long a tunnel waits for the response direction
 // after the client has half-closed. Generous enough for the legitimate
@@ -248,13 +248,35 @@ func NewMasqueClient(edgeAddrs []string, tlsConfig *tls.Config, token string) (*
 		dnsCache:   make(map[string]dnsCacheEntry),
 		dnsFlight:  make(map[string]*dnsFlightResult),
 	}
-	bundle, err := c.dial(context.Background())
-	if err != nil {
-		lifeStop()
-		return nil, err
+
+	// Initial dial loop: same exponential-backoff pattern as runReconnect so that
+	// a transient network outage at start — e.g. routing not ready on boot — does
+	// not kill the process. The loop runs until dial succeeds or the process
+	// receives a signal (SIGINT/SIGTERM kills the process by default before the
+	// signal handler is installed below).
+	backoff := reconnectRetryInitial
+	for {
+		bundle, err := c.dial(context.Background())
+		if err == nil {
+			c.cur = bundle
+			return c, nil
+		}
+		log.Printf("MASQUE 连接失败（%v），%s 后重试 ...", err, backoff)
+		timer := time.NewTimer(backoff)
+		select {
+		case <-timer.C:
+		case <-lifeCtx.Done():
+			timer.Stop()
+			lifeStop()
+			return nil, net.ErrClosed
+		}
+		if backoff < reconnectRetryMax {
+			backoff *= 2
+			if backoff > reconnectRetryMax {
+				backoff = reconnectRetryMax
+			}
+		}
 	}
-	c.cur = bundle
-	return c, nil
 }
 
 // dial tries each candidate edge address in turn, starting from the one that
