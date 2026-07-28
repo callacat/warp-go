@@ -34,6 +34,12 @@ go build -o warp .
 
 预构建镜像已推送至 GHCR（`ghcr.io/callacat/warp-go`），支持 `linux/amd64` 和 `linux/arm64`，无需认证即可拉取。
 
+> **私有仓库认证**：本仓库为 private，拉取镜像前需先登录 GHCR：
+> ```bash
+> echo "$GH_TOKEN" | docker login ghcr.io -u <用户名> --password-stdin
+> # 或用 gh: gh auth token | docker login ghcr.io -u <用户名> --password-stdin
+> ```
+
 ```bash
 # 拉取镜像
 docker pull ghcr.io/callacat/warp-go:latest
