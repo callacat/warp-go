@@ -34,6 +34,12 @@ go build -o warp .
 
 预构建镜像已推送至 GHCR，支持 `linux/amd64` 和 `linux/arm64`。
 
+> **私有仓库认证**：本仓库为 private，拉取镜像前需先登录 GHCR：
+> ```bash
+> echo "$GH_TOKEN" | docker login ghcr.io -u <用户名> --password-stdin
+> # 或用 gh: gh auth token | docker login ghcr.io -u <用户名> --password-stdin
+> ```
+
 ```bash
 # 拉取镜像
 docker pull ghcr.io/callacat/warp-go:latest
@@ -141,6 +147,7 @@ warp —— Cloudflare WARP 客户端（MASQUE over QUIC/HTTP-3，SOCKS5 前端�
                    解析出的每个地址都作为候选。
 
 注册：
+  -config <路径>    注册信息文件路径（默认 reg.json）；多实例部署时指定不同文件
   -reg             尚未注册时执行注册，然后退出
   -del             向 API 注销并删除本地注册信息
 
@@ -156,7 +163,7 @@ warp —— Cloudflare WARP 客户端（MASQUE over QUIC/HTTP-3，SOCKS5 前端�
 
 ### 行为准则
 
-- **启动本身从不注册**——创建账号是需要明确表达的动作。缺少 `reg.json` 是致命错误，提示运行 `warp -reg`。
+- **启动本身从不注册**——创建账号是需要明确表达的动作。缺少注册文件是致命错误，提示运行 `warp -reg`。
 - **`-reg` 幂等**——已有注册时只报告并退出，**不替换**。替换会让旧注册在 Cloudflare 侧失去本地凭据，再也无法注销。要换注册，请先 `warp -del` 再 `warp -reg`。
 - **`-del` 走 API 注销**——仅需 `id` 与 `token`，**不**依赖能解析密钥材料。即使本构建已无法解析该文件的私钥，仍可从 API 侧移除，避免把注册孤立在 Cloudflare 侧。
 - **Accept 循环不因瞬时错误退出**——EMFILE、ECONNABORTED 这类瞬态错误按 5ms→1s 指数退避重试，仅在 `net.ErrClosed` 或收到关停信号时退出。

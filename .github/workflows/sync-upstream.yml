@@ -47,21 +47,27 @@ jobs:
           # 创建同步分支并推送上游代码
           git push origin "$(git rev-parse "$UPSTREAM_REF"):refs/heads/${SYNC_BRANCH}" --force
 
-          # 创建 PR（如果已存在同分支的 open PR 则报错但不致命）
-          gh pr create \
+          # 创建 PR 并自动合并；冲突时打标签
+          gh label create "conflict ⚠️" --color "d73a4a" 2>/dev/null || true
+
+          PR_URL=$(gh pr create \
             --base "$(git rev-parse --abbrev-ref HEAD)" \
             --head "$SYNC_BRANCH" \
             --title "⬆️ Sync upstream $(date +%Y-%m-%d)" \
             --body "自动同步上游更新。请审查后合并。" \
-            || echo "(可能已有同类 PR 处于 open 状态)"
+            2>/dev/null || echo "")
 
-          # 自动合并（无冲突时）；冲突时打标签
-          gh pr merge "$SYNC_BRANCH" --auto --merge \
-            --subject "Sync upstream $(date +%Y-%m-%d)" \
-            2>&1 || echo "(自动合并未启用)"
+          if [ -z "$PR_URL" ]; then
+            echo "(可能已有同类 PR 处于 open 状态)"
+          else
+            sleep 10
+            gh pr merge "$SYNC_BRANCH" --auto --merge \
+              --subject "Sync upstream $(date +%Y-%m-%d)" \
+              2>&1 || echo "(自动合并未启用)"
 
-          sleep 5
-          if [ "$(gh pr view "$SYNC_BRANCH" --json mergeable --jq .mergeable 2>/dev/null)" = "false" ]; then
-            gh pr edit "$SYNC_BRANCH" --add-label "conflict ⚠️"
-            echo "::warning::Sync PR has conflicts — manual resolution needed"
+            sleep 5
+            if [ "$(gh pr view "$SYNC_BRANCH" --json mergeable --jq .mergeable 2>/dev/null)" = "false" ]; then
+              gh pr edit "$SYNC_BRANCH" --add-label "conflict ⚠️"
+              echo "::warning::Sync PR has conflicts — manual resolution needed"
+            fi
           fi

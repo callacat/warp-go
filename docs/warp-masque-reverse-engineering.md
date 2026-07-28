@@ -359,7 +359,7 @@ SOCKS5 客户端 ──► tunnel/masque.go ──► QUIC/H3 ──► WARP 边
 -del    注销并删除本地注册
 ```
 
-注册文件固定为工作目录下的 `reg.json`，没有路径参数。**accept 循环不因瞬时错误退出。** EMFILE（文件描述符耗尽）、ECONNABORTED 这类错误是暂时的，早期实现遇到任何 accept 错误就 `break`，会让整个代理停止服务。现在按 5ms→1s 指数退避重试，仅在 `net.ErrClosed` 或收到关停信号时退出。
+注册文件保存至 `-config` 指定的路径（默认工作目录下的 `reg.json`）。**accept 循环不因瞬时错误退出。** EMFILE（文件描述符耗尽）、ECONNABORTED 这类错误是暂时的，早期实现遇到任何 accept 错误就 `break`，会让整个代理停止服务。现在按 5ms→1s 指数退避重试，仅在 `net.ErrClosed` 或收到关停信号时退出。
 
 边缘地址不再由命令行指定，而是从注册文件读取。启动**不会**自动注册——缺少注册文件是致命错误并提示运行 `-reg`；`-reg` 幂等，已有注册时只报告不替换，以免旧注册在 Cloudflare 侧失去本地凭据而无法注销。
 

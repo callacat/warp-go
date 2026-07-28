@@ -23,18 +23,18 @@ jobs:
           DELETED_RUNS=0
 
           echo "=== 清理 ${CUTOFF} 之前的 workflow runs ==="
-          PAGE=1
-          while true; do
+          DELETED_RUNS=0
+          for retry in 1 2 3; do
             RUNS=$(gh run list -R "$REPO" --limit 100 --json databaseId,createdAt,status \
               --jq ".[] | select(.createdAt < \"${CUTOFF}\") | .databaseId" 2>/dev/null)
-            if [ -z "$RUNS" ]; then break; fi
-            echo "$RUNS" | while read id; do
+            [ -z "$RUNS" ] && break
+            for id in $RUNS; do
               echo "  删除 run $id"
-              gh run delete "$id" -R "$REPO" 2>/dev/null && DELETED_RUNS=$((DELETED_RUNS + 1)) || true
+              gh run delete "$id" -R "$REPO" 2>/dev/null || true
+              DELETED_RUNS=$((DELETED_RUNS + 1))
             done
-            PAGE=$((PAGE + 1))
-            [ "$PAGE" -gt 20 ] && break
           done
+          echo "  已删除 $DELETED_RUNS 个旧 workflow runs"
 
           echo "=== 清理过期 caches ==="
           gh api "repos/$REPO/actions/caches" --jq \
