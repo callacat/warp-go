@@ -15,6 +15,13 @@ services:
     container_name: warp-go-1
     restart: unless-stopped
     network_mode: host
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 40001"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
     volumes:
       - ./data/warp1:/data
     command: >
@@ -27,6 +34,13 @@ services:
     container_name: warp-go-2
     restart: unless-stopped
     network_mode: host
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 40002"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
     volumes:
       - ./data/warp2:/data
     command: >
@@ -39,6 +53,13 @@ services:
     container_name: warp-go-3
     restart: unless-stopped
     network_mode: host
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 40003"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
     volumes:
       - ./data/warp3:/data
     command: >

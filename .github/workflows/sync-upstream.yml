@@ -55,7 +55,13 @@ jobs:
             --body "自动同步上游更新。请审查后合并。" \
             || echo "(可能已有同类 PR 处于 open 状态)"
 
-          # 自动合并（无冲突时）
+          # 自动合并（无冲突时）；冲突时打标签
           gh pr merge "$SYNC_BRANCH" --auto --merge \
             --subject "Sync upstream $(date +%Y-%m-%d)" \
-            2>&1 || echo "(自动合并未启用或存在冲突)"
+            2>&1 || echo "(自动合并未启用)"
+
+          sleep 5
+          if [ "$(gh pr view "$SYNC_BRANCH" --json mergeable --jq .mergeable 2>/dev/null)" = "false" ]; then
+            gh pr edit "$SYNC_BRANCH" --add-label "conflict ⚠️"
+            echo "::warning::Sync PR has conflicts — manual resolution needed"
+          fi
