@@ -1,6 +1,6 @@
 # sync-upstream.yml
-# 每天检查上游更新，检测到变更时创建 PR 以便审查后合并。
-# PR 模式的好处：即使 fork 有自己的修改（CI 等），也能正常 merge 而不会被覆盖。
+# 每天检查双上游仓库更新，检测到变更时创建 PR 以便审查后合并。
+# upstreams: 6Kmfi6HP/warp-go（主） + badafans/warp-go（原始 fork 源）
 name: Sync Upstream
 
 on:
@@ -20,41 +20,59 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Sync upstream
+      - name: Sync upstreams
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          UPSTREAM_URL="https://github.com/6Kmfi6HP/warp-go.git"
-          SYNC_BRANCH="sync/upstream-$(date +%Y%m%d-%H%M)"
+          # 双上游
+          UPSTREAMS="6Kmfi6HP:warp-go badafans:warp-go"
+          UPDATED=""
 
-          echo "→ 添加上游仓库"
-          git remote add upstream "$UPSTREAM_URL" || true
+          for entry in $UPSTREAMS; do
+            OWNER="${entry%%:*}"
+            REPO="${entry##*:}"
+            URL="https://github.com/${OWNER}/${REPO}.git"
 
-          echo "→ 抓取上游"
-          git fetch upstream main || git fetch upstream master
-          UPSTREAM_REF=$(git branch -r | grep 'upstream/' | grep -E '(main|master)' | head -1 | xargs)
+            echo "→ 添加远程仓库 ${OWNER}"
+            git remote add "${OWNER}" "${URL}" 2>/dev/null || true
 
-          echo "→ 当前 HEAD:    $(git rev-parse HEAD)"
-          echo "→ 上游 HEAD:    $(git rev-parse "$UPSTREAM_REF")"
+            echo "→ 抓取 ${OWNER}"
+            git fetch "${OWNER}" main || git fetch "${OWNER}" master
+            REF=$(git branch -r | grep "${OWNER}/" | grep -E '(main|master)' | head -1 | xargs)
 
-          if git diff --quiet HEAD "upstream/main" 2>/dev/null || git diff --quiet HEAD "upstream/master" 2>/dev/null; then
-            echo "=== 已是最新，无需同步 ==="
+            echo "→ ${OWNER} HEAD: $(git rev-parse "${REF}")"
+
+            if git diff --quiet HEAD "${REF}" 2>/dev/null; then
+              echo "=== ${OWNER} 已是最新 ==="
+              continue
+            fi
+            UPDATED="${UPDATED} ${OWNER}"
+          done
+
+          if [ -z "$UPDATED" ]; then
+            echo "=== 所有上游已是最新，无需同步 ==="
             exit 0
           fi
 
-          echo "=== 上游有更新 ==="
+          echo "=== 上游有更新：${UPDATED} ==="
 
-          # 创建同步分支并推送上游代码
-          git push origin "$(git rev-parse "$UPSTREAM_REF"):refs/heads/${SYNC_BRANCH}" --force
+          # 取 6Kmfi6HP 为 merge 源（主）
+          MERGE_REF=$(git branch -r | grep '6Kmfl6HP/' | grep -E '(main|master)' | head -1 | xargs)
+          if [ -z "$MERGE_REF" ]; then
+            MERGE_REF=$(git branch -r | grep 'badafans/' | grep -E '(main|master)' | head -1 | xargs)
+          fi
 
-          # 创建 PR 并自动合并；冲突时打标签
+          SYNC_BRANCH="sync/upstream-$(date +%Y%m%d-%H%M)"
+          echo "→ 同步源：${MERGE_REF}"
+          git push origin "$(git rev-parse "${MERGE_REF}"):refs/heads/${SYNC_BRANCH}" --force
+
           gh label create "conflict ⚠️" --color "d73a4a" 2>/dev/null || true
 
           PR_URL=$(gh pr create \
             --base "$(git rev-parse --abbrev-ref HEAD)" \
             --head "$SYNC_BRANCH" \
             --title "⬆️ Sync upstream $(date +%Y-%m-%d)" \
-            --body "自动同步上游更新。请审查后合并。" \
+            --body "自动同步上游更新。来源：${UPDATED}。" \
             2>/dev/null || echo "")
 
           if [ -z "$PR_URL" ]; then
