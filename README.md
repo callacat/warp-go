@@ -32,13 +32,7 @@ go build -o warp .
 
 ## Docker
 
-预构建镜像已推送至 GHCR，支持 `linux/amd64` 和 `linux/arm64`。
-
-> **私有仓库认证**：本仓库为 private，拉取镜像前需先登录 GHCR：
-> ```bash
-> echo "$GITHUB_TOKEN" | docker login ghcr.io -u <用户名> --password-stdin
-> # 或用 gh: gh auth token | docker login ghcr.io -u <用户名> --password-stdin
-> ```
+预构建镜像已推送至 GHCR（`ghcr.io/callacat/warp-go`），支持 `linux/amd64` 和 `linux/arm64`，无需认证即可拉取。
 
 ```bash
 # 拉取镜像
@@ -84,31 +78,80 @@ docker compose up -d
 
 > `network_mode: host` 是必要的——SOCKS5 代理需要被宿主机（或同网络的其他容器）访问。如果只绑回环（`127.0.0.1:40000`），外部不可达，更安全。
 
-### 多实例部署
+### 多容器部署
 
-每个实例需要独立注册和独立端口，通过 `-config` 指定各自的 `reg.json`，复制 `docker-compose.example.yml` 为 `docker-compose.yml` 即可：
+`-config <path>` 让每个容器指定独立注册文件。默认编排 3 个实例，[`docker-compose.example.yml`](docker-compose.example.yml)：
+
+```yaml
+services:
+  warp1:
+    image: ghcr.io/callacat/warp-go:latest
+    network_mode: host
+    volumes:
+      - ./data/warp1:/data
+    command: -l 127.0.0.1:40001 -config /data/reg.json -scan -scan-ports 443
+
+  warp2:
+    image: ghcr.io/callacat/warp-go:latest
+    network_mode: host
+    volumes:
+      - ./data/warp2:/data
+    command: -l 127.0.0.1:40002 -config /data/reg.json -scan -scan-ports 443
+
+  warp3:
+    image: ghcr.io/callacat/warp-go:latest
+    network_mode: host
+    volumes:
+      - ./data/warp3:/data
+    command: -l 127.0.0.1:40003 -config /data/reg.json -scan -scan-ports 443
+```
+
+#### Docker Compose
 
 ```bash
-# 1. 复制多实例编排
+# 1. 复制编排文件
 cp docker-compose.example.yml docker-compose.yml
 
-# 2. 创建数据目录并逐个注册
+# 2. 创建数据目录
 mkdir -p data/warp1 data/warp2 data/warp3
+
+# 3. 初始化注册（每个实例必须单独注册）
 docker compose run --rm warp1 -reg
 docker compose run --rm warp2 -reg
 docker compose run --rm warp3 -reg
 
-# 3. 启动全部实例
 docker compose up -d
 ```
 
-每个实例在不同端口（40001/40002/40003）、读写各自的 `data/warpN/reg.json`，互不干扰。增加实例只需在编排文件中复制一个 service 块即可。
+#### 纯 docker run
 
-新增命令行参数：
+```bash
+# 获取镜像
+docker pull ghcr.io/callacat/warp-go:latest
 
-| 参数 | 默认值 | 说明 |
-|---|---|---|
-| `-config <path>` | `reg.json` | 指定注册信息文件路径，多实例部署时必用 |
+# 注册（每个实例独立注册）
+docker run --rm -v "$(pwd)/data/warp1:/data" ghcr.io/callacat/warp-go:latest -reg -config /data/reg.json
+docker run --rm -v "$(pwd)/data/warp2:/data" ghcr.io/callacat/warp-go:latest -reg -config /data/reg.json
+docker run --rm -v "$(pwd)/data/warp3:/data" ghcr.io/callacat/warp-go:latest -reg -config /data/reg.json
+
+# 启动
+docker run -d --name warp1 --network host \
+  -v "$(pwd)/data/warp1:/data" \
+  ghcr.io/callacat/warp-go:latest \
+  -l 127.0.0.1:40001 -config /data/reg.json
+
+docker run -d --name warp2 --network host \
+  -v "$(pwd)/data/warp2:/data" \
+  ghcr.io/callacat/warp-go:latest \
+  -l 127.0.0.1:40002 -config /data/reg.json
+
+docker run -d --name warp3 --network host \
+  -v "$(pwd)/data/warp3:/data" \
+  ghcr.io/callacat/warp-go:latest \
+  -l 127.0.0.1:40003 -config /data/reg.json
+```
+
+每个容器独立端口、独立 `reg.json`，互不干扰。增加实例只需递增端口号和数据目录。
 
 ## 快速开始
 
