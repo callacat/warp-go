@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"strings"
+	"sync"
 )
 
 // 本文件实现端点轮询（rotate）特性。atom 顺序展开：先纯函数 nextIdx（无依赖），
@@ -159,5 +161,51 @@ func (c *MasqueClient) reconnectSlot(ctx context.Context, idx int, stale *connBu
 	// map 清零 + 可能的一次 DNS 抖动，可接受。
 	c.invalidateDoH(nil)
 	log.Printf("HTTP/3 槽位 %d 已重建（端点 %s）", idx, c.edgeAddrs[idx%len(c.edgeAddrs)])
+	return nil
+}
+
+// buildPool creates N independent QUIC connections, one per edgeAddr slot.
+// Partial failure degrades gracefully: slots that succeed get their bundles,
+// slots that fail leave nil entries (picked up by openRequestStream retry).
+func (c *MasqueClient) buildPool(ctx context.Context) error {
+	n := c.rotateSize
+	c.perSlotReconnect = make([]sync.Mutex, n)
+	c.pool = make([]*connBundle, n)
+
+	var wg sync.WaitGroup
+	errs := make([]error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			addr := c.edgeAddrs[idx%len(c.edgeAddrs)]
+			b, e := c.dialForRotate(ctx, addr)
+			if e != nil {
+				errs[idx] = fmt.Errorf("槽位 %d（%s）拨号失败：%w", idx, addr, e)
+				return
+			}
+			c.connMu.Lock()
+			if !c.closed {
+				c.pool[idx] = b
+			} else {
+				b.close("client closed during pool build")
+			}
+			c.connMu.Unlock()
+		}(i)
+	}
+	wg.Wait()
+
+	var msgs []string
+	for i := 0; i < n; i++ {
+		if errs[i] != nil {
+			msgs = append(msgs, errs[i].Error())
+		}
+	}
+	if len(msgs) == n {
+		return fmt.Errorf("所有 %d 槽拨号失败：%s", n, strings.Join(msgs, "; "))
+	}
+	if len(msgs) > 0 {
+		log.Printf("建池完成，%d/%d 槽成功（%d 失败）", n-len(msgs), n, len(msgs))
+	}
 	return nil
 }

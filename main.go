@@ -35,10 +35,12 @@ func usage() {
 用法：
   warp [选项]
 
-代理：
+proxy:
   -l <host:port>   SOCKS5 监听地址（默认 127.0.0.1:40000 仅绑回环；对外监听须配 -user/-pass 或前置 TLS 反代）
   -user <用户名>   SOCKS5 用户名；必须同时给出 -user 和 -pass 才启用认证
   -pass <密码>     SOCKS5 密码
+  -socks5 <addr>   上游 SOCKS5 代理地址 host:port，将 WARP QUIC 流量经该代理转发
+  -rotate <n>      端点轮询池大小（默认 0 关闭；与 -scan-top 一致，如 4）
   -ip <取值>       连接哪个边缘（默认 4）：
                      4            注册信息中的 IPv4 边缘
                      6            注册信息中的 IPv6 边缘
@@ -69,7 +71,10 @@ func usage() {
   warp -ip 162.159.198.2:4500             指定边缘地址与端口
   warp -ip example.com:443                通过域名连接自定义边缘
   warp -l 0.0.0.0:1080 -user u -pass s    对外提供服务并要求认证（非回环须配 -user/-pass）
-  warp -del && warp -reg                  更换注册
+  warp -socks5 127.0.0.1:1080               通过上游 SOCKS5 转发 WARP QUIC 流量
+  warp -scan -scan-top 4 -rotate 4          扫描低延迟端点并开启 4 槽轮询池
+  warp -socks5 127.0.0.1:9050 -rotate 4     经 Tor SOCKS5 转发至 WARP 并轮询边缘
+  warp -del && warp -reg                     更换注册
 
 扫描（可选，默认关闭）：
   扫描用与正式连接同一协议栈的轻量 QUIC 握手探针，对 WARP 边缘全段测真实往返
@@ -154,12 +159,14 @@ func resolveEdge(spec string) ([]string, error) {
 func main() {
 	var (
 		// 默认绑回环，避免裸 SOCKS5 口暴露公网（P1-A 裸口收紧）。
-		listen = flag.String("l", "127.0.0.1:40000", "SOCKS5 监听地址 host:port（默认绑回环，对外请配 -user/-pass 或前置 TLS 反代）")
-		user   = flag.String("user", "", "SOCKS5 用户名（与 -pass 同时给出才启用认证）")
-		pass   = flag.String("pass", "", "SOCKS5 密码（与 -user 同时给出才启用认证）")
-		ip     = flag.String("ip", "4", "WARP 边缘：4、6，或显式 host:port")
-		reg    = flag.Bool("reg", false, "尚未注册时执行注册，然后退出")
-		del    = flag.Bool("del", false, "向 API 注销并删除本地注册信息")
+		listen   = flag.String("l", "127.0.0.1:40000", "SOCKS5 监听地址 host:port（默认绑回环，对外请配 -user/-pass 或前置 TLS 反代）")
+		user     = flag.String("user", "", "SOCKS5 用户名（与 -pass 同时给出才启用认证）")
+		pass     = flag.String("pass", "", "SOCKS5 密码（与 -user 同时给出才启用认证）")
+		socks5Up = flag.String("socks5", "", "上游 SOCKS5 代理地址 host:port（QUIC 流量经此转发到 WARP 边缘）")
+		rotateN  = flag.Int("rotate", 0, "端点轮询池大小（0=关闭；与 -scan-top 一致，如 4）")
+		ip       = flag.String("ip", "4", "WARP 边缘：4、6，或显式 host:port")
+		reg      = flag.Bool("reg", false, "尚未注册时执行注册，然后退出")
+		del      = flag.Bool("del", false, "向 API 注销并删除本地注册信息")
 
 		// 扫描（可选，默认关闭）：启动前对 WARP 边缘全段做真实 QUIC 握手探针，
 		// 按 RTT 升序取 top-N 端点前置到 edgeAddrs，注册端点作兜底尾接。失败回退
@@ -174,6 +181,18 @@ func main() {
 	)
 	flag.Usage = usage
 	flag.Parse()
+
+	if *socks5Up != "" {
+		if err := validateHostPort(*socks5Up); err != nil {
+			log.Fatalf("-socks5 %q 无效：%v", *socks5Up, err)
+		}
+	}
+
+	if *rotateN < 0 {
+		log.Fatalf("-rotate %d 必须 >= 0", *rotateN)
+	}
+
+	rotateSize := decideRotate(*rotateN, *scanTop, *scan)
 
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
 
@@ -305,7 +324,7 @@ func main() {
 	// Connect to WARP edge via QUIC/H3. proxyClient is held as a tunnel.ProxyClient
 	// so this surface can be a test double for B-1's frontproxy wiring; today the
 	// real *tunnel.MasqueClient satisfies it directly via its HandleSOCKS5.
-	proxyClient, err := tunnel.NewMasqueClient(edgeAddrs, tlsConfig, regData.Token)
+	proxyClient, err := tunnel.NewMasqueClientWithOptions(edgeAddrs, tlsConfig, regData.Token, *socks5Up, rotateSize)
 	if err != nil {
 		log.Fatalf("MASQUE 连接失败：%v", err)
 	}

@@ -26,7 +26,6 @@ services:
       - ./data/warp1:/data
     command: >
       -l 127.0.0.1:40001
-      -config /data/reg.json
       -scan -scan-ports 443
 
   warp2:
@@ -45,7 +44,6 @@ services:
       - ./data/warp2:/data
     command: >
       -l 127.0.0.1:40002
-      -config /data/reg.json
       -scan -scan-ports 443
 
   warp3:
@@ -64,7 +62,6 @@ services:
       - ./data/warp3:/data
     command: >
       -l 127.0.0.1:40003
-      -config /data/reg.json
       -scan -scan-ports 443
 
 # 注册辅助（手动运行）：
@@ -72,5 +69,5 @@ services:
 #   docker compose run --rm warp2 -reg
 #   docker compose run --rm warp3 -reg
 #
-# 每个 warp-N 实例启动后会读取 ./data/warpN/reg.json，
-# 互不干扰，可独立删除/重新注册。
+# 每个 warp-N 实例启动后会读取默认注册文件，
+# 如需独立注册文件请挂载不同数据卷并配合环境变量 WORKDIR 指定目录路径。

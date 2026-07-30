@@ -86,7 +86,7 @@ docker compose up -d
 
 ### 多容器部署
 
-`-config <path>` 让每个容器指定独立注册文件。默认编排 3 个实例，[`docker-compose.example.yml`](docker-compose.example.yml)：
+默认编排 3 个实例，[`docker-compose.example.yml`](docker-compose.example.yml)：
 
 ```yaml
 services:
@@ -95,21 +95,21 @@ services:
     network_mode: host
     volumes:
       - ./data/warp1:/data
-    command: -l 127.0.0.1:40001 -config /data/reg.json -scan -scan-ports 443
+    command: -l 127.0.0.1:40001 -scan -scan-ports 443
 
   warp2:
     image: ghcr.io/callacat/warp-go:latest
     network_mode: host
     volumes:
       - ./data/warp2:/data
-    command: -l 127.0.0.1:40002 -config /data/reg.json -scan -scan-ports 443
+    command: -l 127.0.0.1:40002 -scan -scan-ports 443
 
   warp3:
     image: ghcr.io/callacat/warp-go:latest
     network_mode: host
     volumes:
       - ./data/warp3:/data
-    command: -l 127.0.0.1:40003 -config /data/reg.json -scan -scan-ports 443
+    command: -l 127.0.0.1:40003 -scan -scan-ports 443
 ```
 
 #### Docker Compose
@@ -136,25 +136,25 @@ docker compose up -d
 docker pull ghcr.io/callacat/warp-go:latest
 
 # 注册（每个实例独立注册）
-docker run --rm -v "$(pwd)/data/warp1:/data" ghcr.io/callacat/warp-go:latest -reg -config /data/reg.json
-docker run --rm -v "$(pwd)/data/warp2:/data" ghcr.io/callacat/warp-go:latest -reg -config /data/reg.json
-docker run --rm -v "$(pwd)/data/warp3:/data" ghcr.io/callacat/warp-go:latest -reg -config /data/reg.json
+docker run --rm -v "$(pwd)/data/warp1:/data" ghcr.io/callacat/warp-go:latest -reg
+docker run --rm -v "$(pwd)/data/warp2:/data" ghcr.io/callacat/warp-go:latest -reg
+docker run --rm -v "$(pwd)/data/warp3:/data" ghcr.io/callacat/warp-go:latest -reg
 
 # 启动
 docker run -d --name warp1 --network host \
   -v "$(pwd)/data/warp1:/data" \
   ghcr.io/callacat/warp-go:latest \
-  -l 127.0.0.1:40001 -config /data/reg.json
+  -l 127.0.0.1:40001
 
 docker run -d --name warp2 --network host \
   -v "$(pwd)/data/warp2:/data" \
   ghcr.io/callacat/warp-go:latest \
-  -l 127.0.0.1:40002 -config /data/reg.json
+  -l 127.0.0.1:40002
 
 docker run -d --name warp3 --network host \
   -v "$(pwd)/data/warp3:/data" \
   ghcr.io/callacat/warp-go:latest \
-  -l 127.0.0.1:40003 -config /data/reg.json
+  -l 127.0.0.1:40003
 ```
 
 每个容器独立端口、独立 `reg.json`，互不干扰。增加实例只需递增端口号和数据目录。
@@ -196,7 +196,6 @@ warp —— Cloudflare WARP 客户端（MASQUE over QUIC/HTTP-3，SOCKS5 前端�
                    解析出的每个地址都作为候选。
 
 注册：
-  -config <路径>    注册信息文件路径（默认 reg.json）；多实例部署时指定不同文件
   -reg             尚未注册时执行注册，然后退出
   -del             向 API 注销并删除本地注册信息
 
@@ -257,7 +256,7 @@ warp -scan -scan-ports 443 -scan-top 8
 
 ## 配置
 
-注册信息保存在 `-config` 指定的文件（默认工作目录下的 `reg.json`），权限 `0600`，字段如下。
+注册信息保存在 `reg.json`（位于工作目录下），权限 `0600`，字段如下。
 
 | 字段 | 类型 | 含义 |
 |---|---|---|

@@ -15,12 +15,14 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 	h3qlog "github.com/quic-go/quic-go/http3/qlog"
+	"github.com/wzshiming/socks5"
 	"golang.org/x/net/dns/dnsmessage"
 	"golang.org/x/net/http2"
 )
@@ -140,11 +142,34 @@ type MasqueClient struct {
 	quicConfig *quic.Config
 	token      string
 
+	// socks5Addr / socks5Dialer：上游 SOCKS5 出口，让去往 WARP 边缘的 QUIC 流量
+	// 先经此代理转发。两者皆空时走直连（原有行为）。仅作用于正式隧道拨号路径；
+	// scanner 探针不受影响。
+	//
+	// socks5Dialer 在 NewMasqueClient 构造期一次性建好并校验，每次 dialAddr 调用其
+	// DialContext（有状态：每次建一条新的 TCP 控制连接 + 本地 UDP socket）。
+	socks5Addr   string
+	socks5Dialer *socks5.Dialer
+
 	connMu      sync.RWMutex
 	reconnectMu sync.Mutex
 	cur         *connBundle
 	closed      bool
 	closeOnce   sync.Once
+
+	// —— 端点轮询（rotate）池化字段。rotateSize==0 时整个池不启用：上面 cur/connMu/
+	// reconnectMu 的单连接退化路径原样工作，下面字段全部不被触及（零代价回退）。
+	//
+	// rotateSize 是池容量（= -scan-top，默认 0 关闭 / 启用时通常 4）。pool 是 N 条独立
+	// QUIC 连接各承一个 bundle；rotateIdx 是 per-request round-robin 的游标；perSlotReconnect
+	// 为每个槽位单独配一把锁，让 reconnectSlot 互不打架（防风暴）。dialFn 仅供注入式测试
+	// 覆盖拨号行为，nil 时走生产 dialAddr——与 socks5 测试同一注入哲学（struct 字段注入，
+	// 不引包级可变 seam，少一个污染点）。
+	rotateSize       int
+	pool             []*connBundle
+	rotateIdx        atomic.Uint64
+	perSlotReconnect []sync.Mutex
+	dialFn           func(ctx context.Context, addr string) (*connBundle, error)
 
 	// Shared HTTP/2 DoH connection; created on first lookup, replaced when a
 	// query finds it unusable. dohDial coalesces cold-start dials so a burst of
@@ -197,7 +222,16 @@ type dnsFlightResult struct {
 // net.ListenUDP in the edge's family. Callers that need the B-1 injection seam
 // (ADR-0001) should use NewMasqueClientWithResolver instead.
 func NewMasqueClient(edgeAddrs []string, tlsConfig *tls.Config, token string) (*MasqueClient, error) {
-	return newMasqueClient(edgeAddrs, tlsConfig, token, nil)
+	return newMasqueClient(edgeAddrs, tlsConfig, token, nil, "", 0)
+}
+
+// NewMasqueClientWithOptions establishes a QUIC/H3 connection like
+// NewMasqueClient, but also accepts a SOCKS5 upstream (for traffic forwarding
+// through a proxy) and a rotate pool size (for edge endpoint load-balancing).
+// Use empty socks5Addr for direct connect; use rotateSize ≤ 0 to disable
+// the rotate pool (single-connection degradation).
+func NewMasqueClientWithOptions(edgeAddrs []string, tlsConfig *tls.Config, token string, socks5Addr string, rotateSize int) (*MasqueClient, error) {
+	return newMasqueClient(edgeAddrs, tlsConfig, token, nil, socks5Addr, rotateSize)
 }
 
 // NewMasqueClientWithResolver establishes a QUIC/H3 connection like
@@ -206,13 +240,13 @@ func NewMasqueClient(edgeAddrs []string, tlsConfig *tls.Config, token string) (*
 // zero-behavior-change roll-back anchor. A non-nil resolver error aborts the
 // dial so a refusal surfaces rather than silently falling through.
 func NewMasqueClientWithResolver(edgeAddrs []string, tlsConfig *tls.Config, token string, resolver PacketResolver) (*MasqueClient, error) {
-	return newMasqueClient(edgeAddrs, tlsConfig, token, resolver)
+	return newMasqueClient(edgeAddrs, tlsConfig, token, resolver, "", 0)
 }
 
-// newMasqueClient is the shared constructor; the two exported wrappers just pin
-// the presence of the resolver. Both keep the dial-at-construct behavior of the
-// original NewMasqueClient.
-func newMasqueClient(edgeAddrs []string, tlsConfig *tls.Config, token string, resolver PacketResolver) (*MasqueClient, error) {
+// newMasqueClient is the shared constructor; the four exported wrappers just pin
+// the presence of the resolver, socks5 dialer, and rotate pool size. Both keep
+// the dial-at-construct behavior of the original NewMasqueClient.
+func newMasqueClient(edgeAddrs []string, tlsConfig *tls.Config, token string, resolver PacketResolver, socks5Addr string, rotateSize int) (*MasqueClient, error) {
 	if len(edgeAddrs) == 0 {
 		return nil, errors.New("未提供任何边缘地址")
 	}
@@ -245,9 +279,23 @@ func newMasqueClient(edgeAddrs []string, tlsConfig *tls.Config, token string, re
 		quicConfig: quicConfig,
 		token:      token,
 		resolver:   resolver,
+		socks5Addr: socks5Addr,
 		dnsCache:   make(map[string]dnsCacheEntry),
 		dnsFlight:  make(map[string]*dnsFlightResult),
 	}
+
+	if socks5Addr != "" {
+		c.socks5Dialer = &socks5.Dialer{}
+	}
+
+	if rotateSize > 0 {
+		c.rotateSize = rotateSize
+		if err := c.buildPool(context.Background()); err != nil {
+			log.Printf("建池失败（%v），降级为单连接模式", err)
+			c.rotateSize = 0
+		}
+	}
+
 	bundle, err := c.dial(context.Background())
 	if err != nil {
 		return nil, err
@@ -386,6 +434,14 @@ func (c *MasqueClient) dialAddr(ctx context.Context, edgeAddr string) (*connBund
 // with the SOCKS5 listener — two goroutines on one fd steal each other's
 // datagrams (prototype decision-dense point #1).
 func (c *MasqueClient) obtainUnderlayConn(edgeAddr string, udpAddr *net.UDPAddr) (net.PacketConn, error) {
+	if c.socks5Dialer != nil {
+		conn, err := c.socks5Dialer.DialContext(context.Background(), "udp", udpAddr.String())
+		if err != nil {
+			return nil, fmt.Errorf("SOCKS5 出口拨号 %s 失败：%w", udpAddr.String(), err)
+		}
+		return conn.(net.PacketConn), nil
+	}
+
 	if c.resolver != nil {
 		conn, err := c.resolver(edgeAddr)
 		if err != nil {
@@ -425,12 +481,13 @@ func (c *MasqueClient) currentConnection() (*connBundle, error) {
 	return c.cur, nil
 }
 
-// openRequestStream opens an H3 request stream. If the underlying connection is
-// dead or unresponsive, it triggers a single automatic reconnection.
+// openRequestStream opens an H3 request stream. In rotate pool mode (rotateSize>0),
+// it uses pickBundle for round-robin slot selection, falling back to single-connection
+// currentConnection + reconnect when the pool is disabled.
 func (c *MasqueClient) openRequestStream(ctx context.Context) (*http3.RequestStream, error) {
-	bundle, err := c.currentConnection()
+	bundle, slotIdx, err := c.pickBundle()
 	if err != nil {
-		// Connection is dead — reconnect immediately.
+		// Pool closed or uninitialized — attempt reconnect.
 		log.Printf("HTTP/3 连接已失效，正在重连 ...")
 		if reconnectErr := c.reconnect(nil); reconnectErr != nil {
 			return nil, fmt.Errorf("连接已失效，重连失败：%w", reconnectErr)
@@ -442,8 +499,6 @@ func (c *MasqueClient) openRequestStream(ctx context.Context) (*http3.RequestStr
 		return bundle.h3Client.OpenRequestStream(ctx)
 	}
 
-	// Use a derived context with 10s timeout so if the H3 connection is in a bad
-	// state (server GOAWAY, stream limit exhaustion, etc.) we don't hang forever.
 	openCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
@@ -452,12 +507,23 @@ func (c *MasqueClient) openRequestStream(ctx context.Context) (*http3.RequestStr
 		return stream, nil
 	}
 
-	// If the outer context (caller) is done, propagate immediately.
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
 
-	// Stream open failed (incl. timeout) — reconnect and retry once.
+	// Stream open failed — recover the slot if in pool mode, or reconnect globally.
+	if slotIdx >= 0 {
+		log.Printf("HTTP/3 流打开失败（槽位 %d，%v），正在重建该槽 ...", slotIdx, err)
+		if reconnectErr := c.reconnectSlot(ctx, slotIdx, bundle); reconnectErr != nil {
+			return nil, fmt.Errorf("打开请求流失败：%v；槽位重连失败：%w", err, reconnectErr)
+		}
+		bundle, _, _ = c.pickBundle()
+		if bundle == nil {
+			return nil, net.ErrClosed
+		}
+		return bundle.h3Client.OpenRequestStream(ctx)
+	}
+
 	log.Printf("HTTP/3 流打开失败（%v），正在重连 ...", err)
 	if reconnectErr := c.reconnect(bundle); reconnectErr != nil {
 		return nil, fmt.Errorf("打开请求流失败：%v；重连失败：%w", err, reconnectErr)
@@ -1378,8 +1444,15 @@ func (c *MasqueClient) Close() error {
 		c.closed = true
 		bundle := c.cur
 		c.cur = nil
+		pool := c.pool
+		c.pool = nil
 		c.connMu.Unlock()
+
 		bundle.close("bye")
+
+		for _, b := range pool {
+			b.close("bye")
+		}
 	})
 	return nil
 }

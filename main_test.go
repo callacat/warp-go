@@ -61,3 +61,29 @@ func TestIsLoopbackListen_DecisionEquivalence(t *testing.T) {
 func TestMasqueClientSatisfiesProxyClient(t *testing.T) {
 	var _ warpserver.ProxyClient = (*tunnel.MasqueClient)(nil)
 }
+
+// TestDecideRotate asserts the rotate pool resolution logic.
+func TestDecideRotate(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		rotate   int
+		scanTop  int
+		scan     bool
+		wantSize int
+	}{
+		{"rotate=0, no-scan", 0, 4, false, 0},
+		{"rotate=0, scan", 0, 4, true, 4},
+		{"rotate=4, no-scan", 4, 4, false, 4},
+		{"rotate=4, scan", 4, 4, true, 4},
+		{"rotate=8, scan-top=4", 8, 4, true, 8},
+		{"rotate=1, no-scan", 1, 4, false, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := decideRotate(tc.rotate, tc.scanTop, tc.scan)
+			if got != tc.wantSize {
+				t.Errorf("decideRotate(%d, %d, %v) = %d, want %d",
+					tc.rotate, tc.scanTop, tc.scan, got, tc.wantSize)
+			}
+		})
+	}
+}
