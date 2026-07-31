@@ -178,19 +178,20 @@ warp-go/
 - **端口回退**：边缘返回 7 个端口，按序逐个尝试，每端口 8 秒超时，成功索引被记住供重连优先使用——UDP/443 被封的网络中必需。检测到 `ENETUNREACH/EAFNOSUPPORT/EHOSTUNREACH`（本机无该地址族路由）时直接中止整轮，避免 7×8 秒白等必然重复的失败。
 - **20 字节源连接 ID**：与官方 `SimpleConnectionIdGenerator` 一致；需用 `quic.Transport{ConnectionIDLength: 20}` 而非 `quic.DialAddr`，后者无法设置该长度。
 - **等待 HTTP/3 SETTINGS**：QUIC 握手完成 ≠ H3 可用，需阻塞直到 `ReceivedSettings()`。
-- **惰性重连**：空闲期间断线不会后台恢复，由 `openRequestStream` 在发现连接已死时触发，`reconnectMu` 串行化并用 `current != stale` 判断避免重复拨号——下一个请求承担重连延迟。
+- **按代际恢复**：空闲期间断线不主动拨号；请求发现 QUIC 已关闭，或 CONNECT 响应超时暴露出路径黑洞时，先按 bundle 身份摘除坏连接，再触发一个共享 reconnect flight。该任务在断网期间按 100ms→5s 退避持续尝试，网络恢复后自动装入新连接；并发请求只等待同一个任务，调用方 context 可独立停止等待，进程关闭则通过客户端生命周期 context 立即取消拨号。
 - **`connBundle` 单元**：udpConn、`quic.Transport`、QUIC 连接、H3 transport 打包为一组，重连时整组拆除，避免部分残留。
 - **端点延迟扫描（`-scan`，可选）**：启动前对 WARP 边缘全段（IPv4 默认 5 个 /24、IPv6 默认 2 个 /48）做与正式连接同一协议栈的**轻量 QUIC 握手探针**测 RTT——握手完成即 `CloseWithError` 干净释放，不等 H3 SETTINGS（排序相关性≈1，省 H3 资源）。按 RTT 升序取 top-4 前置到候选列表，注册端点尾接兜底；族级预探对 `ENETUNREACH` 等整族跳过避免刷爆总超时。并发受信号量约束（`min(64, NumCPU×8)`、下限 16），总超时 45s 硬上限，全失败回退注册端点不致命。不写回 `reg.json`（保留 `-reg`/`-del` 幂等）。这是对官方的有意增强，非对齐——详见逆向文档 §11。
 
 ### SOCKS5 与流释放
 
 - 内联实现 SOCKS5（含可选 RFC 1929 用户名/密码认证），支持 CONNECT 与 UDP ASSOCIATE。
-- **流释放是关键且曾出过故障**：边缘保持 plain CONNECT 隧道的自己一侧直到目标关闭，仅 `Close()`（关发送侧）不够，会让读方向 `io.Copy` 永久阻塞，同时泄漏 goroutine 与 QUIC 流；攒够若干条被遗弃的流后会耗尽边缘的并发流配额，后续 `OpenRequestStream` **静默阻塞**。当前用 `sync.Once` 保护的 `release()` 完整执行 `CancelRead` + `Close` + 重建连接的 `conn.Close()`。
+- **流释放是关键且曾出过故障**：边缘保持 plain CONNECT 隧道的自己一侧直到目标关闭，仅 `Close()`（关发送侧）不够，会让读方向 `io.Copy` 永久阻塞，同时泄漏 goroutine 与 QUIC 流；攒够若干条被遗弃的流后会耗尽边缘的并发流配额，后续 `OpenRequestStream` **静默阻塞**。当前用 `sync.Once` 保护的 `release()` 完整执行 `CancelRead` + `CancelWrite` + `Close` + 客户端 `conn.Close()`。
   - 客户端异常断开 → **立即**释放。
   - 客户端干净半关闭 → 给响应方向 `relayDrainGrace`（30 秒）排空，超时强制释放。
   - 该故障**无法用 `curl` + `kill -9` 复现**——RST 会让两个方向马上出错退出——复现需要客户端干净关闭而边缘保持沉默。
 - **每连接 goroutine 随 handler 退出**：监控 `ctx` 以便关停时强关连接的 goroutine，若只 `<-ctx.Done()` 会因 `ctx` 与进程同寿而**每处理一个连接常驻一个**。已用 `select` 同时等 `ctx.Done()` 与 `handlerDone`，实测同负载常驻数为 0。
-- **CONNECT 交换的超时**：`SendRequestHeader` 与 `ReadResponse` 都不接受 context，统一在 `connectThroughEdge()` 前后设置/清除 stream deadline——成功后**必须清除**，否则残留 deadline 会在传输中途掐断长命隧道。
+- **CONNECT 交换的超时与自愈**：`SendRequestHeader` 与 `ReadResponse` 都不接受 context，统一在 `connectThroughEdge()` 前后设置/清除 stream deadline——成功后**必须清除**，否则残留 deadline 会在传输中途掐断长命隧道。QUIC 在网络黑洞时可能仍显示 alive 且允许本地开流：交换期间完全无入包会立即淘汰旧代连接；路径仍有进展时，需短窗口内多个不同目标都超时才判定共享 H3 会话损坏，避免一个不可达目标误伤其他隧道。确认损坏后在新连接上重试一次；远端单流 reset 同样不会误伤共享连接。
+- **立即退出**：强制释放同时执行 `CancelRead` 与 `CancelWrite`，避免 flow-control 中的 Write 永久阻塞；库级关闭顺序先中止 QUIC carrier，再清理其上的 DoH TLS/H2，防止 `close_notify` 写入黑洞。命令行收到一次 `SIGINT`/`SIGTERM` 后立即取消 context、关闭监听器并中止 QUIC；`main` 不等待 handler 或协议层的优雅清理，也没有额外的退出计时。
 
 ### DNS（隧道内 DoH）
 
@@ -209,7 +210,7 @@ H3 CONNECT 到 162.159.36.1:443
 - **上游**：`162.159.36.1:443`、`162.159.46.1:443`（官方消费级 DoH，非公开 `1.1.1.1`）；`cloudflare-dns.com` 仅作 SNI，从不解析。
 - **两级 singleflight**：(1) 名称级——同主机的并发查询合并为一次；(2) 连接级 `dohDial`——冷启动时多 goroutine 只有一个真正拨号，其余等待其结果。第二级是必需的：Go 互斥锁不能跨拨号持有（`dohConnection → dialDoH → openRequestStream → reconnect → invalidateDoH` 会重入 `dohMu`），否则会各自建一条连接再丢弃其中 N-1 条。
 - **连接可用性用 `h2.State()` 而非 `CanTakeNewRequest()`**：后者在连接仅是达到 `MAX_CONCURRENT_STREAMS` 而饱和时也返回 false，而饱和连接是健康的。
-- **错误分类**：只有传输层失败（`errDoHTransport`）才允许退休共享连接或触发重试；DNS 应答（NXDOMAIN、无 A 记录、非 200）与本查询自身超时不算——为这些拆连接会中断所有并行查询。
+- **错误分类**：DNS 应答（NXDOMAIN、无 A 记录、非 200）不会拆共享连接。查询超时时结合所属 QUIC bundle 的收包进展判断：完全无进展立即重建 DoH carrier；仍有收包则需短窗口内多个不同名称都超时才重建，避免单个慢上游误伤并行查询。标记为 `errDoHTransport` 后解析会在新 carrier 上重试一次。
 - **双栈**：每个主机名同时发 A/AAAA，走同一条 H2 连接的两条流（只花一个 RTT），有 A 优先用 A（与 hickory `Ipv4thenIpv6` 等价，但少一个 RTT）。
 - **缓存**按响应 TTL，钳制 `[5s, 5min]`；超 1024 条清扫过期项，仍超 8192 则整体清空。
 - **有意分歧**：官方代理模式下 DNS 走宿主网络栈（`No DNS`），本项目把 DoH 放进隧道内——多一次 CONNECT+TLS+H2 握手，但**避免 DNS 查询以真实源地址泄漏**。

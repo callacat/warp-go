@@ -306,9 +306,11 @@ func main() {
 	// Connect to WARP edge via QUIC/H3
 	proxyClient, err := tunnel.NewMasqueClient(edgeAddrs, tlsConfig, regData.Token)
 	if err != nil {
-		log.Fatalf("MASQUE 连接失败：%v", err)
+		// NewMasqueClient now retries forever with backoff. The only way it
+		// returns an error is if lifeCtx is cancelled (Close()), which has
+		// not happened yet during startup.
+		log.Fatalf("MASQUE 连接失败（意外）：%v", err)
 	}
-	defer proxyClient.Close()
 	log.Println("✓ MASQUE 连接已建立")
 
 	// Start SOCKS5 proxy server
@@ -332,36 +334,41 @@ func main() {
 	log.Println("UDP ASSOCIATE 已启用 —— 数据报从本机直接发出，不经过 WARP 隧道")
 
 	// Handle connections
-	sigCh := make(chan os.Signal, 1)
+	sigCh := make(chan os.Signal, 2)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
 
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	go func() {
 		<-sigCh
 		log.Println("正在关闭...")
-		cancel()   // signal all HandleSOCKS5 goroutines to stop
-		ln.Close() // unblock Accept
+
+		cancel()            // unblock handlers waiting on ctx
+		_ = ln.Close()      // unblock Accept
+		proxyClient.Close() // abort QUIC, cancel reconnects (lifeStop), unblock streams
 	}()
 
 	// Accept errors are not all fatal. Running out of file descriptors or having
 	// a client vanish between the SYN and the accept is transient: backing off
-	// and continuing keeps the proxy alive, where returning would take the whole
-	// process down over a momentary condition.
+	// and continuing keeps the proxy alive, where returning from main would take
+	// the whole process down over a momentary condition.
 	const maxAcceptBackoff = time.Second
 	var acceptBackoff time.Duration
 
+acceptLoop:
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
 			if ctx.Err() != nil {
-				break // graceful shutdown
+				break
 			}
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
 				continue
 			}
 			if errors.Is(err, net.ErrClosed) {
-				break // listener gone and not a shutdown we initiated
+				break
 			}
 			if acceptBackoff == 0 {
 				acceptBackoff = 5 * time.Millisecond
@@ -372,7 +379,7 @@ func main() {
 			select {
 			case <-time.After(acceptBackoff):
 			case <-ctx.Done():
-				return
+				break acceptLoop
 			}
 			continue
 		}
