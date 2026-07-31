@@ -71,6 +71,10 @@ func main() {
 	menu.AddSeparator()
 	menu.Add("退出").OnClick(func(*application.Context) {
 		_ = svc.Stop()
+		// 先显式关闭窗口再退出：托盘 AttachWindow 后仅 app.Quit() 在部分
+		// 平台（尤其 Linux GTK）不会销毁已附加的主窗口，导致"退出无效，
+		// 主窗口还在"。
+		window.Close()
 		app.Quit()
 	})
 	tray.SetMenu(menu)

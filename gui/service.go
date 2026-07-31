@@ -59,7 +59,7 @@ func (s *Service) serverInstance() (*core.Server, error) {
 // 状态与生命周期
 // ---------------------------------------------------------------------------
 
-// InitDefaults 初始化基础文件（rules.txt 模板 + GEO 下载，不依赖注册）。
+// InitDefaults 初始化基础文件（rules.txt 下载/模板 + GEO 下载，不依赖注册）。
 // GUI 首次启动时调用；幂等，可安全重复。
 func (s *Service) InitDefaults() {
 	s.mu.Lock()
@@ -67,8 +67,11 @@ func (s *Service) InitDefaults() {
 		s.mu.Unlock()
 		return
 	}
-	srv, err := s.serverInstance()
 	s.mu.Unlock()
+
+	// 注意：不能在持有 s.mu 时调用 serverInstance()（其内部再次加锁，
+	// 非重入互斥锁会永久死锁，导致 GUI 全部服务调用阻塞）。
+	srv, err := s.serverInstance()
 	if err != nil {
 		log.Printf("⚠ 初始化失败：%v", err)
 		return
@@ -309,10 +312,33 @@ func (s *Service) UpdateGeo() UpdateGeoResult {
 // ---------------------------------------------------------------------------
 
 // SetSystemProxy 开启/关闭系统代理（指向当前监听地址）。
+// 开启且内核未运行时自动启动代理内核（用户需求：开启系统代理即启动
+// warp-go）。未注册时 Start 会报错并记录到 startErr/日志，不会挂起。
 func (s *Service) SetSystemProxy(enabled bool) error {
 	srv, err := s.serverInstance()
 	if err != nil {
 		return err
+	}
+
+	if enabled && !s.IsRunning() {
+		if err := s.Start(); err != nil {
+			return fmt.Errorf("自动启动内核失败：%w", err)
+		}
+		// Start 是异步的：等待内核进入 running 再设置系统代理，避免
+		// 指向尚未监听的端口。最多等 10s，超时仍返回（Start 的启动错误
+		// 会经 startErr 展示在状态页）。
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			st := srv.Status()
+			if st.State == "running" {
+				return srv.SetSystemProxy(true)
+			}
+			if st.LastError != "" && st.State != "starting" {
+				return fmt.Errorf("内核启动失败：%s", st.LastError)
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+		return nil // 超时：内核仍在启动，配置意向已记录（Start 会自动应用）
 	}
 	return srv.SetSystemProxy(enabled)
 }

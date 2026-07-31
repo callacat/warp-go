@@ -654,17 +654,24 @@ func (s *Server) InitDefaults(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	// rules.txt 模板：EnsureRulesFile 在 NewEngine 内做，但那只在 Start 后；
-	// 这里独立触发一次模板初始化。
+	// 规则文件：缺失时优先从 GitHub 仓库拉取默认规则（含 REJECT 广告拦截），
+	// 下载失败回退内置模板。首次启动下载一次，之后文件已存在不再触碰。
+	// （EnsureRulesFile 在 NewEngine 内也会做，但那只在 Start 后；这里独立
+	// 触发，用户未注册时也能看到规则页。）
 	if err := os.MkdirAll(filepath.Dir(cfg.RulesPath), 0o755); err != nil {
 		return fmt.Errorf("创建规则目录失败：%w", err)
 	}
-	created, err := route.EnsureRulesFile(cfg.RulesPath)
-	if err != nil {
-		return fmt.Errorf("初始化默认规则失败：%w", err)
-	}
-	if created {
-		log.Printf("✓ 已生成默认规则模板 %s", cfg.RulesPath)
+	if _, err := os.Stat(cfg.RulesPath); errors.Is(err, fs.ErrNotExist) {
+		log.Println("首次启动：正在下载默认规则模板...")
+		updated, derr := route.DownloadDefaultRules(ctx, cfg.RulesPath, route.DefaultRulesURL)
+		if derr != nil {
+			log.Printf("⚠ 默认规则下载失败（回退内置模板）：%v", derr)
+			if _, err := route.EnsureRulesFile(cfg.RulesPath); err != nil {
+				return fmt.Errorf("初始化默认规则失败：%w", err)
+			}
+		} else if updated {
+			log.Printf("✓ 已下载默认规则 %s", cfg.RulesPath)
+		}
 	}
 
 	// GEO 下载：缺失时拉取；SHA-1 去重由 route.UpdateGeoData 负责。
@@ -758,7 +765,7 @@ func (s *Server) geoUpdateOnce(ctx context.Context) {
 }
 
 // SetSystemProxy 开启/关闭系统代理，指向当前监听地址。运行中直接调用
-// sysproxy.Set；停止时只记录意向，Start 时按配置应用。GUI 开关专用。
+// sysproxy.Set；停止时记录配置意向并落盘（Start 时按配置应用）。GUI 开关专用。
 func (s *Server) SetSystemProxy(enabled bool) error {
 	s.mu.Lock()
 	listenAddr := s.listenAddr
@@ -766,7 +773,7 @@ func (s *Server) SetSystemProxy(enabled bool) error {
 	s.mu.Unlock()
 
 	if !running {
-		// 未运行：记录配置意向（Start 时生效）。
+		// 未运行：记录配置意向并持久化到 config.json（重启后仍生效）。
 		cfg, err := s.ensureConfig()
 		if err != nil {
 			return err
@@ -775,6 +782,10 @@ func (s *Server) SetSystemProxy(enabled bool) error {
 		cfg.EnableSystemProxy = enabled
 		s.cfg = cfg
 		s.mu.Unlock()
+		if err := s.SaveConfig(cfg); err != nil {
+			return fmt.Errorf("持久化系统代理设置失败：%w", err)
+		}
+		log.Printf("✓ 系统代理设置已记录（%v），启动时自动应用", enabled)
 		return nil
 	}
 	if listenAddr == "" {
