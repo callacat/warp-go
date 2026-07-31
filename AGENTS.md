@@ -106,6 +106,30 @@ node --version      # M4 GUI 前端: v22（已装）
 | M2 route 包 | ✅ | 规则解析/rules.txt 模板与热重载/GEO 下载(SHA-1+proto 校验+原子写)/匹配引擎/单测 18 个全绿 |
 | M2.5 SOCKS5 分流集成 | ✅ | 在 `proxy` 包实现（非 tunnel 侧）：`Config.Router` + `Config.TunnelDial` 缝；`proxy_test.go` 覆盖 direct/proxy/未命中兜底/nil Router 全隧道 4 路径；`dial()` 未命中→本地直连、命中 proxy→隧道（TunnelDial 未配则报错） |
 | M3 系统代理+config | ✅ | `proxy/` mixed HTTP+SOCKS5（首字节嗅探）+ UDP ASSOCIATE 中继（udp.go）；`sysproxy/` 三平台（common 校验 + linux gsettings/win 注册表/mac networksetup）；`config.json` 执行目录 + mtime/hash 热重载 + 旗标>config>默认；默认绑 `127.0.0.1:40000`；main.go 重写接线；proxy/config/sysproxy 单测全绿 |
+| M4 GUI + core | ✅ | `core/` Server 生命周期抽取（CLI/GUI 共用，含 SetSystemProxy/ReloadRules/SaveConfig）；`gui/` Wails v3（main.go + service.go + logs.go + React 19 前端五页：状态/规则/GEO/设置/日志）；前端 npm build 通过；**本地 GTK 4.6 < 4.10 无法编译 wails → GUI 构建走 CI**（build-gui 分平台 job，ubuntu-24.04 有 GTK 4.14） |
+| M5 发布 | ✅ | README/AGENTS.md 重写；Dockerfile 端口 40000；docker-compose.example.yml；推送远端（备份后 force-push）；tag v0.2.0 触发 Actions 构建 |
+
+## 6.6 上游冲突处理（重要）
+
+**冲突面**：仅 4 个文件与上游重叠（`main.go` / `tunnel/masque.go` / `tunnel/udp.go` / `registration.go` + go.mod）；`core/ proxy/ route/ sysproxy/ gui/` 全是独立包，上游永不触碰 → 零冲突。
+
+**策略**（sync-upstream.yml 已实现）：
+1. 合并顺序：badafans 先 → 6Kmfi6HP 后（fork 冲突时占优）
+2. 冲突即停：`git merge --abort` + `conflict ⚠️` 标签 + issue 通知，**绝不自动解决**
+3. 冲突分级处理：
+   - `tunnel/masque.go`：追加式改动（RouteFunc/DialTunnel），大概率自动合并
+   - `main.go`：我们的薄壳（~450 行）——保留薄壳 + 移植上游新 flag 到 core
+   - `go.mod`：取并集 + `go mod tidy`
+   - 独立包：永不冲突
+4. 验证：解决后 `go build ./... && go test ./...`（core 测试保证核心不回归）
+
+## 6.7 构建策略（资源优化）
+
+- **本机只做 CLI 构建验证**（纯 Go 秒级）；GUI 构建因本地 GTK 4.6 过旧（需 4.10+）
+- **GUI / Docker / Release 全部走 GitHub Actions**（不占本机磁盘）：
+  - push main → docker-ghcr（linux/amd64+arm64 镜像 → GHCR）
+  - tag v* → build-release（test → 5 平台 CLI + 3 平台 GUI → GitHub Release）
+  - 下载产物到本机验证（`gh release download`）
 
 ## 7. 关键决策记录（ADR 摘要）
 
@@ -122,4 +146,5 @@ node --version      # M4 GUI 前端: v22（已装）
 - 本地 Go 1.26.5（/usr/local/go1.26.5）；gh 认证为 `callacat`；本机 linux/arm64 无桌面
 - `go.mod`: `module warp`，go 1.26.5，quic-go v0.61
 - SOCKS5 CONNECT 分支在 `tunnel/masque.go`（`HandleSOCKS5`，CONNECT 处理 ~L786）；分流 seam 在建立 H3 CONNECT 之前
-- 远端 `callacat/warp-go` 当前 main = `1ae4d38`（旧，已备份）
+- 远端 `callacat/warp-go` main = `e572b68`（2026-07-31，已 force-push）；旧内容在 `archive/previous-poc`
+- 本机 GUI 构建限制：GTK 4.6.9 < wails 需要的 4.10（GtkFileDialog）→ 走 CI
