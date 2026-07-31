@@ -3,6 +3,7 @@ package core
 import (
 	"errors"
 	"io/fs"
+	"os"
 
 	"warp/registration"
 )
@@ -59,4 +60,11 @@ func (s *Server) RegistrationInfo() (*RegistrationInfo, error) {
 		return nil, err
 	}
 	return registrationView(reg), nil
+}
+
+// registrationFileExists 报告注册文件是否存在（不校验内容合法性——
+// 注册信息损坏时 Status.Registered 仍为 true，Start 时会报错提示重注册）。
+func registrationFileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }

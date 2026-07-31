@@ -11,12 +11,26 @@ export interface ProxyCounters {
   miss: number;
 }
 
+export interface RegistrationInfo {
+  id: string;
+  account?: string;
+  keyType?: string;
+  tunnelType?: string;
+  endpointV4?: string;
+  endpointV6?: string;
+  endpointPorts?: number[];
+  assignedIPv4?: string;
+  assignedIPv6?: string;
+}
+
 export interface AppStatus {
   running: boolean;
   listening: string;
   startedAt?: string;
   error?: string;
+  registered: boolean;
   counters: ProxyCounters;
+  registration: RegistrationInfo | null;
 }
 
 export interface AppConfig {
@@ -80,7 +94,25 @@ export function fromStatus(v: unknown): AppStatus {
     listening: str(o.listening, "127.0.0.1:40000"),
     startedAt: typeof o.startedAt === "string" ? o.startedAt : undefined,
     error: typeof o.error === "string" ? o.error : undefined,
+    registered: o.registered === true || o.Registered === true,
     counters: fromCounters(o.counters),
+    registration: fromRegistration(o.registration),
+  };
+}
+
+function fromRegistration(v: unknown): RegistrationInfo | null {
+  const o = (v ?? null) as Record<string, unknown> | null;
+  if (!o) return null;
+  return {
+    id: str(o.id, ""),
+    account: typeof o.account === "string" ? o.account : undefined,
+    keyType: typeof o.key_type === "string" ? o.key_type : undefined,
+    tunnelType: typeof o.tunnel_type === "string" ? o.tunnel_type : undefined,
+    endpointV4: typeof o.endpoint_v4 === "string" ? o.endpoint_v4 : undefined,
+    endpointV6: typeof o.endpoint_v6 === "string" ? o.endpoint_v6 : undefined,
+    endpointPorts: Array.isArray(o.endpoint_ports) ? (o.endpoint_ports as number[]) : undefined,
+    assignedIPv4: typeof o.assigned_ipv4 === "string" ? o.assigned_ipv4 : undefined,
+    assignedIPv6: typeof o.assigned_ipv6 === "string" ? o.assigned_ipv6 : undefined,
   };
 }
 

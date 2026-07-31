@@ -17,6 +17,7 @@ type Status struct {
 	RulesCount int         `json:"rules_count"`
 	GeoReady   bool        `json:"geo_ready"`
 	SysProxyOn bool        `json:"sys_proxy_on"` // 系统代理当前是否指向本程序
+	Registered bool        `json:"registered"`   // 本机是否有可用注册信息
 	Stats      route.Stats `json:"stats"`
 	StartTime  time.Time   `json:"start_time,omitempty"`
 	LastError  string      `json:"last_error,omitempty"`

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { Play, Square, Globe } from "lucide-react";
-import { getStatus, setSystemProxy, start, stop } from "../lib/api";
+import { KeyRound, Play, Square, Globe, Trash2 } from "lucide-react";
+import { deregister, getStatus, register, setSystemProxy, start, stop } from "../lib/api";
 import { fromStatus, fromConfig, AppStatus, AppConfig } from "../lib/types";
 import { Card, Button, Toggle, StatusPill } from "../components/ui";
 
@@ -40,6 +40,7 @@ export default function StatusPage() {
   const [busy, setBusy] = useState<string | null>(null);
   const [proxyEnabled, setProxyEnabled] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   useEffect(() => {
     getSystemProxyOnce().then(setProxyEnabled);
@@ -68,8 +69,56 @@ export default function StatusPage() {
     }
   };
 
+  const onRegister = async () => {
+    setBusy("register");
+    setActionError(null);
+    try {
+      const res = await register();
+      setNotice(res.existing ? "已存在注册，无需重复操作" : `注册成功（id=${res.id}）`);
+    } catch (e) {
+      setActionError(String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const onDeregister = async () => {
+    if (!window.confirm("确定注销？注销后需重新注册才能使用代理。")) return;
+    setBusy("deregister");
+    setActionError(null);
+    try {
+      await deregister();
+      setNotice("已注销");
+    } catch (e) {
+      setActionError(String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
   return (
     <div className="space-y-4">
+      {!status.registered && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 dark:border-amber-700/60 dark:bg-amber-950/40">
+          <div>
+            <p className="text-sm font-medium text-amber-800 dark:text-amber-200">
+              尚未注册 WARP
+            </p>
+            <p className="text-xs text-amber-700/80 dark:text-amber-300/70">
+              首次使用需注册（创建 Cloudflare WARP 账号）后才能启动代理。
+            </p>
+          </div>
+          <Button
+            onClick={onRegister}
+            loading={busy === "register"}
+            variant="secondary"
+            className="shrink-0"
+          >
+            <KeyRound className="h-4 w-4" /> 一键注册
+          </Button>
+        </div>
+      )}
+
       <Card
         title="运行状态"
         action={<StatusPill ok={status.running} text={status.running ? "运行中" : "已停止"} />}
@@ -120,6 +169,64 @@ export default function StatusPage() {
           )}
         </div>
       </Card>
+
+      {status.registration && (
+        <Card
+          title="注册信息"
+          action={
+            <Button
+              onClick={onDeregister}
+              loading={busy === "deregister"}
+              variant="danger"
+              className="h-8 px-3 text-xs"
+            >
+              <Trash2 className="h-3.5 w-3.5" /> 注销
+            </Button>
+          }
+        >
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            <div>
+              <p className="text-xs text-slate-500 dark:text-slate-400">设备 ID</p>
+              <p className="mt-1 break-all font-mono text-xs text-slate-900 dark:text-slate-100">
+                {status.registration.id || "—"}
+              </p>
+            </div>
+            <div>
+              <p className="text-xs text-slate-500 dark:text-slate-400">分配的 IPv4</p>
+              <p className="mt-1 font-mono text-sm text-emerald-600 dark:text-emerald-400">
+                {status.registration.assignedIPv4 || "—"}
+              </p>
+            </div>
+            <div>
+              <p className="text-xs text-slate-500 dark:text-slate-400">分配的 IPv6</p>
+              <p className="mt-1 font-mono text-sm text-emerald-600 dark:text-emerald-400">
+                {status.registration.assignedIPv6 || "—"}
+              </p>
+            </div>
+            <div>
+              <p className="text-xs text-slate-500 dark:text-slate-400">边缘 IPv4</p>
+              <p className="mt-1 font-mono text-sm text-slate-900 dark:text-slate-100">
+                {status.registration.endpointV4 || "—"}
+              </p>
+            </div>
+            <div>
+              <p className="text-xs text-slate-500 dark:text-slate-400">边缘 IPv6</p>
+              <p className="mt-1 font-mono text-sm text-slate-900 dark:text-slate-100">
+                {status.registration.endpointV6 || "—"}
+              </p>
+            </div>
+            <div>
+              <p className="text-xs text-slate-500 dark:text-slate-400">隧道类型</p>
+              <p className="mt-1 font-mono text-sm text-slate-900 dark:text-slate-100">
+                {status.registration.tunnelType || "masque"}
+              </p>
+            </div>
+          </div>
+          {notice && (
+            <p className="mt-3 text-sm text-emerald-600 dark:text-emerald-400">{notice}</p>
+          )}
+        </Card>
+      )}
 
       <Card title="流量统计">
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">

@@ -123,7 +123,14 @@ type Server struct {
 
 // New 创建 Server 并填充 Options 默认值。默认 StateFile 为 reg.json、
 // EdgeIP 为 "4"；扫描参数沿用 CLI 默认（45s 总超时、3s 单探针、top-4）。
+//
+// 所有运行时文件路径（config.json / reg.json / rules.txt / geo）锚定到
+// 可执行文件所在目录：GUI 双击启动时工作目录可能是用户主目录，相对路径
+// 会让文件散落各处。绝对路径保持不变。
 func New(opts Options) *Server {
+	if opts.ConfigPath == "" {
+		opts.ConfigPath = "config.json"
+	}
 	if opts.StateFile == "" {
 		opts.StateFile = defaultStateFile
 	}
@@ -139,7 +146,23 @@ func New(opts Options) *Server {
 	if opts.ScanTop == 0 {
 		opts.ScanTop = 4
 	}
+	opts.ConfigPath = resolveExecPath(opts.ConfigPath)
+	opts.StateFile = resolveExecPath(opts.StateFile)
 	return &Server{opts: opts}
+}
+
+// resolveExecPath 把相对路径解析为可执行文件所在目录下的绝对路径；
+// 已是绝对路径或空串时原样返回。os.Executable 失败（罕见）时回退到
+// 当前工作目录，保证程序仍能启动。
+func resolveExecPath(p string) string {
+	if p == "" || filepath.IsAbs(p) {
+		return p
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return p
+	}
+	return filepath.Join(filepath.Dir(exe), p)
 }
 
 // ensureConfig 返回生效中的配置：Start 后返回启动时加载的实例，否则按
@@ -158,6 +181,9 @@ func (s *Server) ensureConfig() (*Config, error) {
 	if strings.TrimSpace(s.opts.RulesPath) != "" {
 		cfg.RulesPath = s.opts.RulesPath
 	}
+	// config.json 内的相对路径同样锚定到可执行目录。
+	cfg.RulesPath = resolveExecPath(cfg.RulesPath)
+	cfg.GeoDir = resolveExecPath(cfg.GeoDir)
 	s.cfg = cfg
 	return cfg, nil
 }
@@ -534,6 +560,7 @@ func (s *Server) Status() Status {
 		EdgeAddrs:  s.edgeAddrs,
 		GeoReady:   s.cfg != nil && geoDataPresent(s.cfg.GeoDir),
 		SysProxyOn: s.sysProxyEnabled.Load(),
+		Registered: registrationFileExists(s.opts.StateFile),
 		StartTime:  s.startTime,
 		LastError:  s.lastError,
 	}

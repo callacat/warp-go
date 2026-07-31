@@ -31,6 +31,8 @@ interface ServiceAPI {
   GetStatus(): Promise<unknown>;
   Start(): Promise<unknown>;
   Stop(): Promise<unknown>;
+  Register(): Promise<unknown>;
+  Deregister(): Promise<unknown>;
   GetRules(): Promise<unknown>;
   SaveRules(rulesText: string): Promise<unknown>;
   ReloadRules(): Promise<unknown>;
@@ -112,6 +114,14 @@ function mockStatus(): AppStatus {
     running: mockState.running,
     listening: "127.0.0.1:40000",
     startedAt: mockState.startedAt,
+    registered: true,
+    registration: {
+      id: "demo-reg-id",
+      assignedIPv4: "172.16.0.2",
+      assignedIPv6: "2606:4700:100::2",
+      endpointV4: "162.159.192.5",
+      tunnelType: "masque",
+    },
     counters: { ...mockState.counters },
   };
 }
@@ -175,6 +185,32 @@ export async function stop(): Promise<void> {
     return;
   }
   await svc.Stop();
+}
+
+export interface RegisterResult {
+  existing: boolean;
+  id: string;
+}
+
+export async function register(): Promise<RegisterResult> {
+  const svc = await loadService();
+  if (!svc) {
+    await sleep(jitter(400));
+    mockState.logs.push({ time: now(), level: "info", msg: "已注册（演示）" });
+    return { existing: false, id: "demo-id" };
+  }
+  const raw = (await svc.Register()) as { existing?: boolean; id?: string } | null;
+  return { existing: raw?.existing ?? false, id: raw?.id ?? "" };
+}
+
+export async function deregister(): Promise<void> {
+  const svc = await loadService();
+  if (!svc) {
+    await sleep(jitter(300));
+    mockState.logs.push({ time: now(), level: "info", msg: "已注销（演示）" });
+    return;
+  }
+  await svc.Deregister();
 }
 
 export async function getRules(): Promise<string> {
