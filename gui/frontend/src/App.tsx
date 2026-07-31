@@ -4,6 +4,8 @@ import {
   FileText,
   Globe,
   Moon,
+  PanelLeftClose,
+  PanelRightClose,
   Settings,
   Sun,
   ScrollText,
@@ -102,9 +104,14 @@ export default function App() {
           <button
             onClick={() => setCollapsed((c) => !c)}
             title={collapsed ? "展开侧边栏" : "收起侧边栏"}
-            className="rounded-lg px-2 py-2 text-xs text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800"
+            aria-label={collapsed ? "展开侧边栏" : "收起侧边栏"}
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-700 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-200"
           >
-            {collapsed ? "»" : "«"}
+            {collapsed ? (
+              <PanelRightClose className="h-5 w-5" />
+            ) : (
+              <PanelLeftClose className="h-5 w-5" />
+            )}
           </button>
         </div>
       </aside>
