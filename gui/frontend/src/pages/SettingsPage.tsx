@@ -1,8 +1,14 @@
 import { useEffect, useState } from "react";
-import { Save, RotateCcw } from "lucide-react";
-import { getConfig, saveConfig, isDemoMode } from "../lib/api";
+import { Save, RotateCcw, Rocket } from "lucide-react";
+import {
+  getAutostartEnabled,
+  getConfig,
+  isDemoMode,
+  saveConfig,
+  setAutostart,
+} from "../lib/api";
 import { fromConfig, AppConfig } from "../lib/types";
-import { Button, Card, Field, inputCls } from "../components/ui";
+import { Button, Card, Field, Toggle, inputCls } from "../components/ui";
 
 export default function SettingsPage() {
   const [cfg, setCfg] = useState<AppConfig | null>(null);
@@ -10,10 +16,13 @@ export default function SettingsPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [autostart, setAutostartState] = useState(false);
+  const [autostartBusy, setAutostartBusy] = useState(false);
 
   useEffect(() => {
     void isDemoMode().then(setDemo);
     void load();
+    getAutostartEnabled().then(setAutostartState).catch(() => {});
   }, []);
 
   const load = async () => {
@@ -42,6 +51,20 @@ export default function SettingsPage() {
       setError(String(e));
     } finally {
       setBusy(false);
+    }
+  };
+
+  const toggleAutostart = async (v: boolean) => {
+    setAutostartBusy(true);
+    setError(null);
+    try {
+      await setAutostart(v);
+      setAutostartState(v);
+      setNotice(v ? "已开启开机自启" : "已关闭开机自启");
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setAutostartBusy(false);
     }
   };
 
@@ -121,6 +144,25 @@ export default function SettingsPage() {
         <p className="mt-3 text-xs text-slate-500 dark:text-slate-400">
           配置写入执行目录下的 config.json；文件被外部修改时会自动热重载。
         </p>
+      </Card>
+
+      <Card title="开机自启">
+        <div className="flex items-center justify-between gap-4">
+          <div className="flex items-start gap-3">
+            <Rocket className="mt-0.5 h-5 w-5 text-orange-500" />
+            <div>
+              <p className="text-sm font-medium">登录后自动启动</p>
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                系统登录时自动运行 warp-gui（Windows 注册表 / macOS LaunchAgent / Linux autostart）
+              </p>
+            </div>
+          </div>
+          <Toggle
+            checked={autostart}
+            onChange={toggleAutostart}
+            disabled={autostartBusy}
+          />
+        </div>
       </Card>
     </div>
   );

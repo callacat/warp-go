@@ -40,6 +40,9 @@ interface ServiceAPI {
   UpdateGeo(): Promise<unknown>;
   SetSystemProxy(enabled: boolean): Promise<unknown>;
   GetSystemProxyEnabled(): Promise<unknown>;
+  ScanEdges(): Promise<unknown>;
+  SetAutostart(enabled: boolean): Promise<unknown>;
+  GetAutostartEnabled(): Promise<unknown>;
   GetConfig(): Promise<unknown>;
   SaveConfig(configJson: string): Promise<unknown>;
   GetLogs(limit: number): Promise<unknown>;
@@ -59,6 +62,7 @@ direct,geoip:cn
 const mockState = {
   running: false,
   sysProxy: false,
+  autostart: false,
   rulesText: DEFAULT_RULES,
   counters: { proxy: 128, direct: 947, miss: 14 },
   startedAt: undefined as string | undefined,
@@ -298,6 +302,35 @@ export async function getSystemProxyEnabled(): Promise<boolean> {
     return mockState.sysProxy;
   }
   return (await svc.GetSystemProxyEnabled()) === true;
+}
+
+export async function scanEdges(): Promise<string[]> {
+  const svc = await loadService();
+  if (!svc) {
+    await sleep(jitter(800));
+    return ["162.159.192.5:4500", "162.159.193.10:4500", "162.159.195.3:4500"];
+  }
+  const raw = await svc.ScanEdges();
+  return Array.isArray(raw) ? (raw as string[]) : [];
+}
+
+export async function setAutostart(enabled: boolean): Promise<void> {
+  const svc = await loadService();
+  if (!svc) {
+    await sleep(jitter(200));
+    mockState.autostart = enabled;
+    return;
+  }
+  await svc.SetAutostart(enabled);
+}
+
+export async function getAutostartEnabled(): Promise<boolean> {
+  const svc = await loadService();
+  if (!svc) {
+    await sleep(jitter(120));
+    return mockState.autostart;
+  }
+  return (await svc.GetAutostartEnabled()) === true;
 }
 
 export async function getConfig(): Promise<AppConfig> {

@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"warp/autostart"
 	"warp/proxy"
 	"warp/registration"
 	"warp/route"
@@ -609,6 +610,56 @@ func (s *Server) UpdateGeo(ctx context.Context) (bool, error) {
 	return true, nil
 }
 
+// ScanEdges 对 WARP 边缘全段做延迟扫描，返回 RTT 最优的 top-N 端点。
+// 供 GUI "扫描最优边缘"按钮调用；需要注册信息（未注册报清晰错误）。
+// 扫描只探测不修改注册信息（与 CLI -scan 一致，结果不写回 reg.json）。
+func (s *Server) ScanEdges(ctx context.Context) ([]string, error) {
+	regData, err := registration.Load(s.opts.StateFile)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf("%s 中没有注册信息：%w", s.opts.StateFile, ErrNoRegistration)
+		}
+		return nil, fmt.Errorf("无法读取注册文件 %s：%w", s.opts.StateFile, err)
+	}
+
+	verifyEdge, err := regData.PeerPublicKeyVerifier()
+	if err != nil {
+		return nil, fmt.Errorf("边缘公钥固定初始化失败：%w", err)
+	}
+	tlsConfig := &tls.Config{
+		ServerName:            "consumer-masque-proxy.cloudflareclient.com",
+		NextProtos:            []string{"h3"},
+		InsecureSkipVerify:    true,
+		MinVersion:            tls.VersionTLS13,
+		Certificates:          []tls.Certificate{regData.ClientCert},
+		VerifyPeerCertificate: verifyEdge,
+		CurvePreferences:      []tls.CurveID{tls.CurveP256, tls.CurveP384, tls.CurveP521},
+	}
+
+	// 默认扫注册信息给出的地址族；显式 EdgeIP 为 host:port 时用它的地址族段。
+	v6 := false
+	fallback := []string{}
+	edgeSpec := s.opts.EdgeIP
+	if edgeSpec == "" {
+		edgeSpec = "4"
+	}
+	switch edgeSpec {
+	case "4":
+		fallback = append(fallback, net.JoinHostPort(regData.EndpointV4, "443"))
+	case "6":
+		v6 = true
+		fallback = append(fallback, net.JoinHostPort(regData.EndpointV6, "443"))
+	default:
+		// 显式端点：不扫描（与 CLI 一致），返回它本身。
+		return []string{edgeSpec}, nil
+	}
+
+	// 复用 runEndpointScan：默认段 + 注册端口，RTT 升序 top-N。
+	return runEndpointScan(v6, fallback, regData, tlsConfig,
+		s.opts.ScanCIDR, s.opts.ScanPorts, s.opts.ScanConcurrency,
+		s.opts.ScanTimeout, s.opts.ScanPerProbe, s.opts.ScanTop), nil
+}
+
 // geoUpdateOnce 是自动更新协程的调用入口：失败只打 warning，不中断周期。
 func (s *Server) geoUpdateOnce(ctx context.Context) {
 	updated, err := s.UpdateGeo(ctx)
@@ -656,6 +707,24 @@ func (s *Server) SetSystemProxy(enabled bool) error {
 		log.Println("✓ 系统代理已清除")
 	}
 	return nil
+}
+
+// SetAutostart 开启/关闭开机自启（指向当前可执行文件）。
+// 三平台：Windows 注册表 Run / macOS LaunchAgent / Linux autostart .desktop。
+func (s *Server) SetAutostart(enabled bool) error {
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("获取可执行文件路径失败：%w", err)
+	}
+	if enabled {
+		return autostart.Enable(exe)
+	}
+	return autostart.Disable()
+}
+
+// AutostartEnabled 报告当前是否已注册开机自启。
+func (s *Server) AutostartEnabled() bool {
+	return autostart.Enabled()
 }
 
 // ReloadRules 从磁盘重新加载路由规则（GUI "重新加载"按钮 / 外部编辑后

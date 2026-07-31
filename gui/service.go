@@ -277,6 +277,35 @@ func (s *Service) GetSystemProxyEnabled() bool {
 	return srv.Status().SysProxyOn
 }
 
+// ScanEdges 扫描 WARP 边缘，返回最优端点列表（GUI "扫描最优边缘"按钮）。
+func (s *Service) ScanEdges() ([]string, error) {
+	srv, err := s.serverInstance()
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	return srv.ScanEdges(ctx)
+}
+
+// SetAutostart 开启/关闭开机自启。
+func (s *Service) SetAutostart(enabled bool) error {
+	srv, err := s.serverInstance()
+	if err != nil {
+		return err
+	}
+	return srv.SetAutostart(enabled)
+}
+
+// GetAutostartEnabled 报告开机自启状态。
+func (s *Service) GetAutostartEnabled() bool {
+	srv, err := s.serverInstance()
+	if err != nil {
+		return false
+	}
+	return srv.AutostartEnabled()
+}
+
 // ---------------------------------------------------------------------------
 // 配置
 // ---------------------------------------------------------------------------

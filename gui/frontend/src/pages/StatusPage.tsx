@@ -1,6 +1,14 @@
 import { useEffect, useState } from "react";
-import { KeyRound, Play, Square, Globe, Trash2 } from "lucide-react";
-import { deregister, getStatus, register, setSystemProxy, start, stop } from "../lib/api";
+import { KeyRound, Play, Square, Globe, Trash2, Radar } from "lucide-react";
+import {
+  deregister,
+  getStatus,
+  register,
+  scanEdges,
+  setSystemProxy,
+  start,
+  stop,
+} from "../lib/api";
 import { fromStatus, fromConfig, AppStatus, AppConfig } from "../lib/types";
 import { Card, Button, Toggle, StatusPill } from "../components/ui";
 
@@ -41,6 +49,7 @@ export default function StatusPage() {
   const [proxyEnabled, setProxyEnabled] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [scanResult, setScanResult] = useState<string[] | null>(null);
 
   useEffect(() => {
     getSystemProxyOnce().then(setProxyEnabled);
@@ -75,6 +84,21 @@ export default function StatusPage() {
     try {
       const res = await register();
       setNotice(res.existing ? "已存在注册，无需重复操作" : `注册成功（id=${res.id}）`);
+    } catch (e) {
+      setActionError(String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const onScanEdges = async () => {
+    setBusy("scan");
+    setActionError(null);
+    setScanResult(null);
+    try {
+      const edges = await scanEdges();
+      setScanResult(edges);
+      setNotice(`扫描完成，推荐 ${edges.length ? edges[0] : "无"} 等 ${edges.length} 个端点`);
     } catch (e) {
       setActionError(String(e));
     } finally {
@@ -164,6 +188,14 @@ export default function StatusPage() {
               </>
             )}
           </Button>
+          <Button onClick={onScanEdges} loading={busy === "scan"} variant="secondary">
+            <Radar className="h-4 w-4" /> 扫描最优边缘
+          </Button>
+          {scanResult && scanResult.length > 0 && (
+            <span className="font-mono text-xs text-slate-600 dark:text-slate-300">
+              推荐端点：{scanResult.join(" · ")}
+            </span>
+          )}
           {actionError && (
             <span className="text-sm text-red-600 dark:text-red-400">{actionError}</span>
           )}
