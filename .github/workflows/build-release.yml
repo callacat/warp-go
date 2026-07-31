@@ -126,10 +126,15 @@ jobs:
           npm ci || npm install
           npm run build
 
+      - name: 安装 wails3 CLI
+        run: |
+          go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-alpha2.119
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
       - name: 生成 Wails 绑定
         working-directory: gui
         run: |
-          go run github.com/wailsapp/wails/v3/cmd/wails3 generate bindings
+          wails3 generate bindings
 
       - name: 构建 GUI 二进制
         working-directory: gui

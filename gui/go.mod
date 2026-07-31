@@ -2,7 +2,10 @@ module warp/gui
 
 go 1.26.5
 
-require github.com/wailsapp/wails/v3 v3.0.0-alpha2.119
+require (
+	github.com/wailsapp/wails/v3 v3.0.0-alpha2.119
+	warp v0.0.0-00010101000000-000000000000
+)
 
 require (
 	github.com/adrg/xdg v0.5.3 // indirect
@@ -21,7 +24,6 @@ require (
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
-	warp v0.0.0-00010101000000-000000000000 // indirect
 )
 
 // 复用根模块的可复用核心（core/route/proxy/sysproxy/...）。
