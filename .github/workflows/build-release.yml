@@ -86,7 +86,8 @@ jobs:
   # 与 CLI 的 CGO_ENABLED=0 构建完全不同，故拆成单独 job（按平台 runner 构建）。
   build-gui:
     needs: test
-    if: hashFiles('gui/go.mod') != ''
+    # GUI 构建失败不阻塞 CLI Release（产物仍可用）；成功则一并发布 GUI。
+    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
