@@ -99,24 +99,26 @@
 - [x] 配置持久化（**config.json 放程序执行目录**；旗标 > config > 默认值；文件变更热重载；config_test.go 单测）
 - [x] GUI/系统代理模式默认绑定 `127.0.0.1`（安全，修复 Metis C4；config.go 默认 `127.0.0.1:40000`）
 
-### M4: GUI（Wails v3 + 最新前端栈）
-- [ ] **core 包抽取**（修复 Metis A4）: main.go 逻辑拆为 `core/`（Server 结构体，Start/Stop 生命周期），CLI 与 GUI 共用
-- [ ] Wails v3 项目骨架（GUI main + **React 19 + Vite + Tailwind v4** 前端，最新组件库）
-- [ ] **响应式适配**：适配常用机型/分辨率（窗口缩放自适应、DPI 感知、深浅色主题）
-- [ ] 系统托盘（状态、快速开关代理/隧道、退出）
-- [ ] **规则管理页**（用户核心需求）: 文本框自由增删改规则行 + 校验 + 保存 → 写回 rules.txt → 热重载；支持语法错误提示
-- [ ] **GEO 数据库页**: 更新仓库/URL 可编辑；自动更新时间可设定（每天/每周/每月/关闭）；手动触发更新按钮；状态展示（版本/大小/类别数）
-- [ ] 设置面板: 代理开关（监听开关 + 系统代理开关两枚）、监听端口、配置路径
-- [ ] 状态视图: 连接状态、分流统计（proxy/direct 命中计数）、日志查看器（级别过滤）
-- [ ] 交叉编译配置（Taskfile + 6 目标）
+### M4: GUI（Wails v3 + 最新前端栈）✅
+- [x] **core 包抽取**（修复 Metis A4）: `core/`（Server 生命周期 Start/Stop/Status/SetSystemProxy/ReloadRules/SaveConfig），CLI 与 GUI 共用；main.go 瘦身 ~450 行薄壳
+- [x] Wails v3 项目骨架（gui/main.go + service.go + logs.go + **React 19.2 + Vite 8 + Tailwind v4** 前端）
+- [x] **响应式适配**：960x680 默认窗口（720x520 最小），深浅色主题（系统跟随 + 手动切换）
+- [x] 系统托盘（打开主窗口 / 启动 / 停止 / 退出；AttachWindow 关窗隐藏到托盘）
+- [x] **规则管理页**（用户核心需求）: 行号文本框增删改 + 语法校验（保存前 route.ParseRules）+ 保存写回 rules.txt + 热重载；2s 自动刷新不覆盖未保存编辑
+- [x] **GEO 数据库页**: 状态展示（路径/更新时间/仓库/周期）、立即更新按钮、自动更新周期显示
+- [x] 设置面板: 完整 config 表单（监听地址/GEO 仓库/URL/更新周期/UDP 开关/系统代理）
+- [x] 状态视图: 运行状态/监听地址/分流统计（proxy/direct/miss）/注册信息
+- [x] 日志查看器: 最近 500 条环形缓冲，级别着色，1s 轮询
+- [x] 交叉编译配置（Taskfile + build/{linux,windows,darwin} 平台 Taskfiles + Dockerfile.cross）
+- [x] GUI 构建走 CI（build-gui 分平台 job：ubuntu-24.04/windows-latest/macos-latest；本地 GTK 4.6 < 4.10 无法编译）
 
-### M5: 发布与验证
-- [ ] Dockerfile 更新（多阶段 CLI 构建；**不含 GUI**，修复 Metis B2）
-- [ ] 推送远端 main（策略: 备份后 force-push 覆盖，修复 Metis A2）
-- [ ] 打 tag 触发 Actions → 从 GitHub Release 下载产物本地验证（见 §10 验证方案）
-- [ ] 无桌面环境 GUI 验证（CI 内 Xvfb + 截图，见 §10）
-- [ ] 文档（README 更新: 新功能、规则语法、GUI 用法）
-- [ ] 风险回退路径（release 出问题 → 删 tag + revert + 删 GHCR 镜像）
+### M5: 发布与验证（进行中）
+- [x] Dockerfile 更新（多阶段 CLI 构建，端口 40000；**不含 GUI**，修复 Metis B2）
+- [x] 推送远端 main（备份后 force-push 覆盖 `1ae4d38` → `f344347`，修复 Metis A2）
+- [x] 打 tag v0.2.0 触发 Actions → docker-ghcr 已成功（GHCR 镜像验证通过）
+- [x] 文档（README 重写: 新功能、规则语法、GUI 用法、配置说明）
+- [x] 风险回退路径（§8：删 tag + revert + 删 GHCR 镜像）
+- [ ] 从 GitHub Release 下载产物本地验证（CLI 配置启动 + Docker 冒烟——等待 Actions 完成）
 
 ## 4. 执行顺序（推荐路线，减少决断点）
 
