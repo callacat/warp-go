@@ -11,6 +11,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -23,6 +24,8 @@ import (
 	h3qlog "github.com/quic-go/quic-go/http3/qlog"
 	"golang.org/x/net/dns/dnsmessage"
 	"golang.org/x/net/http2"
+
+	"warp/route"
 )
 
 // DoH endpoints, tried in order. These are the addresses warp-svc compiles in as
@@ -671,6 +674,14 @@ type SOCKS5Config struct {
 	// AllowUDP enables UDP ASSOCIATE. Those datagrams do not traverse the WARP
 	// tunnel — see tunnel/udp.go.
 	AllowUDP bool
+
+	// RouteFunc, when non-nil, decides per-connection whether the target goes
+	// through the WARP tunnel ("proxy") or directly from the local machine
+	// ("direct"). host is the bare target hostname (no port); ip is the
+	// already-resolved address when available, netip.Addr{} otherwise (the
+	// decision runs before tunnel DNS, so in practice it is always unset here).
+	// A nil RouteFunc keeps the original behavior: everything through the tunnel.
+	RouteFunc func(host string, ip netip.Addr) (action string, matched bool)
 }
 
 // HandleSOCKS5 processes a single SOCKS5 connection.
@@ -793,6 +804,25 @@ func (c *MasqueClient) HandleSOCKS5(ctx context.Context, conn net.Conn, cfg SOCK
 	setupCtx, setupCancel := context.WithTimeout(ctx, socksSetupTimeout)
 	defer setupCancel()
 
+	// GEO 分流：规则命中 direct 时本地直连，绕过 WARP 隧道。
+	// 分流必须在 resolveTarget 之前——direct 目标不应触发隧道内 DNS 查询。
+	if cfg.RouteFunc != nil {
+		host, _, splitErr := net.SplitHostPort(targetAddr)
+		if splitErr != nil {
+			// 与 resolveTarget 一致：无法解析成 host:port 的地址直接报错。
+			sendSocks5Err(conn, 0x04)
+			return
+		}
+		// 只有显式命中 proxy 才走隧道。未命中（matched=false）按引擎的隐式
+		// direct 兜底语义本地直连；未知动作串同样落直连（保守方向：宁可直接
+		// 连出，也不把应直连的流量误送隧道）。
+		action, matched := cfg.RouteFunc(host, netip.Addr{})
+		if !matched || action != route.ActionProxy {
+			c.handleDirectConnect(setupCtx, conn, targetAddr)
+			return
+		}
+	}
+
 	connectTarget, hostHeader, err := c.resolveTarget(setupCtx, targetAddr)
 	if err != nil {
 		log.Printf("解析失败：%v", err)
@@ -891,6 +921,59 @@ func (c *MasqueClient) HandleSOCKS5(ctx context.Context, conn net.Conn, cfg SOCK
 	log.Printf("隧道已关闭：%s", targetAddr)
 }
 
+// handleDirectConnect 绕过 WARP 隧道，从本机直接 TCP 拨号目标并双向中继。
+// 成功时返回 true（连接已转发完毕）；失败时已发送 SOCKS5 错误响应并返回
+// false。方法不依赖客户端隧道状态——direct 路径无需 H3 连接或 token。
+func (c *MasqueClient) handleDirectConnect(ctx context.Context, conn net.Conn, targetAddr string) bool {
+	log.Printf("本地直连 %s", targetAddr)
+	target, err := (&net.Dialer{}).DialContext(ctx, "tcp", targetAddr)
+	if err != nil {
+		log.Printf("本地直连 %s 失败：%v", targetAddr, err)
+		sendSocks5Err(conn, 0x04)
+		return false
+	}
+
+	sendSocks5Success(conn)
+	log.Printf("本地直连已建立：%s", targetAddr)
+
+	// 双向中继：任一侧结束就关闭两侧，让另一侧的 io.Copy 立即退出。
+	// ctx 取消时同样关闭两侧——外层 handlerDone 监控只关 conn，target
+	// 必须在这里显式关闭，否则目标侧 io.Copy 会一直阻塞。
+	var once sync.Once
+	closeBoth := func() {
+		once.Do(func() {
+			_ = conn.Close()
+			_ = target.Close()
+		})
+	}
+	defer closeBoth()
+
+	watcherDone := make(chan struct{})
+	defer close(watcherDone)
+	go func() {
+		select {
+		case <-ctx.Done():
+			closeBoth()
+		case <-watcherDone:
+		}
+	}()
+
+	done := make(chan struct{}, 2)
+	go func() {
+		io.Copy(target, conn)
+		closeBoth()
+		done <- struct{}{}
+	}()
+	go func() {
+		io.Copy(conn, target)
+		closeBoth()
+		done <- struct{}{}
+	}()
+
+	<-done
+	return true
+}
+
 // releaseStream fully retires an H3 stream. Closing only the send side leaves the
 // receive side open, and the edge keeps its half of a CONNECT tunnel open until
 // the target closes — so a stream abandoned that way is never returned to the
@@ -902,6 +985,83 @@ func releaseStream(s *http3.RequestStream) {
 	s.CancelRead(quic.StreamErrorCode(http3.ErrCodeNoError))
 	s.CancelWrite(quic.StreamErrorCode(http3.ErrCodeNoError))
 	_ = s.Close()
+}
+
+// tunnelConn adapts an established H3 CONNECT stream to net.Conn for callers
+// outside the SOCKS5 path（mixed 代理的 TunnelDial）。Read/Write/LocalAddr/
+// RemoteAddr 由内嵌的 streamConn（→ http3.RequestStream）提供。
+type tunnelConn struct {
+	*streamConn
+	releaseOnce sync.Once
+}
+
+// Close 完整释放 H3 流。只关发送侧会让读方向永久阻塞（边缘保持隧道另一侧
+// 直到目标关闭），同时泄漏边缘的并发流配额——与 releaseStream 同一套约束。
+func (t *tunnelConn) Close() error {
+	t.releaseOnce.Do(func() {
+		reqStream := t.streamConn.RequestStream
+		reqStream.CancelRead(quic.StreamErrorCode(http3.ErrCodeNoError))
+		reqStream.CancelWrite(quic.StreamErrorCode(http3.ErrCodeNoError))
+		_ = reqStream.Close()
+	})
+	return nil
+}
+
+// 隧道是长命字节流：残留 deadline 会在传输中途掐断它（见 connectThroughEdge
+// 在成功交换后必须清除 deadline 的注释）。上层不应依赖 deadline 终止 I/O——
+// 统一走 Close（CancelRead/CancelWrite 立即解除阻塞）或 ctx 取消。故按 no-op
+// 处理，避免调用方（如 http.Transport）顺手设置的超时误杀隧道。
+func (t *tunnelConn) SetDeadline(time.Time) error      { return nil }
+func (t *tunnelConn) SetReadDeadline(time.Time) error  { return nil }
+func (t *tunnelConn) SetWriteDeadline(time.Time) error { return nil }
+
+// DialTunnel 建立一条到 targetAddr 的 WARP 隧道字节流并返回 net.Conn。
+//
+// 与 HandleSOCKS5 的 CONNECT 分支共享 resolveTarget + establishCONNECT，
+// 但跳过 SOCKS5 握手：调用方（mixed 代理等）已自行完成协议协商，只接管
+// 隧道字节流。目标一律经隧道内 DoH 解析（避免 DNS 以真实源地址泄漏），
+// direct 分流由调用方决定，本方法不参与。
+func (c *MasqueClient) DialTunnel(ctx context.Context, targetAddr string) (net.Conn, error) {
+	connectTarget, hostHeader, err := c.resolveTarget(ctx, targetAddr)
+	if err != nil {
+		return nil, err
+	}
+
+	req := &http.Request{
+		Method: "CONNECT",
+		Host:   connectTarget,
+		URL:    &url.URL{Scheme: "https", Host: connectTarget},
+		Header: make(http.Header),
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	if hostHeader != "" {
+		// 目标经域名解析时，Host 头保留原始域名:端口，让边缘能做虚拟主机路由。
+		_, hostPort, _ := net.SplitHostPort(connectTarget)
+		req.Header.Set("Host", hostHeader+":"+hostPort)
+	}
+
+	reqStream, _, resp, err := c.establishCONNECT(ctx, req, connectExchangeTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("H3 CONNECT %s 失败：%w", connectTarget, err)
+	}
+	if resp.StatusCode != 200 {
+		log.Printf("H3 CONNECT %s -> %d", connectTarget, resp.StatusCode)
+		releaseStream(reqStream)
+		return nil, fmt.Errorf("H3 CONNECT %s 返回 %d", connectTarget, resp.StatusCode)
+	}
+	log.Printf("隧道已建立：%s（colo=%s）", targetAddr, resp.Header.Get("Cf-Warp-Colo"))
+
+	// resolveTarget 保证 connectTarget 的主机部分是 IP 字面量；地址仅供
+	// LocalAddr/RemoteAddr 使用，不参与 I/O。
+	host, portStr, _ := net.SplitHostPort(connectTarget)
+	port, _ := strconv.Atoi(portStr)
+	return &tunnelConn{
+		streamConn: &streamConn{
+			RequestStream: reqStream,
+			localAddr:     &net.TCPAddr{IP: net.IPv4zero},
+			remoteAddr:    &net.TCPAddr{IP: net.ParseIP(host), Port: port},
+		},
+	}, nil
 }
 
 // establishCONNECT performs a CONNECT exchange and retries once on a fresh H3

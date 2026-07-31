@@ -1,0 +1,142 @@
+# 双上游自动同步工作流
+# 每日 04:00 UTC + 手动触发：拉取 badafans（原版）与 6Kmfi6HP（fork）上游，
+# 按「先 badafans、后 6Kmfi6HP」顺序合并并创建 PR；冲突时中止并创建 issue（绝不自动解决冲突）。
+name: Sync Upstreams
+
+on:
+  schedule:
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write # 清理脚本需要 gh run list/delete
+
+    steps:
+      - name: 检出代码（完整历史，供合并使用）
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 添加上游远程仓库并拉取
+        run: |
+          git remote add badafans https://github.com/badafans/warp-go.git
+          git remote add 6Kmfi6HP https://github.com/6Kmfi6HP/warp-go.git
+
+          # 优先拉取 main 分支，不存在则回退 master
+          for remote in badafans 6Kmfi6HP; do
+            if git ls-remote --exit-code "$remote" refs/heads/main >/dev/null 2>&1; then
+              git fetch "$remote" main:refs/remotes/$remote/main
+            else
+              echo "::notice::$remote 无 main 分支，回退拉取 master"
+              git fetch "$remote" master:refs/remotes/$remote/main
+            fi
+          done
+
+      - name: 检查上游是否有新提交
+        id: check
+        run: |
+          # 两个上游均为 HEAD 的祖先 = 无新提交，视为已是最新（等效 exit 0，工作流正常结束）
+          if git merge-base --is-ancestor badafans/main HEAD && git merge-base --is-ancestor 6Kmfi6HP/main HEAD; then
+            echo "已是最新"
+            echo "has_new=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "检测到上游更新"
+            echo "has_new=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 创建同步分支并合并上游
+        id: sync
+        if: steps.check.outputs.has_new == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          BRANCH="sync/upstream-$(date +%Y%m%d-%H%M%S)"
+          git checkout -b "$BRANCH"
+
+          # 冲突处理：记录冲突文件、中止合并、打 conflict 标签、建 issue、退出失败
+          # 绝不自动解决冲突，一律留待人工处理
+          handle_conflict() {
+            local upstream="$1"
+            local conflicts
+            conflicts=$(git diff --name-only --diff-filter=U || true)
+            git merge --abort
+            echo "::error::上游 ${upstream} 合并冲突，已中止合并，需人工处理"
+
+            # 创建 conflict ⚠️ 标签（已存在则跳过）
+            gh label create "conflict ⚠️" --description "上游合并冲突，需人工解决" --force >/dev/null 2>&1 || true
+
+            # 已有未关闭的冲突 issue 则跳过创建
+            existing=$(gh issue list --state open --label "conflict ⚠️" --search "sync upstream" --json number --jq '.[0].number // empty' 2>/dev/null || true)
+            if [ -n "$existing" ]; then
+              echo "已存在冲突 issue #${existing}，跳过创建"
+            else
+              BODY=$(printf '%s\n' \
+                "上游 ${upstream}/warp-go 同步合并发生冲突，已自动中止，需人工处理。" \
+                "" \
+                "同步分支：${BRANCH}" \
+                "冲突文件：" \
+                "${conflicts}" \
+                "" \
+                "请本地执行：" \
+                "1. git fetch ${upstream}" \
+                "2. git merge ${upstream}/main" \
+                "3. 解决冲突后推送 PR")
+              gh issue create \
+                --title "⚠️ 上游合并冲突（${upstream}）" \
+                --body "$BODY" \
+                --label "conflict ⚠️" >/dev/null
+            fi
+            exit 1
+          }
+
+          # 合并顺序：先 badafans（主上游），后 6Kmfi6HP（fork 后合并，冲突时 fork 占优）
+          if ! git merge --no-ff badafans/main -m "merge: badafans upstream" >/tmp/merge-badafans.log 2>&1; then
+            handle_conflict "badafans"
+          fi
+          if ! git merge --no-ff 6Kmfi6HP/main -m "merge: 6Kmfi6HP upstream" >/tmp/merge-6kmfi6hp.log 2>&1; then
+            handle_conflict "6Kmfi6HP"
+          fi
+
+          echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "两个上游均合并成功"
+
+      - name: 推送分支并创建 PR（自动合并）
+        if: steps.sync.outputs.branch != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SYNC_BRANCH: ${{ steps.sync.outputs.branch }}
+        run: |
+          set -euo pipefail
+          git push -u origin "$SYNC_BRANCH"
+          TODAY=$(date +%F)
+          BODY=$(printf '%s\n' \
+            "自动同步上游更新：" \
+            "" \
+            "- [badafans/warp-go](https://github.com/badafans/warp-go)（原版）" \
+            "- [6Kmfi6HP/warp-go](https://github.com/6Kmfi6HP/warp-go)（fork，含 scanner/Dockerfile）" \
+            "" \
+            "合并顺序：先 badafans，后 6Kmfi6HP（fork 冲突时优先）。CI 通过后自动合并。")
+          gh pr create \
+            --base main \
+            --head "$SYNC_BRANCH" \
+            --title "⬆️ Sync upstream ($TODAY)" \
+            --body "$BODY"
+          # 尝试启用自动合并（仓库未开启 Allow auto-merge 时仅告警，不阻断）
+          gh pr merge --auto "$SYNC_BRANCH" \
+            || echo "::warning::无法设置自动合并（仓库可能未开启 Allow auto-merge），PR 需手动合并"
+
+      - name: 清理过期 workflow 运行记录
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash .github/workflows/scripts/cleanup-runs.sh

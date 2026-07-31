@@ -1,0 +1,20 @@
+services:
+  warp:
+    image: ghcr.io/callacat/warp-go:latest
+    container_name: warp
+    restart: unless-stopped
+    # 数据文件（reg.json / config.json / rules.txt / geo/）持久化在宿主目录
+    volumes:
+      - ./warp-data:/data
+    ports:
+      - "40000:40000"
+    # 首次运行先注册；注册完成后改为启动代理：
+    # command: ["-reg"]
+    # 注册后可用以下命令启动（默认监听 40000，mixed HTTP+SOCKS5）：
+    command: ["-l", "0.0.0.0:40000"]
+    # 若需开启 GEO 分流，用配置文件方式启动：
+    # command: ["-config", "config.json"]
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true

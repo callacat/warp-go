@@ -1,0 +1,62 @@
+package core
+
+import (
+	"errors"
+	"io/fs"
+
+	"warp/registration"
+)
+
+// Registered 报告本机是否已有可用注册信息（reg.json 存在且可读取）。
+// 文件存在但损坏时返回错误 —— 调用方应拒绝覆盖（见 Register 的幂等语义）。
+func (s *Server) Registered() (bool, error) {
+	_, err := registration.Load(s.opts.StateFile)
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, fs.ErrNotExist):
+		return false, nil
+	default:
+		return false, err
+	}
+}
+
+// Register 执行注册并保存到 StateFile。注册是幂等的：已有可用注册时原样
+// 保留（existing=true），而不是替换 —— 替换会让旧注册在 Cloudflare 侧失去
+// 本地凭据，再也无法注销。要更换注册请先 Deregister。
+func (s *Server) Register() (existing bool, id string, err error) {
+	switch existing, err := registration.Load(s.opts.StateFile); {
+	case err == nil:
+		return true, existing.ID, nil
+	case !errors.Is(err, fs.ErrNotExist):
+		return false, "", err
+	}
+
+	regData, err := registration.Register()
+	if err != nil {
+		return false, "", err
+	}
+	if err := regData.Save(s.opts.StateFile); err != nil {
+		return false, "", err
+	}
+	return false, regData.ID, nil
+}
+
+// Deregister 向 API 注销并删除本地注册信息。仅需 id 与 token，不依赖私钥
+// 材料（registration.DeleteRegistration 保证）。
+func (s *Server) Deregister() error {
+	return registration.DeleteRegistration(s.opts.StateFile)
+}
+
+// RegistrationInfo 返回注册信息的无密钥材料视图；reg.json 缺失时返回
+// (nil, nil)，损坏时返回错误。
+func (s *Server) RegistrationInfo() (*RegistrationInfo, error) {
+	reg, err := registration.Load(s.opts.StateFile)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return registrationView(reg), nil
+}

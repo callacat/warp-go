@@ -1,0 +1,182 @@
+# 构建与发布工作流
+# 触发：v* 标签推送 + 手动触发
+# 流程：test（vet/build/test）→ build-binary（5 平台交叉编译 CLI，gui/ 存在时一并构建）
+#       → release（校验和 + GitHub Release，仅 tag 推送时执行）
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  BINARY_NAME: warp
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Go 1.26
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.x'
+          check-latest: true
+
+      - name: 静态检查
+        run: go vet ./...
+
+      - name: 编译
+        run: go build ./...
+
+      - name: 运行测试
+        run: go test ./...
+
+  build-binary:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            arch: amd64
+          - os: linux
+            arch: arm64
+          - os: darwin
+            arch: amd64
+          - os: darwin
+            arch: arm64
+          - os: windows
+            arch: amd64
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Go 1.26
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.x'
+          check-latest: true
+
+      - name: 构建 CLI 二进制
+        env:
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+        run: |
+          EXE=""
+          if [ "$GOOS" = "windows" ]; then EXE=".exe"; fi
+          CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "dist/${BINARY_NAME}-${GOOS}-${GOARCH}${EXE}" .
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: warp-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  # GUI 是独立的 Wails v3 模块（gui/go.mod），需要 CGO + 平台 WebView 依赖，
+  # 与 CLI 的 CGO_ENABLED=0 构建完全不同，故拆成单独 job（按平台 runner 构建）。
+  build-gui:
+    needs: test
+    if: hashFiles('gui/go.mod') != ''
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows
+            runner: windows-latest
+          - os: darwin
+            runner: macos-latest
+          - os: linux
+            runner: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Linux GUI 构建依赖
+        if: matrix.os == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-4-dev libwebkitgtk-6.0-dev
+
+      - name: 设置 Go 1.26
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.x'
+          check-latest: true
+
+      - name: 设置 Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: 构建前端
+        working-directory: gui/frontend
+        run: |
+          npm ci || npm install
+          npm run build
+
+      - name: 生成 Wails 绑定
+        working-directory: gui
+        run: |
+          go run github.com/wailsapp/wails/v3/cmd/wails3 generate bindings
+
+      - name: 构建 GUI 二进制
+        working-directory: gui
+        env:
+          GOOS: ${{ matrix.os }}
+        run: |
+          EXE=""
+          if [ "$GOOS" = "windows" ]; then EXE=".exe"; fi
+          GOOS=$GOOS GOARCH=amd64 CGO_ENABLED=1 go build -trimpath -ldflags="-s -w" -o "../dist/warp-gui-${GOOS}-amd64${EXE}" .
+
+      - name: 上传 GUI 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: warp-gui-${{ matrix.os }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    needs: [build-binary, build-gui]
+    # 仅 tag 推送时创建 Release；workflow_dispatch 手动触发时跳过
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write # 清理脚本需要 gh run list/delete
+    steps:
+      - name: 下载所有构建产物
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: 生成校验和
+        run: |
+          cd dist
+          sha256sum * > sha256sums.txt
+          cat sha256sums.txt
+
+      - name: 创建 GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd dist
+          gh release create "$GITHUB_REF_NAME" ./* --generate-notes
+
+      - name: 清理过期 workflow 运行记录
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash .github/workflows/scripts/cleanup-runs.sh

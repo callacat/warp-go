@@ -1,0 +1,13 @@
+[Desktop Entry]
+Version=1.0
+Name=warp-go GUI
+Comment=A warp-go application
+# The Exec line includes %u to pass the URL to the application
+Exec=/usr/local/bin/warp-go %u
+Terminal=false
+Type=Application
+Icon=warp-go
+Categories=Utility;
+StartupWMClass=warp-go
+
+ 
