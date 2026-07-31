@@ -81,8 +81,10 @@ function loadService(): Promise<ServiceAPI | null> {
   if (!svcPromise) {
     svcPromise = (async () => {
       try {
-        // Same relative path the real build resolves; Vite maps .js -> .ts.
-        const mod = (await import("../../bindings/gui/index.js")) as {
+        // Wails v3 把 bindings 生成到 frontend/bindings/warp/gui/（带 module 路径）；
+        // 之前误用 bindings/gui/ 导致永远命中占位/演示模式。
+        // @ts-expect-error - bindings 是 .js 无 .d.ts（TS7016），运行时由 Wails 桥接
+        const mod = (await import("../../bindings/warp/gui/index.js")) as {
           Service?: Record<string, unknown>;
         };
         const ns = mod.Service;

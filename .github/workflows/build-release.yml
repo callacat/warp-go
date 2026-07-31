@@ -120,21 +120,23 @@ jobs:
         with:
           node-version: '22'
 
-      - name: 构建前端
-        working-directory: gui/frontend
-        run: |
-          npm ci || npm install
-          npm run build
-
       - name: 安装 wails3 CLI
         run: |
           go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-alpha2.119
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
+      # 先生成 bindings 再构建前端：前端 api.ts 静态 import bindings，
+      # 若顺序颠倒，npm build 会打进占位文件（演示模式）。
       - name: 生成 Wails 绑定
         working-directory: gui
         run: |
           wails3 generate bindings
+
+      - name: 构建前端
+        working-directory: gui/frontend
+        run: |
+          npm ci || npm install
+          npm run build
 
       - name: 构建 GUI 二进制
         working-directory: gui
@@ -143,8 +145,13 @@ jobs:
           GOOS: ${{ matrix.os }}
         run: |
           EXE=""
-          if [ "$GOOS" = "windows" ]; then EXE=".exe"; fi
-          GOOS=$GOOS GOARCH=amd64 CGO_ENABLED=1 go build -trimpath -ldflags="-s -w" -o "../dist/warp-gui-${GOOS}-amd64${EXE}" .
+          LDFLAGS="-s -w"
+          if [ "$GOOS" = "windows" ]; then
+            EXE=".exe"
+            # -H windowsgui：Windows GUI 程序不弹 CMD 黑框（否则每次启动闪黑框）
+            LDFLAGS="$LDFLAGS -H windowsgui"
+          fi
+          GOOS=$GOOS GOARCH=amd64 CGO_ENABLED=1 go build -trimpath -ldflags="$LDFLAGS" -o "../dist/warp-gui-${GOOS}-amd64${EXE}" .
 
       - name: 上传 GUI 产物
         uses: actions/upload-artifact@v4
