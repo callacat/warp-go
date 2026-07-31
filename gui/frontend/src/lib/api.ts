@@ -41,10 +41,13 @@ interface ServiceAPI {
   SetSystemProxy(enabled: boolean): Promise<unknown>;
   GetSystemProxyEnabled(): Promise<unknown>;
   ScanEdges(): Promise<unknown>;
+  ScanEdgesV4(): Promise<unknown>;
+  ScanEdgesV6(): Promise<unknown>;
+  ApplyEdge(addr: string): Promise<unknown>;
   SetAutostart(enabled: boolean): Promise<unknown>;
   GetAutostartEnabled(): Promise<unknown>;
   GetConfig(): Promise<unknown>;
-  SaveConfig(configJson: string): Promise<unknown>;
+  SaveConfig(config: Record<string, unknown>): Promise<unknown>;
   GetLogs(limit: number): Promise<unknown>;
 }
 
@@ -140,6 +143,7 @@ function mockConfig(): AppConfig {
     autoUpdateDays: 7,
     logDir: "logs",
     systemProxy: mockState.sysProxy,
+    allowUDP: false,
   };
 }
 
@@ -274,9 +278,11 @@ export async function updateGeo(): Promise<UpdateGeoResult> {
     return { ok: true, message: "GEO 数据已是最新（演示）" };
   }
   const raw = await svc.UpdateGeo();
+  const r = raw as { ok?: boolean; message?: string } | null;
+  // Wails bindings 返回 UpdateGeoResult 对象（{ok, message}），不是 Error。
   return {
-    ok: !(raw instanceof Error),
-    message: raw instanceof Error ? raw.message : "GEO 数据已更新",
+    ok: r?.ok === true,
+    message: r?.message ?? (r?.ok ? "GEO 数据已更新" : "GEO 数据更新失败"),
   };
 }
 
@@ -305,13 +311,38 @@ export async function getSystemProxyEnabled(): Promise<boolean> {
 }
 
 export async function scanEdges(): Promise<string[]> {
+  return scanEdgesFamily(null);
+}
+
+export async function scanEdgesV4(): Promise<string[]> {
+  return scanEdgesFamily("v4");
+}
+
+export async function scanEdgesV6(): Promise<string[]> {
+  return scanEdgesFamily("v6");
+}
+
+async function scanEdgesFamily(variant: "v4" | "v6" | null): Promise<string[]> {
   const svc = await loadService();
   if (!svc) {
-    await sleep(jitter(800));
-    return ["162.159.192.5:4500", "162.159.193.10:4500", "162.159.195.3:4500"];
+    await sleep(jitter(900));
+    const demo = variant === "v6"
+      ? ["2606:4700:103::2:443", "2606:4700:104::2:443"]
+      : ["162.159.192.5:4500", "162.159.193.10:4500", "162.159.195.3:4500"];
+    return demo;
   }
-  const raw = await svc.ScanEdges();
+  const raw = variant === "v6" ? await svc.ScanEdgesV6() : variant === "v4" ? await svc.ScanEdgesV4() : await svc.ScanEdges();
   return Array.isArray(raw) ? (raw as string[]) : [];
+}
+
+export async function applyEdge(addr: string): Promise<void> {
+  const svc = await loadService();
+  if (!svc) {
+    await sleep(jitter(200));
+    mockState.logs.push({ time: now(), level: "info", msg: `已应用边缘 ${addr}（演示）` });
+    return;
+  }
+  await svc.ApplyEdge(addr);
 }
 
 export async function setAutostart(enabled: boolean): Promise<void> {
@@ -349,7 +380,17 @@ export async function saveConfig(config: AppConfig): Promise<void> {
     mockState.logs.push({ time: now(), level: "info", msg: "配置已保存（演示）" });
     return;
   }
-  await svc.SaveConfig(JSON.stringify(config));
+  // 前端 AppConfig 是 camelCase，但 Go core.Config 的 JSON tag 是 snake_case；
+  // 直接传对象（不要 stringify），Wails 会按字段名映射。
+  await svc.SaveConfig({
+    listen_addr: config.listen,
+    rules_path: config.rulesPath,
+    geo_dir: config.geoDir,
+    geo_repo: config.geoRepo,
+    geo_auto_update_days: config.autoUpdateDays,
+    enable_system_proxy: config.systemProxy,
+    allow_udp: config.allowUDP,
+  });
 }
 
 export async function getLogs(limit = 200): Promise<LogEntry[]> {

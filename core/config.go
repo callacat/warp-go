@@ -26,6 +26,9 @@ import (
 type Config struct {
 	// ListenAddr 是 mixed HTTP+SOCKS5 代理的监听地址。
 	ListenAddr string `json:"listen_addr"`
+	// EdgeAddr 是扫描应用的最优边缘地址（host:port）；空 = 用注册信息默认。
+	// GUI 扫描页"应用"按钮写入；下次启动生效。
+	EdgeAddr string `json:"edge_addr,omitempty"`
 	// RulesPath 是路由规则文件路径（相对执行目录解析）。
 	RulesPath string `json:"rules_path"`
 	// GeoDir 是 geosite.dat / geoip-lite.dat 所在目录（相对执行目录解析）。

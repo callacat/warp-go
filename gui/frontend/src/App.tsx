@@ -6,6 +6,7 @@ import {
   Moon,
   PanelLeftClose,
   PanelRightClose,
+  Radar,
   Settings,
   Sun,
   ScrollText,
@@ -13,15 +14,17 @@ import {
 import StatusPage from "./pages/StatusPage";
 import RulesPage from "./pages/RulesPage";
 import GeoPage from "./pages/GeoPage";
+import ScanPage from "./pages/ScanPage";
 import SettingsPage from "./pages/SettingsPage";
 import LogsPage from "./pages/LogsPage";
 
-type PageKey = "status" | "rules" | "geo" | "settings" | "logs";
+type PageKey = "status" | "rules" | "geo" | "scan" | "settings" | "logs";
 
 const NAV: { key: PageKey; label: string; icon: typeof Activity }[] = [
   { key: "status", label: "状态", icon: Activity },
   { key: "rules", label: "规则", icon: FileText },
   { key: "geo", label: "GEO", icon: Globe },
+  { key: "scan", label: "扫描", icon: Radar },
   { key: "settings", label: "设置", icon: Settings },
   { key: "logs", label: "日志", icon: ScrollText },
 ];
@@ -30,6 +33,7 @@ const TITLES: Record<PageKey, string> = {
   status: "状态",
   rules: "路由规则",
   geo: "GEO 数据库",
+  scan: "边缘扫描",
   settings: "设置",
   logs: "运行日志",
 };
@@ -129,6 +133,7 @@ export default function App() {
             {page === "status" && <StatusPage />}
             {page === "rules" && <RulesPage />}
             {page === "geo" && <GeoPage />}
+            {page === "scan" && <ScanPage />}
             {page === "settings" && <SettingsPage />}
             {page === "logs" && <LogsPage />}
           </div>

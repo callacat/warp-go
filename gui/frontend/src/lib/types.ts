@@ -42,6 +42,7 @@ export interface AppConfig {
   autoUpdateDays: number;
   logDir: string;
   systemProxy: boolean;
+  allowUDP: boolean;
 }
 
 export type RuleAction = "proxy" | "direct";
@@ -90,12 +91,22 @@ export function fromCounters(v: unknown): ProxyCounters {
 export function fromStatus(v: unknown): AppStatus {
   const o = (v ?? {}) as Record<string, unknown>;
   return {
-    running: o.running === true,
-    listening: str(o.listening, "127.0.0.1:40000"),
-    startedAt: typeof o.startedAt === "string" ? o.startedAt : undefined,
-    error: typeof o.error === "string" ? o.error : undefined,
+    running: o.running === true || o.State === "running",
+    listening: str(o.listen_addr ?? o.listening, "127.0.0.1:40000"),
+    startedAt:
+      typeof o.start_time === "string"
+        ? o.start_time
+        : typeof o.startedAt === "string"
+          ? o.startedAt
+          : undefined,
+    error:
+      typeof o.last_error === "string"
+        ? o.last_error
+        : typeof o.error === "string"
+          ? o.error
+          : undefined,
     registered: o.registered === true || o.Registered === true,
-    counters: fromCounters(o.counters),
+    counters: fromCounters(o.stats ?? o.counters),
     registration: fromRegistration(o.registration),
   };
 }
@@ -118,18 +129,20 @@ function fromRegistration(v: unknown): RegistrationInfo | null {
 
 export function fromConfig(v: unknown): AppConfig {
   const o = (v ?? {}) as Record<string, unknown>;
+  // Go core.Config JSON tag 是 snake_case；兼容 camelCase 兜底。
   return {
-    listen: str(o.listen, "127.0.0.1:40000"),
-    rulesPath: str(o.rulesPath, "rules.txt"),
-    geoDir: str(o.geoDir, "geo"),
-    geoRepo: str(o.geoRepo, "MetaCubeX/meta-rules-dat"),
+    listen: str(o.listen_addr ?? o.listen, "127.0.0.1:40000"),
+    rulesPath: str(o.rules_path ?? o.rulesPath, "rules.txt"),
+    geoDir: str(o.geo_dir ?? o.geoDir, "geo"),
+    geoRepo: str(o.geo_repo ?? o.geoRepo, "MetaCubeX/meta-rules-dat"),
     geoBaseURL: str(
-      o.geoBaseURL,
+      o.geo_base_url ?? o.geoBaseURL,
       "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest",
     ),
-    autoUpdateDays: num(o.autoUpdateDays, 7),
-    logDir: str(o.logDir, "logs"),
-    systemProxy: o.systemProxy === true,
+    autoUpdateDays: num(o.geo_auto_update_days ?? o.autoUpdateDays, 7),
+    logDir: str(o.log_dir ?? o.logDir, "logs"),
+    systemProxy: o.enable_system_proxy === true || o.systemProxy === true,
+    allowUDP: o.allow_udp === true || o.allowUDP === true,
   };
 }
 

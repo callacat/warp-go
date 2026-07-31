@@ -152,7 +152,12 @@ func New(opts Options) *Server {
 	return &Server{opts: opts}
 }
 
-// resolveExecPath 把相对路径解析为可执行文件所在目录下的绝对路径；
+// resolveExecPath 把相对路径解析为数据目录下的绝对路径：
+//   - 优先可执行文件所在目录（便携部署：exe 放哪数据就在哪）
+//   - 可执行目录不可写（如 Windows Program Files）时回退用户配置目录
+//     （Windows %APPDATA%/warp-go、macOS ~/Library/Application Support/warp-go、
+//     Linux ~/.config/warp-go）
+//
 // 已是绝对路径或空串时原样返回。os.Executable 失败（罕见）时回退到
 // 当前工作目录，保证程序仍能启动。
 func resolveExecPath(p string) string {
@@ -163,7 +168,26 @@ func resolveExecPath(p string) string {
 	if err != nil {
 		return p
 	}
-	return filepath.Join(filepath.Dir(exe), p)
+	exeDir := filepath.Dir(exe)
+	if dirWritable(exeDir) {
+		return filepath.Join(exeDir, p)
+	}
+	if cfgDir, err := os.UserConfigDir(); err == nil {
+		return filepath.Join(cfgDir, "warp-go", p)
+	}
+	return filepath.Join(exeDir, p)
+}
+
+// dirWritable 检查目录是否可写（用临时文件探测；失败按不可写处理）。
+func dirWritable(dir string) bool {
+	tmp, err := os.CreateTemp(dir, ".warp-write-test-*")
+	if err != nil {
+		return false
+	}
+	name := tmp.Name()
+	tmp.Close()
+	os.Remove(name)
+	return true
 }
 
 // ensureConfig 返回生效中的配置：Start 后返回启动时加载的实例，否则按
@@ -238,30 +262,39 @@ func (s *Server) Start(ctx context.Context) error {
 	// 边缘候选：-ip 取 "4"/"6" 时按注册信息展开端口列表；显式 host:port
 	// 走系统解析器（此时隧道尚未建立，in-tunnel DoH 不可用）。
 	var edgeAddrs []string
-	switch s.opts.EdgeIP {
-	case "4", "6":
-		endpointHost, other := regData.EndpointV4, "6"
-		if s.opts.EdgeIP == "6" {
-			endpointHost, other = regData.EndpointV6, "4"
+	if strings.TrimSpace(cfg.EdgeAddr) != "" && s.opts.EdgeIP == "" {
+		// 扫描应用的边缘地址优先（config.json edge_addr）。
+		if edgeAddrs, err = resolveEdge(cfg.EdgeAddr); err != nil {
+			return fmt.Errorf("edge_addr %q 无法解析：%w", cfg.EdgeAddr, err)
 		}
-		if endpointHost == "" {
-			return fmt.Errorf("注册信息中没有 IPv%s 边缘地址。"+
-				"可改用 -ip %s，或依次执行 -del 与 -reg 重新注册", s.opts.EdgeIP, other)
+		log.Printf("WARP 代理启动中（边缘=已应用扫描结果 %s，mixed=%s）",
+			cfg.EdgeAddr, s.opts.ListenAddr)
+	} else {
+		switch s.opts.EdgeIP {
+		case "4", "6":
+			endpointHost, other := regData.EndpointV4, "6"
+			if s.opts.EdgeIP == "6" {
+				endpointHost, other = regData.EndpointV6, "4"
+			}
+			if endpointHost == "" {
+				return fmt.Errorf("注册信息中没有 IPv%s 边缘地址。"+
+					"可改用 -ip %s，或依次执行 -del 与 -reg 重新注册", s.opts.EdgeIP, other)
+			}
+			ports := regData.EndpointPorts
+			if len(ports) == 0 {
+				ports = []int{443}
+			}
+			for _, p := range ports {
+				edgeAddrs = append(edgeAddrs, net.JoinHostPort(endpointHost, strconv.Itoa(p)))
+			}
+			log.Printf("WARP 代理启动中（边缘=IPv%s %s 端口=%v，mixed=%s）",
+				s.opts.EdgeIP, endpointHost, ports, s.opts.ListenAddr)
+		default:
+			if edgeAddrs, err = resolveEdge(s.opts.EdgeIP); err != nil {
+				return fmt.Errorf("-ip %q 既不是 4 或 6，也不是可用地址：%w", s.opts.EdgeIP, err)
+			}
+			log.Printf("WARP 代理启动中（边缘=%s → %v，mixed=%s）", s.opts.EdgeIP, edgeAddrs, s.opts.ListenAddr)
 		}
-		ports := regData.EndpointPorts
-		if len(ports) == 0 {
-			ports = []int{443}
-		}
-		for _, p := range ports {
-			edgeAddrs = append(edgeAddrs, net.JoinHostPort(endpointHost, strconv.Itoa(p)))
-		}
-		log.Printf("WARP 代理启动中（边缘=IPv%s %s 端口=%v，mixed=%s）",
-			s.opts.EdgeIP, endpointHost, ports, s.opts.ListenAddr)
-	default:
-		if edgeAddrs, err = resolveEdge(s.opts.EdgeIP); err != nil {
-			return fmt.Errorf("-ip %q 既不是 4 或 6，也不是可用地址：%w", s.opts.EdgeIP, err)
-		}
-		log.Printf("WARP 代理启动中（边缘=%s → %v，mixed=%s）", s.opts.EdgeIP, edgeAddrs, s.opts.ListenAddr)
 	}
 
 	// 公钥固定 + TLS 配置（与官方 warp-svc 对齐，见逆向文档）。
@@ -610,10 +643,56 @@ func (s *Server) UpdateGeo(ctx context.Context) (bool, error) {
 	return true, nil
 }
 
+// InitDefaults 初始化不依赖注册的基础文件（幂等）：
+//   - rules.txt 默认规则模板（缺失时写入）
+//   - GEO 数据库下载（缺失时拉取 geosite.dat / geoip-lite.dat）
+//
+// 供 GUI 首次启动调用：用户尚未注册时也能看到默认规则与 GEO 状态，
+// 而不是必须等 Start（需注册）成功后才生成。CLI 不调用（保持显式行为）。
+func (s *Server) InitDefaults(ctx context.Context) error {
+	cfg, err := s.ensureConfig()
+	if err != nil {
+		return err
+	}
+	// rules.txt 模板：EnsureRulesFile 在 NewEngine 内做，但那只在 Start 后；
+	// 这里独立触发一次模板初始化。
+	if err := os.MkdirAll(filepath.Dir(cfg.RulesPath), 0o755); err != nil {
+		return fmt.Errorf("创建规则目录失败：%w", err)
+	}
+	created, err := route.EnsureRulesFile(cfg.RulesPath)
+	if err != nil {
+		return fmt.Errorf("初始化默认规则失败：%w", err)
+	}
+	if created {
+		log.Printf("✓ 已生成默认规则模板 %s", cfg.RulesPath)
+	}
+
+	// GEO 下载：缺失时拉取；SHA-1 去重由 route.UpdateGeoData 负责。
+	if !geoDataPresent(cfg.GeoDir) {
+		if err := os.MkdirAll(cfg.GeoDir, 0o755); err != nil {
+			return fmt.Errorf("创建 GEO 目录失败：%w", err)
+		}
+		updated, uerr := route.UpdateGeoData(ctx, cfg.GeoDir, cfg.GeoSiteURL(), cfg.GeoIPURL())
+		if uerr != nil {
+			log.Printf("⚠ 初始 GEO 下载失败（可稍后手动更新）：%v", uerr)
+			return nil // 下载失败不致命，下次可重试
+		}
+		if updated {
+			log.Println("✓ 初始 GEO 数据已下载")
+		}
+	}
+	return nil
+}
+
 // ScanEdges 对 WARP 边缘全段做延迟扫描，返回 RTT 最优的 top-N 端点。
 // 供 GUI "扫描最优边缘"按钮调用；需要注册信息（未注册报清晰错误）。
 // 扫描只探测不修改注册信息（与 CLI -scan 一致，结果不写回 reg.json）。
 func (s *Server) ScanEdges(ctx context.Context) ([]string, error) {
+	return s.ScanEdgesFamily(ctx, "")
+}
+
+// ScanEdgesFamily 按指定地址族扫描："4"/"6"；空串用 Options.EdgeIP。
+func (s *Server) ScanEdgesFamily(ctx context.Context, ipMode string) ([]string, error) {
 	regData, err := registration.Load(s.opts.StateFile)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -636,10 +715,14 @@ func (s *Server) ScanEdges(ctx context.Context) ([]string, error) {
 		CurvePreferences:      []tls.CurveID{tls.CurveP256, tls.CurveP384, tls.CurveP521},
 	}
 
-	// 默认扫注册信息给出的地址族；显式 EdgeIP 为 host:port 时用它的地址族段。
+	// 默认扫注册信息给出的地址族；ipMode 参数（"4"/"6"）优先，
+	// 显式 EdgeIP 为 host:port 时用它的地址族段。
 	v6 := false
 	fallback := []string{}
-	edgeSpec := s.opts.EdgeIP
+	edgeSpec := ipMode
+	if edgeSpec == "" {
+		edgeSpec = s.opts.EdgeIP
+	}
 	if edgeSpec == "" {
 		edgeSpec = "4"
 	}
@@ -707,6 +790,17 @@ func (s *Server) SetSystemProxy(enabled bool) error {
 		log.Println("✓ 系统代理已清除")
 	}
 	return nil
+}
+
+// SetEdgeAddr 应用扫描选出的最优边缘地址（写入 config.json edge_addr，
+// 下次启动生效；GUI 扫描页"应用"按钮）。
+func (s *Server) SetEdgeAddr(addr string) error {
+	cfg, err := s.ensureConfig()
+	if err != nil {
+		return err
+	}
+	cfg.EdgeAddr = addr
+	return s.SaveConfig(cfg)
 }
 
 // SetAutostart 开启/关闭开机自启（指向当前可执行文件）。

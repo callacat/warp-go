@@ -23,15 +23,20 @@ import (
 // Service 持有 core.Server 的惰性实例。GUI 打开时不必立即启动代理：
 // 服务方法在需要时才创建/使用 Server。
 type Service struct {
-	mu      sync.Mutex
-	server  *core.Server
-	started bool
+	mu           sync.Mutex
+	server       *core.Server
+	started      bool
+	startErr     error // 异步 Start 失败时的错误（GetStatus 展示）
+	defaultsInit bool // InitDefaults 已执行（幂等）
 }
 
 // newService 创建服务并注入日志环形缓冲（logs.go）。
 func newService() *Service {
 	svc := &Service{}
 	log.SetOutput(logWriter{})
+	// GUI 启动即异步初始化基础文件（rules.txt 模板 + GEO 下载），
+	// 不阻塞窗口显示；未注册也能看到默认规则与 GEO 状态。
+	go svc.InitDefaults()
 	return svc
 }
 
@@ -54,16 +59,50 @@ func (s *Service) serverInstance() (*core.Server, error) {
 // 状态与生命周期
 // ---------------------------------------------------------------------------
 
+// InitDefaults 初始化基础文件（rules.txt 模板 + GEO 下载，不依赖注册）。
+// GUI 首次启动时调用；幂等，可安全重复。
+func (s *Service) InitDefaults() {
+	s.mu.Lock()
+	if s.defaultsInit {
+		s.mu.Unlock()
+		return
+	}
+	srv, err := s.serverInstance()
+	s.mu.Unlock()
+	if err != nil {
+		log.Printf("⚠ 初始化失败：%v", err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	if err := srv.InitDefaults(ctx); err != nil {
+		log.Printf("⚠ 初始化基础文件失败：%v", err)
+		return
+	}
+	s.mu.Lock()
+	s.defaultsInit = true
+	s.mu.Unlock()
+}
+
 // GetStatus 返回当前状态快照。
 func (s *Service) GetStatus() core.Status {
 	srv, err := s.serverInstance()
 	if err != nil {
 		return core.Status{State: "stopped", LastError: err.Error()}
 	}
-	return srv.Status()
+	st := srv.Status()
+	s.mu.Lock()
+	if s.startErr != nil && st.LastError == "" {
+		st.LastError = s.startErr.Error()
+	}
+	s.mu.Unlock()
+	return st
 }
 
 // Start 启动代理（幂等：已在运行则无操作）。
+//
+// core.Server.Start 是阻塞设计（CLI 主流程用）；GUI 里必须在 goroutine 中
+// 异步启动，否则会卡死 Wails 服务线程导致整个界面冻结。
 func (s *Service) Start() error {
 	s.mu.Lock()
 	if s.started {
@@ -77,12 +116,22 @@ func (s *Service) Start() error {
 	}
 	s.mu.Unlock()
 
-	if err := srv.Start(context.Background()); err != nil {
-		return err
-	}
 	s.mu.Lock()
 	s.started = true
+	s.startErr = nil
 	s.mu.Unlock()
+
+	go func() {
+		// 阻塞直到 Stop/退出；错误记录到 startErr 供 GetStatus 展示。
+		err := srv.Start(context.Background())
+		s.mu.Lock()
+		if err != nil {
+			s.startErr = err
+			log.Printf("代理启动失败：%v", err)
+		}
+		s.started = false
+		s.mu.Unlock()
+	}()
 	return nil
 }
 
@@ -279,13 +328,37 @@ func (s *Service) GetSystemProxyEnabled() bool {
 
 // ScanEdges 扫描 WARP 边缘，返回最优端点列表（GUI "扫描最优边缘"按钮）。
 func (s *Service) ScanEdges() ([]string, error) {
+	return s.scanEdges("4")
+}
+
+// ScanEdgesV4 扫描 IPv4 边缘。
+func (s *Service) ScanEdgesV4() ([]string, error) {
+	return s.scanEdges("4")
+}
+
+// ScanEdgesV6 扫描 IPv6 边缘。
+func (s *Service) ScanEdgesV6() ([]string, error) {
+	return s.scanEdges("6")
+}
+
+func (s *Service) scanEdges(ipMode string) ([]string, error) {
 	srv, err := s.serverInstance()
 	if err != nil {
 		return nil, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	// 用临时 Options 覆盖 EdgeIP，扫描指定地址族。
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	return srv.ScanEdges(ctx)
+	return srv.ScanEdgesFamily(ctx, ipMode)
+}
+
+// ApplyEdge 应用扫描选出的最优边缘地址（写入 config.json，下次启动生效）。
+func (s *Service) ApplyEdge(addr string) error {
+	srv, err := s.serverInstance()
+	if err != nil {
+		return err
+	}
+	return srv.SetEdgeAddr(addr)
 }
 
 // SetAutostart 开启/关闭开机自启。
