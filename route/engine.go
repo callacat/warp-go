@@ -103,9 +103,10 @@ func (e *Engine) UpdateGeo(ctx context.Context) (bool, error) {
 // Stats 返回命中计数快照（GUI 状态展示用）。
 func (e *Engine) Stats() Stats {
 	return Stats{
-		ProxyHits:  e.statsProxy.Load(),
-		DirectHits: e.statsDirect.Load(),
-		Misses:     e.statsMiss.Load(),
+		ProxyHits:    e.statsProxy.Load(),
+		DirectHits:   e.statsDirect.Load(),
+		RejectedHits: e.statsReject.Load(),
+		Misses:       e.statsMiss.Load(),
 	}
 }
 

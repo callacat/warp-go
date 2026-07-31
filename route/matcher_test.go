@@ -295,3 +295,47 @@ func TestEngineStats(t *testing.T) {
 		t.Errorf("Misses = %d，期望 1", st.Misses)
 	}
 }
+
+func TestMatchReject(t *testing.T) {
+	e := newTestEngine(t, "REJECT,domain:ads.com\nproxy,geosite:google\n")
+
+	cases := []struct {
+		host        string
+		wantAct     string
+		wantMatched bool
+	}{
+		{"ads.com", "reject", true},        // REJECT 首条命中
+		{"cdn.ads.com", "reject", true},    // 子域
+		{"google.com", "proxy", true},      // 后续规则仍生效
+		{"example.org", "direct", false},   // 未命中兜底 direct
+	}
+	for _, tc := range cases {
+		act, _, matched := e.Match(tc.host, netip.Addr{})
+		if matched != tc.wantMatched || (matched && act != tc.wantAct) {
+			t.Errorf("Match(%q) = (%s, %v)，期望 (%s, %v)",
+				tc.host, act, matched, tc.wantAct, tc.wantMatched)
+		}
+	}
+}
+
+func TestEngineStatsReject(t *testing.T) {
+	e := newTestEngine(t, "reject,domain:ads.com\ndirect,domain:ok.com\n")
+	e.Match("ads.com", netip.Addr{})     // reject 命中
+	e.Match("www.ads.com", netip.Addr{}) // reject 命中
+	e.Match("ok.com", netip.Addr{})      // direct 命中
+	e.Match("miss.com", netip.Addr{})    // 未命中
+
+	st := e.Stats()
+	if st.RejectedHits != 2 {
+		t.Errorf("RejectedHits = %d，期望 2", st.RejectedHits)
+	}
+	if st.DirectHits != 1 {
+		t.Errorf("DirectHits = %d，期望 1（reject 不应计入 direct）", st.DirectHits)
+	}
+	if st.ProxyHits != 0 {
+		t.Errorf("ProxyHits = %d，期望 0", st.ProxyHits)
+	}
+	if st.Misses != 1 {
+		t.Errorf("Misses = %d，期望 1", st.Misses)
+	}
+}

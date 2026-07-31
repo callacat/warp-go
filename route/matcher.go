@@ -20,10 +20,13 @@ import (
 )
 
 // Stats 是匹配引擎的命中计数快照（GUI 状态展示用）。
+// 字段无 JSON tag：序列化使用 Go 首字母大写字段名（ProxyHits 等），
+// 前端 fromCounters 需按大写键读取（见 gui/frontend/src/lib/types.ts）。
 type Stats struct {
-	ProxyHits  int64 // 命中 proxy 规则的次数
-	DirectHits int64 // 命中 direct 规则的次数
-	Misses     int64 // 未命中任何规则的次数（隐式 direct 兜底）
+	ProxyHits    int64 // 命中 proxy 规则的次数
+	DirectHits   int64 // 命中 direct 规则的次数
+	RejectedHits int64 // 命中 reject 规则的次数（被拦截的连接）
+	Misses       int64 // 未命中任何规则的次数（隐式 direct 兜底）
 }
 
 // Engine 组合规则 + GEO 数据库，对外提供 Match 分流判定。
@@ -42,9 +45,10 @@ type Engine struct {
 	// 数据集中极少（个位数），惰性编译 + sync.Map 避免每次匹配重复编译。
 	reCache sync.Map // map[string]*regexp.Regexp
 
-	statsProxy  atomic.Int64
-	statsDirect atomic.Int64
-	statsMiss   atomic.Int64
+	statsProxy   atomic.Int64
+	statsDirect  atomic.Int64
+	statsReject  atomic.Int64
+	statsMiss    atomic.Int64
 }
 
 // Match 判定 (host, ip) 的转发行为。
@@ -118,9 +122,12 @@ func (e *Engine) Match(host string, ip netip.Addr) (string, Rule, bool) {
 
 // hit 记录命中计数并返回规则。
 func (e *Engine) hit(r Rule) (string, Rule, bool) {
-	if r.Action == ActionProxy {
+	switch r.Action {
+	case ActionProxy:
 		e.statsProxy.Add(1)
-	} else {
+	case ActionReject:
+		e.statsReject.Add(1)
+	default:
 		e.statsDirect.Add(1)
 	}
 	return r.Action, r, true

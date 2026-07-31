@@ -1,0 +1,10 @@
+# warp-go 默认路由规则（每行一条，格式: 行为,条件）
+# 行为: proxy = 走 WARP 隧道；direct = 本地直连；reject = 拒绝连接（拦截广告）
+# 规则按序匹配，先命中者生效；全部未命中时兜底 direct。
+REJECT,geosite:category-ads-all
+direct,geosite:private
+direct,geoip:private
+proxy,geosite:google
+proxy,geosite:geolocation-!cn
+direct,geosite:cn
+direct,geoip:cn

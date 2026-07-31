@@ -101,16 +101,75 @@ func TestParseRulesMalformed(t *testing.T) {
 	}
 }
 
+func TestParseRulesReject(t *testing.T) {
+	text := `
+REJECT,geosite:category-ads-all
+reject,geosite:category-ads-all
+Reject,GeoSite:Category-Ads
+REJECT,domain:doubleclick.net
+direct,geoip:cn
+`
+	rules, err := ParseRules(text)
+	if err != nil {
+		t.Fatalf("ParseRules 应接受 reject 行为：%v", err)
+	}
+	want := []Rule{
+		{Action: "reject", Kind: "geosite", Value: "category-ads-all"},
+		{Action: "reject", Kind: "geosite", Value: "category-ads-all"},
+		{Action: "reject", Kind: "geosite", Value: "Category-Ads"},
+		{Action: "reject", Kind: "domain", Value: "doubleclick.net"},
+		{Action: "direct", Kind: "geoip", Value: "cn"},
+	}
+	if len(rules) != len(want) {
+		t.Fatalf("规则数 = %d，期望 %d：%+v", len(rules), len(want), rules)
+	}
+	for i := range want {
+		if rules[i] != want[i] {
+			t.Errorf("第 %d 条 = %+v，期望 %+v（action/kind 应归一化为小写，domain 值保留原样）", i, rules[i], want[i])
+		}
+	}
+}
+
+// TestDomainValueCasePreserved 验证 domain 条件值在解析期保持原样（大小写
+// 不归一化），运行时匹配才做大小写折叠 —— 用户要求"规则行为条件不区分
+// 大小写，域名条件除外"。
+func TestDomainValueCasePreserved(t *testing.T) {
+	rules, err := ParseRules("proxy,DOMAIN:Example.COM\n")
+	if err != nil {
+		t.Fatalf("大写 DOMAIN 类型应解析成功：%v", err)
+	}
+	if len(rules) != 1 {
+		t.Fatalf("期望 1 条规则，得到 %d", len(rules))
+	}
+	if rules[0].Kind != "domain" {
+		t.Errorf("kind 应归一化为小写 domain，得到 %q", rules[0].Kind)
+	}
+	if rules[0].Value != "Example.COM" {
+		t.Errorf("domain 值应保留原样，得到 %q（不应归一化）", rules[0].Value)
+	}
+}
+
 func TestDefaultRulesParses(t *testing.T) {
 	rules, err := ParseRules(DefaultRules)
 	if err != nil {
 		t.Fatalf("默认模板必须可解析：%v", err)
 	}
-	if len(rules) != 6 {
-		t.Fatalf("默认模板应有 6 条规则，得到 %d：%+v", len(rules), rules)
+	if len(rules) != 7 {
+		t.Fatalf("默认模板应有 7 条规则，得到 %d：%+v", len(rules), rules)
 	}
-	if rules[0] != (Rule{Action: "proxy", Kind: "geosite", Value: "google"}) {
-		t.Errorf("首条应为 proxy,geosite:google，得到 %+v", rules[0])
+	want := []Rule{
+		{Action: "reject", Kind: "geosite", Value: "category-ads-all"},
+		{Action: "direct", Kind: "geosite", Value: "private"},
+		{Action: "direct", Kind: "geoip", Value: "private"},
+		{Action: "proxy", Kind: "geosite", Value: "google"},
+		{Action: "proxy", Kind: "geosite", Value: "geolocation-!cn"},
+		{Action: "direct", Kind: "geosite", Value: "cn"},
+		{Action: "direct", Kind: "geoip", Value: "cn"},
+	}
+	for i := range want {
+		if rules[i] != want[i] {
+			t.Errorf("第 %d 条 = %+v，期望 %+v", i, rules[i], want[i])
+		}
 	}
 }
 

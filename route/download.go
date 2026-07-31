@@ -29,6 +29,10 @@ const (
 	DefaultGeoIPURL   = "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip-lite.dat"
 )
 
+// DefaultRulesURL 是仓库内置默认规则文件（rules/default-rules.txt）的 raw 地址。
+// 首次启动时优先从这里拉取最新规则模板，下载失败回退内置 DefaultRules。
+const DefaultRulesURL = "https://raw.githubusercontent.com/callacat/warp-go/main/rules/default-rules.txt"
+
 // 下载超时与单次读取上限（防异常远端无限拖流）。
 const (
 	geoDownloadTimeout = 5 * time.Minute
@@ -151,4 +155,30 @@ func validateGeoIP(data []byte) error {
 		return fmt.Errorf("不是有效的 v2ray protobuf（GeoIPList）：%w", err)
 	}
 	return nil
+}
+
+// validateRules 校验下载的规则文本能被 ParseRules 解析（结构校验，等价于
+// GEO 的 proto.Unmarshal 门禁）。
+func validateRules(data []byte) error {
+	if _, err := ParseRules(string(data)); err != nil {
+		return fmt.Errorf("不是有效的规则文本：%w", err)
+	}
+	return nil
+}
+
+// DownloadDefaultRules 从 url 下载默认规则文件并落盘到 path。
+// 与 GEO 更新同一管线：SHA-1 去重 → ParseRules 结构校验 → 原子改名。
+// 返回是否实际写入。下载或校验失败返回错误，不动现有文件。
+func DownloadDefaultRules(ctx context.Context, path, url string) (bool, error) {
+	if url == "" {
+		return false, fmt.Errorf("默认规则下载地址为空")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return false, fmt.Errorf("创建规则目录失败：%w", err)
+	}
+	updated, err := updateOne(ctx, filepath.Dir(path), url, path, validateRules)
+	if err != nil {
+		return false, err
+	}
+	return updated, nil
 }

@@ -33,6 +33,7 @@ import (
 const (
 	ActionProxy  = "proxy"  // 走 WARP 隧道
 	ActionDirect = "direct" // 本地直连
+	ActionReject = "reject" // 拒绝连接（拦截广告等）
 )
 
 // Kind 常量：规则条件类型。
@@ -55,20 +56,22 @@ type Rule struct {
 
 // DefaultRules 是首次初始化写入 rules.txt 的默认规则模板。
 // 规则按序匹配，先命中者生效；全部未命中时兜底 direct。
+// REJECT 命中即拦截连接（SOCKS5 返回 0x02 / HTTP 返回 403）。
 // geolocation-!cn 是 geosite.dat 中的字面类别名（`!` 烘焙进数据，非取反语法）。
 const DefaultRules = `# 默认路由规则（每行一条，格式: 行为,条件）
-# 行为: proxy = 走 WARP 隧道；direct = 本地直连
+# 行为: proxy = 走 WARP 隧道；direct = 本地直连；reject = 拒绝连接（拦截广告）
+REJECT,geosite:category-ads-all
+direct,geosite:private
+direct,geoip:private
 proxy,geosite:google
 proxy,geosite:geolocation-!cn
-direct,geoip:private
-direct,geosite:private
 direct,geosite:cn
 direct,geoip:cn
 `
 
 // 可用的行为与条件类型（大小写不敏感地接受，统一归一化为小写）。
 var (
-	validActions = map[string]bool{ActionProxy: true, ActionDirect: true}
+	validActions = map[string]bool{ActionProxy: true, ActionDirect: true, ActionReject: true}
 	validKinds   = map[string]bool{KindGeoSite: true, KindGeoIP: true, KindDomain: true}
 )
 
