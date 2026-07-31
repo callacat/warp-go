@@ -199,9 +199,14 @@ func main() {
 
 	// -geo-update：一次性更新 GEO 数据后退出。不需要注册信息，放在注册检查
 	// 之后（与启动路径同用 core.UpdateGeo，config.json 缺失时自动生成模板）。
+	// 先 InitDefaults 确保基础文件（config.json / 默认规则 / 缺失的 GEO），
+	// 再 UpdateGeo 强制 SHA-1 比对刷新——首次使用一次命令完成全部初始化。
 	if *geoUpdate {
 		gctx, gcancel := context.WithTimeout(context.Background(), geoUpdateOneShotTimeout)
 		defer gcancel()
+		if err := srv.InitDefaults(gctx); err != nil {
+			log.Fatalf("初始化基础文件失败：%v", err)
+		}
 		updated, uerr := srv.UpdateGeo(gctx)
 		if uerr != nil {
 			log.Fatalf("GEO 数据更新失败：%v", uerr)
