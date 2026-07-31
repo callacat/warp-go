@@ -156,6 +156,38 @@ func resolveEdge(spec string) ([]string, error) {
 	return out, nil
 }
 
+// validateHostPort 校验 host:port 格式：host 非空、端口为 1-65535。
+func validateHostPort(spec string) error {
+	host, port, err := net.SplitHostPort(spec)
+	if err != nil {
+		return fmt.Errorf("需要 host:port 形式，例如 your-socks5-host:7890（%w）", err)
+	}
+	if host == "" {
+		return errors.New("host 部分为空")
+	}
+	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+		return fmt.Errorf("端口 %q 不是 1-65535 范围内的数字", port)
+	}
+	return nil
+}
+
+// decideRotate 将 -rotate（显式值）与 -scan/-scan-top（智能默认）折算成池大小。
+// 返回 0 表示轮询关闭（NewMasqueClientWithOptions 走单连接退化路径）。
+//
+// 规则：
+//   - rotate=0 且 scan=false → 不启用（0）
+//   - rotate=0 且 scan=true → 自动启用，池大小=scanTop
+//   - rotate>0 …显式启用，池大小=rotate（覆盖 scanTop）
+func decideRotate(rotate int, scanTop int, scan bool) int {
+	if rotate > 0 {
+		return rotate // 用户显式给了 -rotate，直接照用
+	}
+	if rotate == 0 && scan {
+		return scanTop // auto: 有扫描结果则自动建池
+	}
+	return 0 // 关闭
+}
+
 func main() {
 	var (
 		// 默认绑回环，避免裸 SOCKS5 口暴露公网（P1-A 裸口收紧）。
