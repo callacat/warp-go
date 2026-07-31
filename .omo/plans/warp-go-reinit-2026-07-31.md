@@ -112,13 +112,13 @@
 - [x] 交叉编译配置（Taskfile + build/{linux,windows,darwin} 平台 Taskfiles + Dockerfile.cross）
 - [x] GUI 构建走 CI（build-gui 分平台 job：ubuntu-24.04/windows-latest/macos-latest；本地 GTK 4.6 < 4.10 无法编译）
 
-### M5: 发布与验证（进行中）
+### M5: 发布与验证 ✅
 - [x] Dockerfile 更新（多阶段 CLI 构建，端口 40000；**不含 GUI**，修复 Metis B2）
-- [x] 推送远端 main（备份后 force-push 覆盖 `1ae4d38` → `f344347`，修复 Metis A2）
-- [x] 打 tag v0.2.0 触发 Actions → docker-ghcr 已成功（GHCR 镜像验证通过）
+- [x] 推送远端 main（备份后 force-push 覆盖 `1ae4d38` → `ad6d6de`，修复 Metis A2）
+- [x] 打 tag v0.2.0 触发 Actions → **全绿**：5 平台 CLI + 3 平台 GUI + Release + GHCR 镜像
 - [x] 文档（README 重写: 新功能、规则语法、GUI 用法、配置说明）
 - [x] 风险回退路径（§8：删 tag + revert + 删 GHCR 镜像）
-- [ ] 从 GitHub Release 下载产物本地验证（CLI 配置启动 + Docker 冒烟——等待 Actions 完成）
+- [x] 从 GitHub Release 下载产物本地验证：CLI 配置启动（config.json 自动生成）+ GEO 下载 + 分流匹配 + Docker 冒烟全部通过
 
 ## 4. 执行顺序（推荐路线，减少决断点）
 
