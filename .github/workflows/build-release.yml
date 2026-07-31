@@ -138,6 +138,7 @@ jobs:
 
       - name: 构建 GUI 二进制
         working-directory: gui
+        shell: bash # windows runner 默认 PowerShell，脚本是 bash 语法
         env:
           GOOS: ${{ matrix.os }}
         run: |
@@ -162,6 +163,9 @@ jobs:
       contents: write
       actions: write # 清理脚本需要 gh run list/delete
     steps:
+      - name: 检出代码（gh release create 需要 git 上下文）
+        uses: actions/checkout@v4
+
       - name: 下载所有构建产物
         uses: actions/download-artifact@v4
         with:
