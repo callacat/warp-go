@@ -54,10 +54,11 @@ interface ServiceAPI {
 // ---------- demo data (used while bindings are placeholders) ----------
 
 const DEFAULT_RULES = `# warp-go 路由规则（每行：行为,条件；# 为注释）
+REJECT,geosite:category-ads-all
+direct,geosite:private
+direct,geoip:private
 proxy,geosite:google
 proxy,geosite:geolocation-!cn
-direct,geoip:private
-direct,geosite:private
 direct,geosite:cn
 direct,geoip:cn
 `;
@@ -67,7 +68,7 @@ const mockState = {
   sysProxy: false,
   autostart: false,
   rulesText: DEFAULT_RULES,
-  counters: { proxy: 128, direct: 947, miss: 14 },
+  counters: { proxy: 128, direct: 947, miss: 14, rejected: 23 },
   startedAt: undefined as string | undefined,
   logs: [
     { time: "19:40:02", level: "info", msg: "warp-go GUI（演示模式）" },

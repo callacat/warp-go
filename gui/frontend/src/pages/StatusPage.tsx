@@ -1,10 +1,9 @@
 import { useEffect, useState } from "react";
-import { KeyRound, Play, Square, Globe, Trash2, Radar } from "lucide-react";
+import { KeyRound, Play, Square, Globe, Trash2 } from "lucide-react";
 import {
   deregister,
   getStatus,
   register,
-  scanEdges,
   setSystemProxy,
   start,
   stop,
@@ -49,7 +48,6 @@ export default function StatusPage() {
   const [proxyEnabled, setProxyEnabled] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [scanResult, setScanResult] = useState<string[] | null>(null);
 
   useEffect(() => {
     getSystemProxyOnce().then(setProxyEnabled);
@@ -84,21 +82,6 @@ export default function StatusPage() {
     try {
       const res = await register();
       setNotice(res.existing ? "已存在注册，无需重复操作" : `注册成功（id=${res.id}）`);
-    } catch (e) {
-      setActionError(String(e));
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const onScanEdges = async () => {
-    setBusy("scan");
-    setActionError(null);
-    setScanResult(null);
-    try {
-      const edges = await scanEdges();
-      setScanResult(edges);
-      setNotice(`扫描完成，推荐 ${edges.length ? edges[0] : "无"} 等 ${edges.length} 个端点`);
     } catch (e) {
       setActionError(String(e));
     } finally {
@@ -188,14 +171,9 @@ export default function StatusPage() {
               </>
             )}
           </Button>
-          <Button onClick={onScanEdges} loading={busy === "scan"} variant="secondary">
-            <Radar className="h-4 w-4" /> 扫描最优边缘
+          <Button onClick={onDeregister} loading={busy === "deregister"} variant="danger">
+            <Trash2 className="h-4 w-4" /> 注销（-del）
           </Button>
-          {scanResult && scanResult.length > 0 && (
-            <span className="font-mono text-xs text-slate-600 dark:text-slate-300">
-              推荐端点：{scanResult.join(" · ")}
-            </span>
-          )}
           {actionError && (
             <span className="text-sm text-red-600 dark:text-red-400">{actionError}</span>
           )}
@@ -205,16 +183,6 @@ export default function StatusPage() {
       {status.registration && (
         <Card
           title="注册信息"
-          action={
-            <Button
-              onClick={onDeregister}
-              loading={busy === "deregister"}
-              variant="danger"
-              className="h-8 px-3 text-xs"
-            >
-              <Trash2 className="h-3.5 w-3.5" /> 注销
-            </Button>
-          }
         >
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
             <div>
@@ -261,7 +229,7 @@ export default function StatusPage() {
       )}
 
       <Card title="流量统计">
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+        <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
           <div className="rounded-lg bg-orange-50 p-4 dark:bg-orange-950/30">
             <p className="text-xs text-orange-700 dark:text-orange-300">走隧道（proxy）</p>
             <p className="mt-1 text-2xl font-semibold text-orange-700 dark:text-orange-300">
@@ -278,6 +246,12 @@ export default function StatusPage() {
             <p className="text-xs text-slate-600 dark:text-slate-400">未命中（miss）</p>
             <p className="mt-1 text-2xl font-semibold text-slate-700 dark:text-slate-300">
               {status.counters.miss}
+            </p>
+          </div>
+          <div className="rounded-lg bg-red-50 p-4 dark:bg-red-950/30">
+            <p className="text-xs text-red-700 dark:text-red-300">拦截（reject）</p>
+            <p className="mt-1 text-2xl font-semibold text-red-700 dark:text-red-300">
+              {status.counters.rejected}
             </p>
           </div>
         </div>

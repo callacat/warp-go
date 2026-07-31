@@ -134,7 +134,7 @@ export default function SettingsPage() {
             <Save className="h-4 w-4" /> 保存配置
           </Button>
           <Button onClick={load} variant="secondary" disabled={!cfg}>
-            <RotateCcw className="h-4 w-4" /> 重新加载
+            <RotateCcw className="h-4 w-4" /> 重置配置
           </Button>
           {notice && (
             <span className="text-sm text-emerald-600 dark:text-emerald-400">{notice}</span>

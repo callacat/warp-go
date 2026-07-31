@@ -61,7 +61,7 @@ export default function App() {
       {/* Sidebar */}
       <aside
         className={`flex shrink-0 flex-col border-r border-slate-200 bg-white transition-all dark:border-slate-800 dark:bg-slate-900 ${
-          collapsed ? "w-14" : "w-52"
+          collapsed ? "w-20" : "w-52"
         }`}
       >
         <div className="flex items-center gap-2.5 px-4 py-4">
@@ -100,9 +100,11 @@ export default function App() {
           <button
             onClick={toggleDark}
             title={dark ? "切换到浅色模式" : "切换到深色模式"}
-            className="flex flex-1 items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800"
+            className={`flex min-w-0 flex-1 items-center justify-center rounded-lg text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800 ${
+              collapsed ? "px-0 py-2" : "gap-2 px-3 py-2 text-sm"
+            }`}
           >
-            {dark ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+            {dark ? <Sun className="h-4 w-4 shrink-0" /> : <Moon className="h-4 w-4 shrink-0" />}
             {!collapsed && <span>{dark ? "浅色" : "深色"}</span>}
           </button>
           <button

@@ -261,6 +261,10 @@ func (s *Server) handleSOCKS5(conn net.Conn, br *bufio.Reader) {
 	target, err := s.dial(s.ctx, targetAddr)
 	if err != nil {
 		log.Printf("SOCKS5 CONNECT %s 失败：%v", targetAddr, err)
+		if errors.Is(err, errRejected) {
+			sendErr(conn, 0x02) // connection not allowed by ruleset
+			return
+		}
 		sendErr(conn, 0x04)
 		return
 	}
@@ -316,9 +320,14 @@ func readSOCKS5Addr(br *bufio.Reader, addrType byte) (string, error) {
 	return net.JoinHostPort(host, strconv.Itoa(int(port))), nil
 }
 
+// errRejected 是 Router 命中 reject 规则时的哨兵错误：调用方把它映射为
+// SOCKS5 0x02 / HTTP 403，且绝不建立任何连接（隧道或直连）。
+var errRejected = errors.New("connection rejected by ruleset")
+
 // dial 按 Router 决策选择隧道或本地直连。与 tunnel 的 RouteFunc 语义一致：
 // 只有显式命中 "proxy" 才进隧道；未命中（matched=false）按引擎的隐式 direct
-// 兜底本地直连；Router 为 nil 时保持原行为——全部走隧道。
+// 兜底本地直连；命中 "reject" 直接返回 errRejected（不建立连接）；Router 为
+// nil 时保持原行为——全部走隧道。
 func (s *Server) dial(ctx context.Context, targetAddr string) (net.Conn, error) {
 	if s.cfg.Router != nil {
 		host, _, err := net.SplitHostPort(targetAddr)
@@ -326,6 +335,9 @@ func (s *Server) dial(ctx context.Context, targetAddr string) (net.Conn, error) 
 			return nil, fmt.Errorf("目标地址 %q 无法解析为 host:port：%w", targetAddr, err)
 		}
 		action, matched := s.cfg.Router(host, netip.Addr{})
+		if matched && action == route.ActionReject {
+			return nil, errRejected
+		}
 		if matched && action == route.ActionProxy {
 			if s.cfg.TunnelDial == nil {
 				return nil, fmt.Errorf("TunnelDial 未配置，无法建立 WARP 隧道")
@@ -421,6 +433,10 @@ func (s *Server) handleHTTPConnect(conn net.Conn, req *http.Request) {
 	target, err := s.dial(s.ctx, targetAddr)
 	if err != nil {
 		log.Printf("HTTP CONNECT %s 失败：%v", targetAddr, err)
+		if errors.Is(err, errRejected) {
+			_, _ = io.WriteString(conn, "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+			return
+		}
 		_, _ = io.WriteString(conn, "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
 		return
 	}
@@ -450,6 +466,10 @@ func (s *Server) handleHTTPForward(conn net.Conn, br *bufio.Reader, req *http.Re
 	target, err := s.dial(s.ctx, targetAddr)
 	if err != nil {
 		log.Printf("HTTP %s %s 失败：%v", req.Method, req.URL.String(), err)
+		if errors.Is(err, errRejected) {
+			_, _ = io.WriteString(conn, "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+			return
+		}
 		_, _ = io.WriteString(conn, "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
 		return
 	}

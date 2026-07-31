@@ -235,6 +235,60 @@ func TestSOCKS5UnmatchedFallsBackDirect(t *testing.T) {
 	roundTrip(t, cc, "ping")
 }
 
+// TestSOCKS5RejectAction 验证命中 reject 规则时返回 SOCKS5 0x02
+// （connection not allowed by ruleset），且绝不建立任何连接（隧道或直连）。
+func TestSOCKS5RejectAction(t *testing.T) {
+	echo := startEchoServer(t)
+	var routerCalls int
+	addr := startProxy(t, Config{
+		Router: func(host string, ip netip.Addr) (string, bool) {
+			routerCalls++
+			return route.ActionReject, true
+		},
+	})
+
+	cc, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("连接代理失败：%v", err)
+	}
+	defer cc.Close()
+	cc.SetDeadline(time.Now().Add(10 * time.Second))
+
+	if code := socks5Handshake(t, cc, 0x01, echo.Addr().String()); code != 0x02 {
+		t.Fatalf("期望 CONNECT 被拒（0x02），收到 0x%02x", code)
+	}
+	if routerCalls != 1 {
+		t.Fatalf("Router 调用次数为 %d，期望 1", routerCalls)
+	}
+	// 目标 echo 服务绝不能收到任何连接（reject 不建立隧道也不直连）。
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		if c, err := echo.Accept(); err == nil {
+			accepted <- c
+		}
+	}()
+	select {
+	case c := <-accepted:
+		c.Close()
+		t.Fatal("命中 reject 时目标不应收到连接")
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+// TestHTTPConnectReject 验证命中 reject 规则时 HTTP CONNECT 返回 403。
+func TestHTTPConnectReject(t *testing.T) {
+	addr := startProxy(t, Config{
+		Router: func(host string, ip netip.Addr) (string, bool) {
+			return route.ActionReject, true
+		},
+	})
+
+	status := httpConnect(t, addr, "ads.example.com:443")
+	if !strings.Contains(status, "403") {
+		t.Fatalf("期望 HTTP 403 Forbidden，收到 %q", status)
+	}
+}
+
 // TestSOCKS5NilRouterUsesTunnel 验证 Router 为 nil 时行为与上游一致：全部走
 // 隧道，绝不本地直连。
 func TestSOCKS5NilRouterUsesTunnel(t *testing.T) {

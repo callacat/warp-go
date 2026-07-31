@@ -9,6 +9,7 @@ export interface ProxyCounters {
   proxy: number;
   direct: number;
   miss: number;
+  rejected: number;
 }
 
 export interface RegistrationInfo {
@@ -81,10 +82,13 @@ const str = (v: unknown, d: string): string =>
 
 export function fromCounters(v: unknown): ProxyCounters {
   const o = (v ?? {}) as Record<string, unknown>;
+  // Go route.Stats 字段无 json tag → 序列化为大写键（ProxyHits 等）；
+  // 兼容小写/演示模式的 camelCase 键。双向读取避免真实模式计数恒为 0。
   return {
-    proxy: num(o.proxy, 0),
-    direct: num(o.direct, 0),
-    miss: num(o.miss, 0),
+    proxy: num(o.proxy, num(o.ProxyHits, 0)),
+    direct: num(o.direct, num(o.DirectHits, 0)),
+    miss: num(o.miss, num(o.Misses, 0)),
+    rejected: num(o.rejected, num(o.RejectedHits, 0)),
   };
 }
 
