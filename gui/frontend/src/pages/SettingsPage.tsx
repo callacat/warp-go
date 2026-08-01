@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Save, RotateCcw, Rocket } from "lucide-react";
+import { Monitor, Moon, Palette, Rocket, RotateCcw, Save, Sun } from "lucide-react";
 import {
   getAutostartEnabled,
   getConfig,
@@ -8,7 +8,15 @@ import {
   setAutostart,
 } from "../lib/api";
 import { fromConfig, AppConfig } from "../lib/types";
+import { useTheme } from "../lib/useTheme";
+import type { ThemeMode } from "../lib/theme";
 import { Button, Card, Field, Toggle, inputCls } from "../components/ui";
+
+const THEME_OPTIONS: { value: ThemeMode; label: string; icon: typeof Sun }[] = [
+  { value: "light", label: "浅色", icon: Sun },
+  { value: "dark", label: "深色", icon: Moon },
+  { value: "system", label: "跟随系统", icon: Monitor },
+];
 
 export default function SettingsPage() {
   const [cfg, setCfg] = useState<AppConfig | null>(null);
@@ -18,6 +26,7 @@ export default function SettingsPage() {
   const [notice, setNotice] = useState<string | null>(null);
   const [autostart, setAutostartState] = useState(false);
   const [autostartBusy, setAutostartBusy] = useState(false);
+  const { mode, setMode } = useTheme();
 
   useEffect(() => {
     void isDemoMode().then(setDemo);
@@ -70,6 +79,36 @@ export default function SettingsPage() {
 
   return (
     <div className="space-y-4">
+      <Card title="外观">
+        <div className="flex items-start gap-3">
+          <Palette className="mt-0.5 h-5 w-5 text-orange-500" />
+          <div>
+            <p className="text-sm font-medium">主题模式</p>
+            <p className="text-xs text-slate-500 dark:text-slate-400">
+              跟随系统时自动同步操作系统的明暗主题
+            </p>
+          </div>
+        </div>
+        <div className="mt-4 grid grid-cols-3 gap-1 rounded-lg border border-slate-200 bg-slate-50 p-1 dark:border-slate-700 dark:bg-slate-800">
+          {THEME_OPTIONS.map(({ value, label, icon: Icon }) => (
+            <button
+              key={value}
+              type="button"
+              onClick={() => setMode(value)}
+              aria-pressed={mode === value}
+              className={`flex items-center justify-center gap-1.5 rounded-md px-2 py-2 text-sm font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-500/50 ${
+                mode === value
+                  ? "bg-white text-orange-600 shadow-sm dark:bg-slate-700 dark:text-orange-400"
+                  : "text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200"
+              }`}
+            >
+              <Icon className="h-4 w-4 shrink-0" />
+              {label}
+            </button>
+          ))}
+        </div>
+      </Card>
+
       <Card title="基本设置" action={demo ? <span className="text-xs text-slate-400">演示模式</span> : undefined}>
         {cfg ? (
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
