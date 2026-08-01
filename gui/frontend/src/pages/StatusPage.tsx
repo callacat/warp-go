@@ -39,7 +39,8 @@ function usePoll<T>(fn: () => Promise<T>, ms: number, deps: unknown[] = []) {
 }
 
 export default function StatusPage() {
-  const { data: statusRaw } = usePoll(getStatus, 2000);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const { data: statusRaw } = usePoll(getStatus, 2000, [refreshKey]);
   const status: AppStatus = fromStatus(statusRaw);
   const { data: configRaw } = usePoll(getConfigOnce, 5000);
   const config: AppConfig = fromConfig(configRaw);
@@ -82,6 +83,7 @@ export default function StatusPage() {
     try {
       const res = await register();
       setNotice(res.existing ? "已存在注册，无需重复操作" : `注册成功（id=${res.id}）`);
+      setRefreshKey(k => k + 1);
     } catch (e) {
       setActionError(String(e));
     } finally {
@@ -95,7 +97,8 @@ export default function StatusPage() {
     setActionError(null);
     try {
       await deregister();
-      setNotice("已注销");
+      setNotice("已注销：本地注册信息已删除");
+      setRefreshKey(k => k + 1);
     } catch (e) {
       setActionError(String(e));
     } finally {
@@ -105,6 +108,11 @@ export default function StatusPage() {
 
   return (
     <div className="space-y-4">
+      {notice && (
+        <div className="rounded-lg bg-emerald-50 px-4 py-3 text-sm text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300">
+          {notice}
+        </div>
+      )}
       {!status.registered && (
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 dark:border-amber-700/60 dark:bg-amber-950/40">
           <div>
@@ -222,9 +230,6 @@ export default function StatusPage() {
               </p>
             </div>
           </div>
-          {notice && (
-            <p className="mt-3 text-sm text-emerald-600 dark:text-emerald-400">{notice}</p>
-          )}
         </Card>
       )}
 
