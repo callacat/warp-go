@@ -23,6 +23,7 @@
 - **配置热重载**：`config.json` 与 `rules.txt` 文件变更自动生效，无需重启
 - **GEO 自动更新**：默认从 `MetaCubeX/meta-rules-dat` 拉取，可设更新周期（默认 7 天）、手动触发、自定义仓库
 - **GUI（Wails v3）**：系统托盘 + 状态 / 规则 / GEO / 设置 / 日志五页，独立可执行程序
+- **Android（v0.5.0）**：Wails v3 Android 壳 + 自写 Java `VpnService`（TUN fd 经 JNI 交给 Go 内核），CLI/GUI/Android 三端共用 `core.Kernel`
 - **边缘扫描**（`-scan`）：启动前对 WARP 边缘全段测 RTT，选用最低延迟端点
 
 ## 依赖
@@ -169,6 +170,25 @@ direct,geoip:cn
 
 前后端边界是 **Wails 服务绑定**（`gui/service.go` → 前端 `frontend/src/lib/api.ts`），开发期前后端分离跑（Vite dev server + Go 进程），交付期 `//go:embed` 合一为单文件。
 
+## Android（v0.5.0）
+
+Android 版是 **Wails v3 Android 壳 + 自写 Java `VpnService`**（不使用 gomobile）：
+
+- **架构**：`WarpVpnService.java` 用 `VpnService.Builder`（addAddress 填入 WARP 分配的 IPv4/IPv6、addRoute 全量路由、setMtu(1500)、setBlocking）`establish()` 拿到 TUN fd，经 JNI 传给 Go 侧 `gui/androidbridge.go` 的 `nativeStartVpn(fd)` / `nativeStopVpn()`（`//export Java_com_wails_app_WarpVpnService_*`，与 Wails 自带 18 个导出共存于同一 `libwails.so`）
+- **共享内核**：隧道、GEO 分流、注册信息解析统一走 `core.Kernel`（桌面 CLI/GUI 同款），`androidvpn/` 的 sing-tun 栈把 TUN fd 接进 Go，分流决策（proxy/direct/reject）与桌面语义一致
+- **Consent**：`MainActivity` 首启调 `VpnService.prepare()` 请求授权（singleTask），授权后启动前台 `dataSync` 服务；包名保持 `com.wails.app`（JNI 符号烘焙进包名），用户可见名 "warp-go"
+- **构建**：本地无 SDK/NDK/JDK → **仅 CI 构建**（`build-android` job：JDK 21 + SDK + NDK r27 → c-shared arm64/x86_64 + gradle APK/AAB）；产物从 Actions artifact 下载（`app-debug.apk`）
+
+### Android 使用
+
+1. 从 `build-android` job artifact 下载 `app-debug.apk` 安装（debug keystore 签名，可安装，非 Play 商店签名）
+2. 首次启动会弹 VpnService 授权对话框 → 允许
+3. **手动放入 reg.json**：WARP 注册信息需放入应用沙箱目录（`/data/data/com.wails.app/files/`，即 `getFilesDir()`）才能启动 VPN——可用 `adb push`（如 `adb push reg.json /sdcard/` 后用文件管理器/`adb shell run-as com.wails.app cp` 移入沙箱），或用桌面端 `./warp -reg` 生成的 reg.json
+4. 打开 VPN 开关，`curl`/浏览器验证 `warp=on`
+
+> [!NOTE]
+> Android 版无真机验证（本机无设备/模拟器）——运行时行为需真机测试，验收项见 [`.omo/plans/warp-go-android-2026-08-01.md`](.omo/plans/warp-go-android-2026-08-01.md) §11。
+
 ## 项目结构
 
 ```
@@ -176,6 +196,7 @@ warp-go/
 ├── main.go                       # CLI 入口（flag 解析、调用 core.Server）
 ├── core/                         # 可复用核心：Server 生命周期、配置、注册、状态
 │   ├── core.go                   #   Start/Stop/Status/SetSystemProxy/ReloadRules/SaveConfig
+│   ├── kernel.go                 #   Kernel（MasqueClient+Engine+注册，CLI/GUI/Android 三端共用）
 │   ├── config.go                 #   Config 结构 + config.json 加载/热重载
 │   ├── status.go                 #   可序列化状态快照（GUI 轮询用）
 │   └── register.go               #   注册/注销/注册信息视图
@@ -186,12 +207,16 @@ warp-go/
 │   ├── matcher.go                #   匹配引擎（Engine.Match，first-match-wins）
 │   └── engine.go                 #   引擎装配与生命周期
 ├── proxy/                        # mixed HTTP+SOCKS5 代理（首字节嗅探）
-├── sysproxy/                     # 系统代理（Windows/macOS/Linux）
+├── sysproxy/                     # 系统代理（Windows/macOS/Linux；android no-op stub）
+├── autostart/                    # 开机自启（Windows/macOS/Linux；android no-op stub）
+├── androidvpn/                   # (M7) TUN 栈（sing-tun）+ decision.go 决策逻辑（宿主可测）
 ├── gui/                          # Wails v3 GUI（main.go/service.go/logs.go + frontend/）
+│   ├── androidbridge.go          #   Android JNI 桥（nativeStartVpn/nativeStopVpn）
+│   └── build/android/            #   Android 工程（WarpVpnService.java + manifest + gradle）
 ├── registration/                 # 上游既有：两步注册 API
 ├── tunnel/                       # 上游既有 + RouteFunc 分流 + DialTunnel
 ├── scanner/                      # 上游既有：边缘延迟扫描（-scan）
-├── .github/workflows/            # sync-upstream / build-release / docker-ghcr
+├── .github/workflows/            # sync-upstream / build-release / docker-ghcr / build-android
 ├── AGENTS.md                     # 接手指南（架构、决策记录、验证方式）
 └── docs/                         # 上游逆向文档
 ```
@@ -221,6 +246,9 @@ warp-go/
 4. **重连是惰性的**——空闲断线不会后台恢复，下一个请求承担重连延迟。
 5. **PQ 密钥交换无法对齐**（Go 标准库无 `P256Kyber768Draft00`）。
 6. **注册信息不会刷新**——端点一直沿用，需 `-del` 后重新 `-reg` 更新。
+7. **Android 无真机验证**（v0.5.0）——仅 CI 构建，运行时行为需真机测试；验收项见 android 计划文档 §11（TUN `warp=on`、consent UX、GEO 分流、Always-On 重启、JNI 无 `UnsatisfiedLinkError`、前台服务/电池等）。
+8. **Android 需手动放入 reg.json**——注册信息不在 UI 内生成，需从桌面端 `-reg` 复制进沙箱 `getFilesDir()` 才能启动 VPN。
+9. **Android UI 为初版 consent 流**——首启自动弹授权对话框；React 前端按钮触发路径为后续版本。Wails v3 Android 仍 experimental（alpha2.119，已知 bug：onDestroy #5859、bindings 上下文 #5810 等）。
 
 ## 文档
 
@@ -228,11 +256,13 @@ warp-go/
 - [AGENTS.md](AGENTS.md) — 接手指南（架构、决策记录、构建/验证命令、GEO 格式定论）
 - [docs/warp-masque-reverse-engineering.md](docs/warp-masque-reverse-engineering.md) — 官方 warp-svc 逆向分析
 - [.omo/plans/warp-go-reinit-2026-07-31.md](.omo/plans/warp-go-reinit-2026-07-31.md) — 项目计划（随进度更新）
+- [.omo/plans/warp-go-android-2026-08-01.md](.omo/plans/warp-go-android-2026-08-01.md) — v0.5.0 Android 里程碑计划与执行记录
 
 ## 更新记录
 
 | 版本 | 日期 | 摘要 |
 |---|---|---|
+| [v0.5.0](CHANGELOG.md#v050---2026-08-01) | 2026-08-01 | Android 版（Wails VpnService + JNI）、core.Kernel 三端复用、CI build-android、geoip/reject 修复 |
 | [v0.4.0](CHANGELOG.md#v040---2026-08-01) | 2026-08-01 | REJECT 广告拦截、GitHub 下载加速（GUI 可配）、首启引导修复、GUI 多项修复 |
 | [v0.3.1](CHANGELOG.md#v031---2026-07-31) | 2026-07-31 | Windows 修复、扫描独立页、开机自启 |
 | [v0.2.0](CHANGELOG.md#v020---2026-07-31) | 2026-07-31 | 首个功能完整版本：GEO 分流、mixed 代理、系统代理、GUI |

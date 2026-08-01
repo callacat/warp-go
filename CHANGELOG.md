@@ -3,6 +3,45 @@
 本项目所有值得记录的变更。格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v0.5.0] - 2026-08-01
+
+### 新增
+
+- **Android 版**（Wails v3 Android 壳 + 自写 Java `VpnService`）：GUI 模块新增
+  Android 目标，`WarpVpnService.java` 通过 `VpnService.Builder`（addAddress/
+  addRoute/setMtu/setBlocking）`establish()` 取 TUN fd 经 JNI 交给 Go 侧
+  `nativeStartVpn(fd)`/`nativeStopVpn()`；`gui/androidbridge.go` 用
+  `//export Java_com_wails_app_WarpVpnService_*` 导出 JNI 函数（与 Wails 自带
+  18 个导出共存于同一 `libwails.so`）；`MainActivity` 接 `VpnService.prepare()`
+  consent 流（singleTask 规避 #5725）；manifest 声明 `WarpVpnService` +
+  `BIND_VPN_SERVICE` + `android.software.vpn`；用户可见名 "warp-go"。
+- **`core.Kernel` 抽取**：共享运行时（`MasqueClient` + `route.Engine` + 注册信息）
+  从 `core.Server` 抽为可复用 `core.Kernel`（`NewKernel`/`Start`/`Stop`/
+  `DialTunnel`/`Route`/`AssignedIPv4`/`AssignedIPv6`/`Close`），CLI/GUI/Android
+  三端共用；`Server` 公开 API 不变，既有 proxy_test.go 原样作回归契约。
+- **androidvpn 决策宿主可测**：`androidvpn/decision.go`（`//go:build android || linux`）
+  抽出纯决策逻辑 `decideAction`/`resolveAction`，宿主单测覆盖 proxy/direct/
+  未命中兜底/reject 五路径；reject 绝不进入拨号（与桌面 M6 语义对齐）。
+- **CI `build-android` job**：ubuntu-24.04 + JDK 21 + `android-actions/setup-android`
+  （SDK + NDK r27）+ wails3 alpha2.119 → c-shared（arm64/x86_64）+ gradle
+  APK/AAB；既有 test job 加 `GOOS=android GOARCH=arm64 CGO_ENABLED=0 go build ./...`
+  编译检查。
+
+### 修复
+
+- **geoip 真实 IP 匹配**：TUN 目标是 IP 字面量时传真实 `netip.Addr` 给
+  `RouteFunc`（此前恒为 `netip.Addr{}`，geoip 规则永不命中）；域名目标保持
+  零 Addr（geosite/domain 规则适用，geoip-for-domains 局限记录在案）。
+- **`-l` 日志回归修复**：`BuildTLSConfig` + `ResolveEdgeAddrs` 从 `Server.Start`
+  抽出后日志顺序恢复。
+
+### 变更
+
+- 桌面三端复用同一 `core.Kernel`（CLI/GUI/Android），分流决策与注册信息
+  解析逻辑单一来源。
+- Android 运行时文件在应用沙箱 `getFilesDir()`（Wails Android 存储路径），
+  桌面保持执行目录行为（`gui/androidconfig.go` 路径分支）。
+
 ## [Unreleased]
 
 - 无

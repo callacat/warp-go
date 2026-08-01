@@ -19,11 +19,13 @@ badafans/warp-go ──(原版/上游)──▶ 6Kmfi6HP/warp-go ──(fork，�
 ```
 warp-go/
 ├── main.go                  # CLI 入口（参数解析、注册编排、SOCKS5 监听循环）
-├── core/                    # (M4) 可复用核心：Server 结构体（Start/Stop），CLI 与 GUI 共用
+├── core/                    # (M4/M7) 可复用核心：Server 生命周期 + kernel.go（Kernel：MasqueClient+Engine，CLI/GUI/Android 三端共用）
 ├── route/                   # (M2) GEO 分流引擎：规则解析、匹配、rules.txt、GEO 下载
 ├── proxy/                   # (M3) mixed HTTP+SOCKS5 代理（首字节嗅探）
-├── sysproxy/                # (M3) 系统代理设置（Windows/macOS/Linux）
-├── gui/                     # (M4) Wails v3 GUI（React 前端）
+├── sysproxy/                # (M3) 系统代理设置（Windows/macOS/Linux；android 为 no-op stub）
+├── autostart/               # (M6) 开机自启（Windows/macOS/Linux；android 为 no-op stub）
+├── androidvpn/              # (M7) TUN 栈（sing-tun，//go:build android）+ decision.go 决策逻辑（宿主可测）
+├── gui/                     # (M4/M7) Wails v3 GUI（React 前端）+ androidbridge.go JNI 桥 + build/android/（Android 工程）
 ├── registration/            # 上游既有：两步注册 API
 ├── tunnel/                  # 上游既有：MASQUE/QUIC 隧道、SOCKS5 TCP、UDP ASSOCIATE
 ├── scanner/                 # 上游既有：边缘延迟扫描（-scan）
@@ -85,12 +87,15 @@ warp-go/
 go version          # 需 ≥1.26.5（本地已装 /usr/local/go1.26.5，PATH 前置）
 go build ./...      # 构建
 go vet ./...        # 静态检查
-go test ./...       # 测试（scanner/route/proxy 有单测）
+go test ./...       # 测试（scanner/route/proxy/androidvpn/decision 有单测）
 wails3 version      # M4 GUI: v3.0.0-alpha2.119（已装 /root/go/bin）
 node --version      # M4 GUI 前端: v22（已装）
 # GUI（M4）: cd gui && wails3 build / npm run build
 # 交叉编译: Taskfile 任务（M4）
 # Linux GUI 构建依赖: libgtk-4-dev + libwebkitgtk-6.0-dev（本地已装）
+# Android（M7）: 本地无 SDK/NDK/JDK → 走 CI build-android job；本地仅做：
+GOOS=android GOARCH=arm64 CGO_ENABLED=0 go build ./...   # android 可移植性编译门（T2 stub）
+go test ./androidvpn/... ./gui/...                       # 决策逻辑 + androidconfig 宿主单测
 ```
 
 验证方式（无桌面环境，v3 约定）：
@@ -98,8 +103,9 @@ node --version      # M4 GUI 前端: v22（已装）
 - 规则引擎：`go test ./route/...` + 配置文件方式启动（改 rules.txt 验证热重载）
 - GUI：**配置文件方式启动冒烟**（无截图）；产物交付用户实测
 - Docker：`docker pull ghcr.io/callacat/warp-go:latest` → 冒烟
+- Android（M7）：**CI-only 构建**（`build-android` job：JDK 21 + SDK + NDK r27 + c-shared arm64/x86_64 + gradle APK/AAB）→ 下载 `app-debug.apk` 确认非平凡大小；**运行时行为需真机测试**（无设备/模拟器）——见 android 计划文档 §11 验收项（TUN `warp=on`、consent UX、GEO 分流、Always-On 重启、JNI 无 `UnsatisfiedLinkError` 等）
 
-## 6.5 已完成里程碑（2026-07-31）
+## 6.5 已完成里程碑（2026-08-01）
 
 | 里程碑 | 状态 | 说明 |
 |---|---|---|
@@ -111,6 +117,7 @@ node --version      # M4 GUI 前端: v22（已装）
 | M4 GUI + core | ✅ | `core/` Server 生命周期抽取（CLI/GUI 共用，含 SetSystemProxy/ReloadRules/SaveConfig）；`gui/` Wails v3（main.go + service.go + logs.go + React 19 前端五页：状态/规则/GEO/设置/日志）；前端 npm build 通过；**本地 GTK 4.6 < 4.10 无法编译 wails → GUI 构建走 CI**（build-gui 分平台 job，ubuntu-24.04 有 GTK 4.14） |
 | M5 发布 | ✅ | README/AGENTS.md 重写；Dockerfile 端口 40000；docker-compose.example.yml；推送远端（备份后 force-push）；tag v0.2.0 → Actions **全绿**（5 平台 CLI + 3 平台 GUI + Release + GHCR 镜像）；Release 产物本地验证（CLI 配置启动/GEO 下载/分流匹配/Docker 冒烟）全通过 |
 | M6 维护增强 | ✅ | REJECT 广告拦截（route+proxy+GUI 拦截统计）；默认规则托管 `rules/default-rules.txt` + 首启 GitHub 下载（失败回退内置模板）；GitHub 下载加速前缀（`download_proxy`，默认 gh-proxy.org，GUI 可配）；GUI 首启死锁根因修复（InitDefaults 二次加锁）；开启系统代理自动启动内核；托盘退出修复；侧边栏展开按钮修复；流量统计恒 0 修复；tag v0.4.0 |
+| M7 Android | ✅ | **Android 版（v0.5.0）**：`core.Kernel` 抽取（MasqueClient+Engine+注册，CLI/GUI/Android 三端共用，Server 公开 API 不变）；`gui/androidbridge.go` JNI 桥（nativeStartVpn(fd)/nativeStopVpn，`//export Java_com_wails_app_WarpVpnService_*` 与 Wails 18 导出共存）；`WarpVpnService.java`（VpnService.Builder establish→fd→JNI + dataSync 前台通知）；MainActivity `VpnService.prepare()` consent（singleTask）；manifest VpnService+BIND_VPN_SERVICE+uses-feature vpn；androidvpn 决策逻辑宿主可测（decision.go，reject 绝不拨号）；geoip 真实 IP 修复；CI `build-android` job（JDK21+SDK+NDK r27 → c-shared + APK/AAB）；**无真机验证 → CI-only 构建 + 真机验收清单**（见 §6/§8）；tag v0.5.0 |
 
 ## 6.6 上游冲突处理（重要）
 
@@ -129,9 +136,10 @@ node --version      # M4 GUI 前端: v22（已装）
 ## 6.7 构建策略（资源优化）
 
 - **本机只做 CLI 构建验证**（纯 Go 秒级）；GUI 构建因本地 GTK 4.6 过旧（需 4.10+）
-- **GUI / Docker / Release 全部走 GitHub Actions**（不占本机磁盘）：
+- **GUI / Docker / Release / Android 全部走 GitHub Actions**（不占本机磁盘）：
   - push main → docker-ghcr（linux/amd64+arm64 镜像 → GHCR）
   - tag v* → build-release（test → 5 平台 CLI + 3 平台 GUI → GitHub Release）
+  - tag v* / dispatch → build-android（JDK21+SDK+NDK → APK/AAB artifact）
   - 下载产物到本机验证（`gh release download`）
 
 ## 7. 关键决策记录（ADR 摘要）
@@ -144,6 +152,9 @@ node --version      # M4 GUI 前端: v22（已装）
 6. **系统代理**：mixed 端口（HTTP+SOCKS5 同端口嗅探）；GUI 模式默认绑 127.0.0.1
 7. **GitHub 下载加速**：`download_proxy`（默认 `https://gh-proxy.org/`）仅对 github.com / raw.githubusercontent.com 的下载 URL 生效，非 GitHub 地址（镜像仓库/本地测试）原样，置空关闭；GUI 可配
 8. **REJECT 行为**：规则 `reject` 命中即拒连（SOCKS5 0x02 / HTTP 403，绝不建连）；命中计入 Stats.RejectedHits，前端拦截统计卡展示
+9. **Android 形态 = Wails v3 壳 + 自写 Java VpnService**（不用 gomobile）：TUN fd 以 `jint` 过 JNI 到 Go（`//export Java_com_wails_app_WarpVpnService_*`，与 Wails 18 导出共存）；包名保持 `com.wails.app`（JNI 符号烘焙进包名，仅用户可见名改 "warp-go"）
+10. **Kernel 三端复用**：`core.Kernel`（MasqueClient+route.Engine+注册）供 CLI/GUI/Android 共用；androidvpn 无 SOCKS 监听；Android 运行时文件在沙箱 `getFilesDir()`（D8 路径分支），桌面保持执行目录
+11. **Android 构建 CI-only**：本地无 SDK/NDK/JDK → 仅 CI 构建（`build-android` job），真机行为验收清单交付用户（无设备验证）
 
 ## 8. 已确认事实（勿重复调研）
 
@@ -154,3 +165,8 @@ node --version      # M4 GUI 前端: v22（已装）
 - 远端 `callacat/warp-go` main = `165d565`（2026-08-01）；tag `v0.4.0`（2026-08-01）；旧内容在 `archive/previous-poc`
 - `rules/default-rules.txt` 已上线（首启下载 200）；`download_proxy` 默认 gh-proxy.org，GEO 经加速实测下载成功
 - 本机 GUI 构建限制：GTK 4.6.9 < wails 需要的 4.10（GtkFileDialog）→ 走 CI
+- 本地 HEAD = `f2383b4`（T12，2026-08-01）；`main` 即将为 v0.5.0（T13 文档 + tag）
+- 本地 Android 环境：**无 SDK/NDK/JDK/设备** → android 构建仅 CI（`build-android` job）；本地只跑 `GOOS=android go build ./...` + `go test ./androidvpn/... ./gui/...`
+- `go.mod` 依赖：sing-tun v0.8.11 为 direct require（T1 已提升）；无 gomobile
+- `androidvpn/` 已接线（不再是孤儿包）：`decision.go` 宿主可测（`//go:build android || linux`），TUN 栈 `androidvpn.go` 仅 `//go:build android`
+- JNI 导出面：`gui/androidbridge.go`（`Java_com_wails_app_WarpVpnService_nativeStartVpn/nativeStopVpn`）+ Java 侧 `WarpVpnService.java`（`gui/build/android/app/src/main/java/com/wails/app/`）；CI 双侧 grep 断言保障符号名一致

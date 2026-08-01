@@ -422,3 +422,5 @@ CONNECT target (host:port)
 - **新功能**：REJECT 广告拦截（SOCKS5 0x02/HTTP 403 + 拦截统计卡）；GitHub 下载加速前缀（`download_proxy` 默认 gh-proxy.org，GUI 可配）；开启系统代理自动启动内核
 - **UI 修复**：侧边栏收起展开按钮点不到、托盘退出残留、流量统计恒 0、扫描按钮→注销、设置页"重新加载"→"重置配置"
 - 远端 main = `165d565`，tag `v0.4.0` 已发布；变更记录见 `CHANGELOG.md`
+
+**M7 Android 完成（2026-08-01，T13a 文档；tag v0.5.0 由 T13b 执行）**：Android 版 = Wails v3 壳 + 自写 Java `VpnService`（TUN fd → JNI → Go），`core.Kernel` 抽取供 CLI/GUI/Android 三端复用，`androidvpn/` 决策逻辑宿主可测（reject 绝不拨号），geoip 真实 IP 修复，CI `build-android` job（JDK21+SDK+NDK → c-shared + APK/AAB）。本地无 Android 设备 → **CI-only 构建，运行时行为需真机验收**（清单见 [`.omo/plans/warp-go-android-2026-08-01.md`](warp-go-android-2026-08-01.md) §11）。详见该计划文档与 `AGENTS.md` M7 行。
