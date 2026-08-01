@@ -3,6 +3,42 @@
 本项目所有值得记录的变更。格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased] — v0.5.1 计划中
+
+### 修复
+
+- **Android 运行时文件统一锚定到应用沙箱**：GUI 服务层（`service.go` →
+  `core.New`）此前把所有相对运行时路径（config.json / reg.json / rules.txt /
+  geo）经 `resolveExecPath` 锚定到 `os.Executable()` 目录——Android 上是只读
+  的 `/system/bin/app_process`，导致"生成默认配置 /system/bin/config.json
+  失败：read-only file system"。新增 `core.Options.DataDir`（非空时所有相对
+  路径锚定到该目录）+ `gui/datadir_{android,other}.go`（Android 返回
+  `getFilesDir()`，桌面返回空串保持原行为）。GUI 服务层与 JNI 侧
+  `buildAndroidConfig` 的沙箱路径就此对齐——注册写盘、内核启动、默认规则
+  初始化三条链路打通。
+- **日志时间戳去重**：标准库 `log` 默认 `Ldate|Ltime` 前缀经 `logWriter`
+  原样进入环形缓冲，前端日志页出现"04:55:44 error 2026/08/01 04:55:44 ⚠…"
+  双时间戳。`initLogging()` 加 `log.SetFlags(0)`，只保留环形缓冲按系统时间
+  生成的 `HH:MM:SS`。
+- **注销按钮无反馈**：注销/注册成功提示原本渲染在"注册信息"卡片内，注销后
+  `status.registration` 变 null 导致卡片连同提示一起消失。提示移到页面顶部
+  持久显示，注销/注册成功后立即刷新状态。
+
+### 新增
+
+- **跟随系统主题（全平台）**：三态主题模式（浅色 / 深色 / 跟随系统）。
+  新增 `useTheme` hook：经 Wails runtime `System.IsDarkMode()` 获取系统偏好，
+  `Events.On` 监听 5 个平台主题变更事件（common/windows/linux/android/ios）
+  自动切换，`matchMedia` 作浏览器回退；模式持久化到 localStorage。侧边栏
+  按钮循环切换三态，设置页新增"外观"卡片分段选择。Android 侧复用既有
+  `android:ThemeChanged` 事件（Java 无需改动）。
+
+### 变更
+
+- **竖屏侧边栏自适应**：侧边栏宽度由固定 `w-52` 改为 `w-16 md:w-52`——
+  小于 `md`（768px）自动收成 64px 图标栏（标签/品牌文字隐藏），手机竖屏
+  不再被 208px 侧边栏挤占，横屏与桌面不变。
+
 ## [v0.5.0] - 2026-08-01
 
 ### 新增

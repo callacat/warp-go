@@ -118,6 +118,7 @@ go test ./androidvpn/... ./gui/...                       # 决策逻辑 + androi
 | M5 发布 | ✅ | README/AGENTS.md 重写；Dockerfile 端口 40000；docker-compose.example.yml；推送远端（备份后 force-push）；tag v0.2.0 → Actions **全绿**（5 平台 CLI + 3 平台 GUI + Release + GHCR 镜像）；Release 产物本地验证（CLI 配置启动/GEO 下载/分流匹配/Docker 冒烟）全通过 |
 | M6 维护增强 | ✅ | REJECT 广告拦截（route+proxy+GUI 拦截统计）；默认规则托管 `rules/default-rules.txt` + 首启 GitHub 下载（失败回退内置模板）；GitHub 下载加速前缀（`download_proxy`，默认 gh-proxy.org，GUI 可配）；GUI 首启死锁根因修复（InitDefaults 二次加锁）；开启系统代理自动启动内核；托盘退出修复；侧边栏展开按钮修复；流量统计恒 0 修复；tag v0.4.0 |
 | M7 Android | ✅ | **Android 版（v0.5.0）**：`core.Kernel` 抽取（MasqueClient+Engine+注册，CLI/GUI/Android 三端共用，Server 公开 API 不变）；`gui/androidbridge.go` JNI 桥（nativeStartVpn(fd)/nativeStopVpn，`//export Java_com_wails_app_WarpVpnService_*` 与 Wails 18 导出共存）；`WarpVpnService.java`（VpnService.Builder establish→fd→JNI + dataSync 前台通知）；MainActivity `VpnService.prepare()` consent（singleTask）；manifest VpnService+BIND_VPN_SERVICE+uses-feature vpn；androidvpn 决策逻辑宿主可测（decision.go，reject 绝不拨号）；geoip 真实 IP 修复；CI `build-android` job（JDK21+SDK+NDK r27 → c-shared + APK/AAB）；**无真机验证 → CI-only 构建 + 真机验收清单**（见 §6/§8）；tag v0.5.0 |
+| M7.5 Android 可用性修复 + 主题 | ✅ | **Android 沙箱锚定（v0.5.1）**：`core.Options.DataDir` + `resolveWithDir`（非空锚定到沙箱，空保持执行目录）；`gui/datadir_{android,other}.go`（Android=`getFilesDir()`，桌面空串）；`serverInstance()` 传入 DataDir + android 空值守卫 → 修复"生成默认配置 /system/bin/config.json 失败"、注册写盘失败、默认规则不可见（GUI 服务层与 JNI `buildAndroidConfig` 沙箱路径对齐）；`initLogging()` + `log.SetFlags(0)` 去重日志双时间戳；注销提示移到页面顶部 + 立即刷新；侧边栏 `w-16 md:w-52` 竖屏自适应；`useTheme` 三态主题（浅色/深色/跟随系统，Wails `System.IsDarkMode()` + 5 平台 `Events.On` + matchMedia 回退，设置页外观分段选择）；vitest 引入（theme/useTheme 18 单测）；tag v0.5.1（计划中） |
 
 ## 6.6 上游冲突处理（重要）
 
@@ -167,6 +168,7 @@ go test ./androidvpn/... ./gui/...                       # 决策逻辑 + androi
 - 本机 GUI 构建限制：GTK 4.6.9 < wails 需要的 4.10（GtkFileDialog）→ 走 CI
 - 本地 HEAD = `f2383b4`（T12，2026-08-01）；`main` 即将为 v0.5.0（T13 文档 + tag）
 - 本地 Android 环境：**无 SDK/NDK/JDK/设备** → android 构建仅 CI（`build-android` job）；本地只跑 `GOOS=android go build ./...` + `go test ./androidvpn/... ./gui/...`
+- **v0.5.1 修复（2026-08-01）**：`core.Options.DataDir`（`resolveWithDir` 分派，空值=默认执行目录锚定，桌面零回归）；`gui/datadir_{android,other}.go`；`gui` module 已 `go mod tidy`（补 sing-tun 等间接依赖）；前端引入 vitest（theme/useTheme 18 单测）；主题事件名 5 平台（`common:/windows:/linux:/android:/ios:ThemeChanged`），Android 由 MainActivity `emitTheme()` 发 `android:ThemeChanged`；`@wailsio/runtime` 的 `Events.On` 回调收到的是 `WailsEvent{name,data}` 对象（payload 在 `.data`，Android 为 JSON 字符串 `{"isDarkMode":bool}`）
 - `go.mod` 依赖：sing-tun v0.8.11 为 direct require（T1 已提升）；无 gomobile
 - `androidvpn/` 已接线（不再是孤儿包）：`decision.go` 宿主可测（`//go:build android || linux`），TUN 栈 `androidvpn.go` 仅 `//go:build android`
 - JNI 导出面：`gui/androidbridge.go`（`Java_com_wails_app_WarpVpnService_nativeStartVpn/nativeStopVpn`）+ Java 侧 `WarpVpnService.java`（`gui/build/android/app/src/main/java/com/wails/app/`）；CI 双侧 grep 断言保障符号名一致
