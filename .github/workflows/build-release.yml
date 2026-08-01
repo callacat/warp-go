@@ -314,7 +314,9 @@ jobs:
       - name: 生成校验和
         run: |
           cd dist
-          sha256sum * > sha256sums.txt
+          # find -type f 递归：Android APK/AAB 保留原始目录结构
+          # （gui/build/android/...），直接 sha256sum * 会碰到 apk/bundle 目录。
+          find . -type f -print0 | sort -z | xargs -0 sha256sum > sha256sums.txt
           cat sha256sums.txt
 
       - name: 创建 GitHub Release
@@ -322,7 +324,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           cd dist
-          gh release create "$GITHUB_REF_NAME" ./* --generate-notes
+          gh release create "$GITHUB_REF_NAME" $(find . -type f ! -name sha256sums.txt) --generate-notes
 
       - name: 清理过期 workflow 运行记录
         if: always()
