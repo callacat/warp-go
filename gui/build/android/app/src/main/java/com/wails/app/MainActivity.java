@@ -1,6 +1,7 @@
 package com.wails.app;
 
 import android.annotation.SuppressLint;
+import android.content.ActivityNotFoundException;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
@@ -11,6 +12,7 @@ import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
 import android.net.Uri;
+import android.net.VpnService;
 import android.os.BatteryManager;
 import android.os.Build;
 import android.os.Bundle;
@@ -30,6 +32,7 @@ import android.webkit.WebViewClient;
 
 import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.content.ContextCompat;
 import androidx.core.content.FileProvider;
 import androidx.webkit.WebViewAssetLoader;
 
@@ -54,6 +57,9 @@ public class MainActivity extends AppCompatActivity {
     private static final String WAILS_SCHEME = "https";
     private static final String WAILS_HOST = "wails.localhost";
     private static final int FILE_PICKER_REQUEST = 7001;
+    // VPN consent dialog (VpnService.prepare). Distinct from the file-picker/
+    // camera request codes above (7001/7002/7003/7010); 0x5000 = 20480.
+    private static final int REQUEST_CODE_VPN_PREPARE = 0x5000;
 
     private WebView webView;
     private WailsBridge bridge;
@@ -91,6 +97,13 @@ public class MainActivity extends AppCompatActivity {
 
         // Set up WebView
         setupWebView();
+
+        // First-run UX: prompt for VPN consent once. A JS-triggered path from
+        // the React UI (connectVpn via WailsBridge) is a documented follow-up.
+        if (!getSharedPreferences("warp_prefs", MODE_PRIVATE).getBoolean("vpn_consent_prompted", false)) {
+            getSharedPreferences("warp_prefs", MODE_PRIVATE).edit().putBoolean("vpn_consent_prompted", true).apply();
+            connectVpn();
+        }
 
         // Load the application
         loadApplication();
@@ -203,6 +216,41 @@ public class MainActivity extends AppCompatActivity {
         String url = WAILS_SCHEME + "://" + WAILS_HOST + "/";
         if (DEBUG) Log.d(TAG, "Loading URL: " + url);
         webView.loadUrl(url);
+    }
+
+    /**
+     * Start the WARP VPN (TUN) service. Consent flow: VpnService.prepare()
+     * returns null when consent is already granted, otherwise an Intent that
+     * launches the system VPN-consent dialog; its result arrives in
+     * onActivityResult with REQUEST_CODE_VPN_PREPARE.
+     *
+     * NOTE: the Go side (nativeStartVpn) reads config.json / reg.json from the
+     * app sandbox (getFilesDir). Getting reg.json into the sandbox is a MANUAL
+     * step (documented in README); until it is present, establish() succeeds
+     * but nativeStartVpn fails with "没有注册信息". A JS-triggered path from
+     * the React UI is a documented follow-up; this method is also callable
+     * from WailsBridge when that lands.
+     */
+    public void connectVpn() {
+        Intent prepare = VpnService.prepare(this);
+        if (prepare == null) {
+            startVpnService();
+        } else {
+            try {
+                startActivityForResult(prepare, REQUEST_CODE_VPN_PREPARE);
+            } catch (ActivityNotFoundException e) {
+                Log.e(TAG, "VPN consent activity not found", e);
+            }
+        }
+    }
+
+    private void startVpnService() {
+        Intent intent = new Intent(this, WarpVpnService.class);
+        try {
+            ContextCompat.startForegroundService(this, intent);
+        } catch (Exception e) {
+            Log.e(TAG, "startForegroundService failed", e);
+        }
     }
 
     /**
@@ -447,6 +495,14 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQUEST_CODE_VPN_PREPARE) {
+            if (resultCode == RESULT_OK) {
+                startVpnService();
+            } else {
+                Log.i(TAG, "VPN consent denied");
+            }
+            return;
+        }
         if (requestCode == PHOTO_CAPTURE_REQUEST || requestCode == VIDEO_CAPTURE_REQUEST) {
             handleCaptureResult(resultCode, data);
             return;
