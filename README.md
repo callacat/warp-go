@@ -170,16 +170,19 @@ direct,geoip:cn
 
 前后端边界是 **Wails 服务绑定**（`gui/service.go` → 前端 `frontend/src/lib/api.ts`），开发期前后端分离跑（Vite dev server + Go 进程），交付期 `//go:embed` 合一为单文件。
 
-## Android（v0.5.1）
+## Android（v0.5.2）
 
 Android 版是 **Wails v3 Android 壳 + 自写 Java `VpnService`**（不使用 gomobile）：
 
 - **架构**：`WarpVpnService.java` 用 `VpnService.Builder`（addAddress 填入 WARP 分配的 IPv4/IPv6、addRoute 全量路由、setMtu(1500)、setBlocking）`establish()` 拿到 TUN fd，经 JNI 传给 Go 侧 `gui/androidbridge.go` 的 `nativeStartVpn(fd)` / `nativeStopVpn()`（`//export Java_com_wails_app_WarpVpnService_*`，与 Wails 自带 18 个导出共存于同一 `libwails.so`）
 - **共享内核**：隧道、GEO 分流、注册信息解析统一走 `core.Kernel`（桌面 CLI/GUI 同款），`androidvpn/` 的 sing-tun 栈把 TUN fd 接进 Go，分流决策（proxy/direct/reject）与桌面语义一致
-- **运行时文件统一在应用沙箱**：GUI 服务层（`serverInstance`）与 JNI 侧（`buildAndroidConfig`）都把 config.json / reg.json / rules.txt / geo 锚定到 `getFilesDir()`（经 `core.Options.DataDir` + `gui/datadir_android.go`），不再落到只读的 `/system/bin`——修复 v0.5.0 的"生成默认配置失败 / 注册写盘失败 / 内核无法启动 / 默认规则不可见"一类问题
+- **启动/停止桥接 VpnService**：GUI 的"启动/停止"按钮经反向 JNI 桥（`MainActivity.requestStartVpn/requestStopVpn`）驱动 VpnService 生命周期——一键注册 → 启动 → consent → TUN 隧道，无需手动操作
+- **运行时文件统一在应用沙箱**：GUI 服务层（`serverInstance`）与 JNI 侧（`buildAndroidConfig`）都把 config.json / reg.json / rules.txt / geo 锚定到 `getFilesDir()`（经 `core.Options.DataDir` + `gui/datadir_android.go`，首次成功缓存防桥接抖动），不再落到只读的 `/system/bin`
 - **Consent**：`MainActivity` 首启调 `VpnService.prepare()` 请求授权（singleTask），授权后启动前台 `dataSync` 服务；包名保持 `com.wails.app`（JNI 符号烘焙进包名），用户可见名 "warp-go"
 - **跟随系统主题**：前端三态主题（浅色/深色/跟随系统），经 Wails runtime `System.IsDarkMode()` + `android:ThemeChanged` 事件自动切换
-- **构建**：本地无 SDK/NDK/JDK → **仅 CI 构建**（`build-android` job：JDK 21 + SDK + NDK r27 → c-shared arm64/x86_64 + gradle APK/AAB）；产物从 Actions artifact 下载（`app-debug.apk`）
+- **状态栏不覆盖**：`WindowCompat.setDecorFitsSystemWindows(true)` 显式适配系统栏（Android 15+ 默认 edge-to-edge）
+- **手机底部导航**：`<md` 隐藏侧边栏，底部固定导航（6 页 + 主题循环）
+- **构建**：本地无 SDK/NDK/JDK → **仅 CI 构建**（`build-android` job：JDK 21 + SDK + NDK r27 → c-shared arm64/x86_64 + gradle APK/AAB + JNI 符号双侧 grep 断言）；产物从 Actions artifact 下载（`app-debug.apk`）
 
 ### Android 使用
 
@@ -248,7 +251,7 @@ warp-go/
 4. **重连是惰性的**——空闲断线不会后台恢复，下一个请求承担重连延迟。
 5. **PQ 密钥交换无法对齐**（Go 标准库无 `P256Kyber768Draft00`）。
 6. **注册信息不会刷新**——端点一直沿用，需 `-del` 后重新 `-reg` 更新。
-7. **Android 无真机验证**（v0.5.0/v0.5.1）——仅 CI 构建，运行时行为需真机测试；验收项见 android 计划文档 §11（TUN `warp=on`、consent UX、GEO 分流、Always-On 重启、JNI 无 `UnsatisfiedLinkError`、前台服务/电池等）。v0.5.1 已修复运行时文件落到只读 `/system/bin` 的启动崩溃。
+7. **Android 无真机验证**（v0.5.0-v0.5.2）——仅 CI 构建，运行时行为需真机测试；验收项见 android 计划文档 §11（TUN `warp=on`、consent UX、GEO 分流、Always-On 重启、JNI 无 `UnsatisfiedLinkError`、前台服务/电池等）。v0.5.1 修复 /system/bin 只读崩溃；v0.5.2 修复启动内核失败（桥接 VpnService）、日志不可见、注册状态切页丢失、扫描无候选。
 8. **Android 需手动放入 reg.json**——注册信息不在 UI 内生成，需从桌面端 `-reg` 复制进沙箱 `getFilesDir()` 才能启动 VPN（v0.5.1 起注册写盘已正确落到沙箱，UI 内"一键注册"可用）。
 9. **Android UI 为初版 consent 流**——首启自动弹授权对话框；React 前端按钮触发路径为后续版本。Wails v3 Android 仍 experimental（alpha2.119，已知 bug：onDestroy #5859、bindings 上下文 #5810 等）。
 
@@ -264,6 +267,7 @@ warp-go/
 
 | 版本 | 日期 | 摘要 |
 |---|---|---|
+| [v0.5.2](CHANGELOG.md#v052---2026-08-01) | 2026-08-01 | Android 内核启动根治（反向 JNI 桥接 VpnService）、日志 init 路由、注册状态切页弹性、扫描无候选修复、状态栏不覆盖、手机底部导航 |
 | [v0.5.1](CHANGELOG.md#unreleased---v051-计划中) | 2026-08-01 | Android 运行时文件统一沙箱锚定（修复 /system/bin 只读崩溃）、日志时间戳去重、注销反馈、竖屏侧边栏自适应、跟随系统主题（全平台） |
 | [v0.5.0](CHANGELOG.md#v050---2026-08-01) | 2026-08-01 | Android 版（Wails VpnService + JNI）、core.Kernel 三端复用、CI build-android、geoip/reject 修复 |
 | [v0.4.0](CHANGELOG.md#v040---2026-08-01) | 2026-08-01 | REJECT 广告拦截、GitHub 下载加速（GUI 可配）、首启引导修复、GUI 多项修复 |

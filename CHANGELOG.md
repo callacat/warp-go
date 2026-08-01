@@ -3,6 +3,41 @@
 本项目所有值得记录的变更。格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v0.5.2] - 2026-08-01
+
+### 修复
+
+- **Android"启动内核失败"根治**：GUI"启动/停止"按钮此前走 `core.Server.Start`
+  （SOCKS 代理路径，Android 上无意义——隧道必须经 VpnService/TUN）。新增反向
+  JNI 桥（`MainActivity.requestStartVpn/requestStopVpn` + `nativeBridgeReady`
+  缓存全局引用与方法 ID，C helper 封装 JNI 调用镜像 Wails 模式），Start/Stop/
+  IsRunning 在 Android 上桥接 VpnService 生命周期；GetStatus 用 androidRuntime
+  状态覆盖生命周期字段。一键注册 → 启动 → consent → TUN 隧道全链路打通。
+- **Android 日志"无日志"**：`log.SetOutput` 移到包 `init()`（c-shared 库加载
+  时同步执行），早于任何 JNI 调用——`nativeStartVpn` 先于 `main()` 触发时
+  内核日志也进 GUI 日志页（此前只进 logcat）。
+- **Android 注册状态切页丢失**：`dataDir()` 首次成功取值后缓存（Wails
+  StoragePath 桥接抖动会瞬时返回 `""`，`serverInstance` 失败 → `GetStatus`
+  误报未注册）；失败路径用缓存沙箱目录兜底检查 reg.json。
+- **扫描 v4/v6 无候选**：`scanFallback()` 在注册信息缺边缘地址时返回清晰错误
+  （修复前 `net.JoinHostPort("","443")` 生成 `":443"` 垃圾候选）；注册端点
+  提取回退 `endpoint.host`（API 可能只返回 host）。
+- **状态栏被 UI 覆盖**：`MainActivity.onCreate` 显式
+  `WindowCompat.setDecorFitsSystemWindows(getWindow(), true)`（Android 15+
+  默认强制 edge-to-edge，此前 WebView 绘制到状态栏下方）。
+
+### 新增
+
+- **手机底部导航**：`<md` 隐藏侧边栏，新增固定底部导航（6 页 + 主题循环格，
+  safe-area 底部内边距）；`NAV/TITLES` 抽到 `lib/nav.ts`（+7 vitest 单测）。
+- **扫描空结果可操作提示**：琥珀色警告说明可能原因（QUIC 受限/缺边缘地址）
+  并引导重新注册。
+
+### 变更
+
+- 前台服务通知渠道名 "Background work" → "warp-go VPN"。
+- CI `build-android` 增加 JNI 符号 Java↔Go 双侧 grep 断言。
+
 ## [Unreleased] — v0.5.1 计划中
 
 ### 修复
