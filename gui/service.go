@@ -27,17 +27,25 @@ type Service struct {
 	server       *core.Server
 	started      bool
 	startErr     error // 异步 Start 失败时的错误（GetStatus 展示）
-	defaultsInit bool // InitDefaults 已执行（幂等）
+	defaultsInit bool  // InitDefaults 已执行（幂等）
 }
 
 // newService 创建服务并注入日志环形缓冲（logs.go）。
 func newService() *Service {
 	svc := &Service{}
-	log.SetOutput(logWriter{})
+	initLogging()
 	// GUI 启动即异步初始化基础文件（rules.txt 模板 + GEO 下载），
 	// 不阻塞窗口显示；未注册也能看到默认规则与 GEO 状态。
 	go svc.InitDefaults()
 	return svc
+}
+
+// initLogging 把 log.Printf 输出送入环形缓冲，并去掉标准库 log 的
+// 日期/时间前缀（Ldate|Ltime）——环形缓冲已按系统时间生成 HH:MM:SS，
+// 双前缀会让前端日志页出现重复时间戳。
+func initLogging() {
+	log.SetOutput(logWriter{})
+	log.SetFlags(0)
 }
 
 // server 惰性创建 core.Server（选项来自执行目录 config.json 与默认值）。
