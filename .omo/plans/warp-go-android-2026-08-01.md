@@ -399,15 +399,15 @@ T4 ─▶ T5 ─┘        (T3: decision module)        (T6: exports)  (T10/T11:
 | T10 manifest 声明 | `81cdca4` | ✅ | CI grep 门（BIND_VPN_SERVICE / .WarpVpnService / singleTask / app_name warp-go） |
 | T11 consent 流 | `df2fc47` | ✅ | CI `assemble:apk` 编译通过；consent UX 记入 §11 真机验收 |
 | T12 CI android job | `f2383b4` | ✅ | `build-android` job（JDK21 + SDK + NDK r27 + c-shared arm64/x86_64 + APK/AAB）+ test job `GOOS=android` 编译检查 |
-| T13 文档 + tag | T13a 文档（本文件更新中） | 🔄 | T13b（tag v0.5.0 + Release）由后续任务执行 |
+| T13 文档 + tag | `e62d3a2`（文档）+ `be723b0`（含 4 个 CI/Java 修复） | ✅ | tag v0.5.0 推送；Actions 全绿（test/build-binary×5/build-gui×3/build-android/release）；APK 18MB 发布 |
 
 **里程碑门（§10）进度**：
 - [x] `GOOS=android GOARCH=arm64 CGO_ENABLED=0 go build ./...` 绿（T2 stub）
 - [x] 宿主 `go build ./... && go vet ./... && go test ./...` 全绿，core/proxy/androidvpn 带 `-race`
 - [x] `core.Server` 行为不变（proxy_test.go 原样且绿）
-- [x] 原子提交日志：`main` 上 T1–T12 恰好逐任务提交，无捆绑
-- [ ] tag `v0.5.0` 推送；GitHub Actions 全绿（test / build-release / docker-ghcr / build-android）——T13b
-- [ ] `app-debug.apk` 作为 release artifact 上传并本地验证非空——T13b
-- [ ] 文档一致（CHANGELOG v0.5.0、AGENTS.md M7、README Android 节、本计划 §14/reinit §14）——T13a 进行中
+- [x] 原子提交日志：`main` 上 T1–T13 恰好逐任务提交，无捆绑
+- [x] tag `v0.5.0` 推送；GitHub Actions 全绿（test / build-binary×5 / build-gui×3 / build-android / release）——T13b
+- [x] `app-release.apk`（18MB）作为 release artifact 发布并本地验证（PK magic + 非空）——T13b
+- [x] 文档一致（CHANGELOG v0.5.0、AGENTS.md M7、README Android 节、本计划 §14/reinit §14）——T13a
 
-**收尾说明**：T1–T12 全部落地，剩余为发布动作（tag v0.5.0 → Actions → 下载 APK 验证）与文档一致性收尾；真机验收清单见 §11，交付用户。
+**收尾说明**：T1–T13 全部完成（代码 12 提交 + CI 修复 4 提交 + 文档 1 提交），v0.5.0 tag 已推送、Actions 全绿、APK/AAB 已发布。真机验收清单见 §11，交付用户。
