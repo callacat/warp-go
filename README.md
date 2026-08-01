@@ -224,9 +224,21 @@ warp-go/
 
 ## 文档
 
+- [CHANGELOG.md](CHANGELOG.md) — 版本变更记录
 - [AGENTS.md](AGENTS.md) — 接手指南（架构、决策记录、构建/验证命令、GEO 格式定论）
 - [docs/warp-masque-reverse-engineering.md](docs/warp-masque-reverse-engineering.md) — 官方 warp-svc 逆向分析
 - [.omo/plans/warp-go-reinit-2026-07-31.md](.omo/plans/warp-go-reinit-2026-07-31.md) — 项目计划（随进度更新）
+
+## 更新记录
+
+| 版本 | 日期 | 摘要 |
+|---|---|---|
+| [v0.4.0](CHANGELOG.md#v040---2026-08-01) | 2026-08-01 | REJECT 广告拦截、GitHub 下载加速（GUI 可配）、首启引导修复、GUI 多项修复 |
+| [v0.3.1](CHANGELOG.md#v031---2026-07-31) | 2026-07-31 | Windows 修复、扫描独立页、开机自启 |
+| [v0.2.0](CHANGELOG.md#v020---2026-07-31) | 2026-07-31 | 首个功能完整版本：GEO 分流、mixed 代理、系统代理、GUI |
+| [v0.1.x](CHANGELOG.md#v010---2026-07-28) | 2026-07-28 | 首个可用版本 |
+
+完整变更见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 许可证
 

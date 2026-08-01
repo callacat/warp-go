@@ -1,7 +1,7 @@
 # AGENTS.md — warp-go 接手指南
 
 > 本文件供后续 Agent 快速了解项目。配合计划文档 `.omo/plans/warp-go-reinit-2026-07-31.md`（随进度更新）阅读。
-> 最后更新: 2026-07-31
+> 最后更新: 2026-08-01
 
 ## 1. 项目是什么
 
@@ -27,9 +27,11 @@ warp-go/
 ├── registration/            # 上游既有：两步注册 API
 ├── tunnel/                  # 上游既有：MASQUE/QUIC 隧道、SOCKS5 TCP、UDP ASSOCIATE
 ├── scanner/                 # 上游既有：边缘延迟扫描（-scan）
+├── rules/                   # (M6) 仓库内置默认规则（default-rules.txt，首启下载）
 ├── .github/workflows/       # sync-upstream / build-release / docker-ghcr
 ├── .omo/plans/              # 计划文档（随进度更新）
 ├── docs/                    # 上游逆向文档 + 新功能设计
+├── CHANGELOG.md             # 版本变更记录
 └── AGENTS.md                # 本文件
 ```
 
@@ -37,7 +39,7 @@ warp-go/
 
 | 文件 | 位置 | 说明 |
 |---|---|---|
-| `config.json` | **执行目录** | 主配置（监听端口/规则路径/GEO 仓库与 URL/自动更新时间/代理开关）；**文件变更热重载** |
+| `config.json` | **执行目录** | 主配置（监听端口/规则路径/GEO 仓库与 URL/自动更新时间/代理开关/下载加速前缀）；**文件变更热重载** |
 | `rules.txt` | 执行目录（config 可改） | 路由规则文本；GUI 增删改 + 热重载 |
 | `reg.json` | 执行目录 | WARP 注册信息（上游原约定） |
 | `geo/` | 执行目录/geo/ | geosite.dat + geoip-lite.dat |
@@ -108,6 +110,7 @@ node --version      # M4 GUI 前端: v22（已装）
 | M3 系统代理+config | ✅ | `proxy/` mixed HTTP+SOCKS5（首字节嗅探）+ UDP ASSOCIATE 中继（udp.go）；`sysproxy/` 三平台（common 校验 + linux gsettings/win 注册表/mac networksetup）；`config.json` 执行目录 + mtime/hash 热重载 + 旗标>config>默认；默认绑 `127.0.0.1:40000`；main.go 重写接线；proxy/config/sysproxy 单测全绿 |
 | M4 GUI + core | ✅ | `core/` Server 生命周期抽取（CLI/GUI 共用，含 SetSystemProxy/ReloadRules/SaveConfig）；`gui/` Wails v3（main.go + service.go + logs.go + React 19 前端五页：状态/规则/GEO/设置/日志）；前端 npm build 通过；**本地 GTK 4.6 < 4.10 无法编译 wails → GUI 构建走 CI**（build-gui 分平台 job，ubuntu-24.04 有 GTK 4.14） |
 | M5 发布 | ✅ | README/AGENTS.md 重写；Dockerfile 端口 40000；docker-compose.example.yml；推送远端（备份后 force-push）；tag v0.2.0 → Actions **全绿**（5 平台 CLI + 3 平台 GUI + Release + GHCR 镜像）；Release 产物本地验证（CLI 配置启动/GEO 下载/分流匹配/Docker 冒烟）全通过 |
+| M6 维护增强 | ✅ | REJECT 广告拦截（route+proxy+GUI 拦截统计）；默认规则托管 `rules/default-rules.txt` + 首启 GitHub 下载（失败回退内置模板）；GitHub 下载加速前缀（`download_proxy`，默认 gh-proxy.org，GUI 可配）；GUI 首启死锁根因修复（InitDefaults 二次加锁）；开启系统代理自动启动内核；托盘退出修复；侧边栏展开按钮修复；流量统计恒 0 修复；tag v0.4.0 |
 
 ## 6.6 上游冲突处理（重要）
 
@@ -139,6 +142,8 @@ node --version      # M4 GUI 前端: v22（已装）
 4. **远端推送**：M5 时备份后 force-push 覆盖 main（archive/previous-poc 已存旧内容）
 5. **UDP 不走隧道**（上游限制）：规则仅作用 TCP CONNECT；UDP 全直连，文档明示
 6. **系统代理**：mixed 端口（HTTP+SOCKS5 同端口嗅探）；GUI 模式默认绑 127.0.0.1
+7. **GitHub 下载加速**：`download_proxy`（默认 `https://gh-proxy.org/`）仅对 github.com / raw.githubusercontent.com 的下载 URL 生效，非 GitHub 地址（镜像仓库/本地测试）原样，置空关闭；GUI 可配
+8. **REJECT 行为**：规则 `reject` 命中即拒连（SOCKS5 0x02 / HTTP 403，绝不建连）；命中计入 Stats.RejectedHits，前端拦截统计卡展示
 
 ## 8. 已确认事实（勿重复调研）
 
@@ -146,5 +151,6 @@ node --version      # M4 GUI 前端: v22（已装）
 - 本地 Go 1.26.5（/usr/local/go1.26.5）；gh 认证为 `callacat`；本机 linux/arm64 无桌面
 - `go.mod`: `module warp`，go 1.26.5，quic-go v0.61
 - SOCKS5 CONNECT 分支在 `tunnel/masque.go`（`HandleSOCKS5`，CONNECT 处理 ~L786）；分流 seam 在建立 H3 CONNECT 之前
-- 远端 `callacat/warp-go` main = `e572b68`（2026-07-31，已 force-push）；旧内容在 `archive/previous-poc`
+- 远端 `callacat/warp-go` main = `165d565`（2026-08-01）；tag `v0.4.0`（2026-08-01）；旧内容在 `archive/previous-poc`
+- `rules/default-rules.txt` 已上线（首启下载 200）；`download_proxy` 默认 gh-proxy.org，GEO 经加速实测下载成功
 - 本机 GUI 构建限制：GTK 4.6.9 < wails 需要的 4.10（GtkFileDialog）→ 走 CI

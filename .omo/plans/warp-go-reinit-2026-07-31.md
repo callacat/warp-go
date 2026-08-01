@@ -416,3 +416,9 @@ CONNECT target (host:port)
 ## 14. 执行
 
 **M0–M5 全部完成（2026-07-31）**：每个里程碑均构建+测试验证；核心交付物独立审查；计划文档随进度持续更新。远端 main = `ff6edd9`，tag v0.2.0 已发布，三个工作流验证全绿。
+
+**M6 维护增强完成（2026-08-01，tag v0.4.0）**：用户实测反馈驱动的修复与增强——
+- **根因修复**：GUI 首启死锁（`InitDefaults` 持锁调 `serverInstance` 二次加锁 → 全部服务调用阻塞），导致"不读 config.json/reg.json、一键注册无响应无日志"；修复后首启一次生成 config.json + 默认规则（GitHub 下载回退模板）+ GEO 下载
+- **新功能**：REJECT 广告拦截（SOCKS5 0x02/HTTP 403 + 拦截统计卡）；GitHub 下载加速前缀（`download_proxy` 默认 gh-proxy.org，GUI 可配）；开启系统代理自动启动内核
+- **UI 修复**：侧边栏收起展开按钮点不到、托盘退出残留、流量统计恒 0、扫描按钮→注销、设置页"重新加载"→"重置配置"
+- 远端 main = `165d565`，tag `v0.4.0` 已发布；变更记录见 `CHANGELOG.md`
