@@ -233,13 +233,13 @@ jobs:
         working-directory: gui
         run: wails3 android overlay:gen -out build/android/overlay.json -config build/config.yml
 
-      # 与 generate:android:bindings 任务一致：CGO 关闭，无需 NDK。
-      # 先于前端构建：前端 api.ts 静态 import bindings。
+      # 生成 Wails 绑定（Android 标签）。注意：不要设 GOOS=android +
+      # CGO_ENABLED=0（android 需外部 cgo 链接，该组合会让 wails3 无法加载
+      # 任何包：could not import errors: missing package）；用宿主 go 环境即可，
+      # 与 build-gui 的 bindings 步骤一致。-tags android 让生成器看到 android
+      # 标签文件（androidbridge.go/androidconfig.go）。
       - name: 生成 Wails 绑定（Android 标签）
         working-directory: gui
-        env:
-          GOOS: android
-          CGO_ENABLED: 0
         run: wails3 generate bindings -f '-tags android' -clean=true
 
       - name: 构建前端

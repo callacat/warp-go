@@ -260,12 +260,11 @@ tasks:
     generates:
       - frontend/bindings/**/*
     cmds:
-      # Bindings are generated from the Go AST; CGO is disabled so the NDK
-      # is not required for this step
+      # Bindings are generated from the Go AST. NOTE: do NOT set GOOS=android +
+      # CGO_ENABLED=0 here — android requires external cgo linking, so that combo
+      # makes wails3 fail to load ANY package ("could not import errors: missing
+      # package"), verified in CI (build-android job). Use the host go env.
       - wails3 generate bindings -f '-tags android' -clean=true
-    env:
-      GOOS: android
-      CGO_ENABLED: 0
 
   ensure-emulator:
     internal: true
