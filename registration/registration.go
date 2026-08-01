@@ -176,6 +176,30 @@ func buildClientCert(regID string, privKey *ecdsa.PrivateKey) (tls.Certificate, 
 	return tls.Certificate{Certificate: [][]byte{certDER}, PrivateKey: privKey}, nil
 }
 
+// extractPeerEndpoints 从登记响应的 peer 端点提取 IPv4/IPv6 主机与端口列表：
+//   - v4/v6 含端口时剥掉端口，IPv6 再去掉方括号
+//   - v4 与 v6 都为空时回退到 Endpoint.Host（API 可能只返回 host 字段；
+//     修复前忽略 Host 导致 endpoint_v4 恒为空 → 扫描回退候选变成 ":443"）
+func extractPeerEndpoints(v4, v6 string, ports []int, host string) (string, string, []int) {
+	out4, out6 := v4, v6
+	if out4 != "" {
+		if h, _, err := net.SplitHostPort(out4); err == nil {
+			out4 = h
+		}
+	}
+	if out6 != "" {
+		if h, _, err := net.SplitHostPort(out6); err == nil {
+			out6 = h
+		} else {
+			out6 = strings.Trim(out6, "[]")
+		}
+	}
+	if out4 == "" && out6 == "" && host != "" {
+		out4 = host
+	}
+	return out4, out6, ports
+}
+
 // Register performs WARP registration using the two-step flow the API requires:
 //  1. POST /v0/reg with a Curve25519 key — the tunnel type WARP was originally
 //     built around, and the only one /reg accepts at creation time
@@ -332,24 +356,8 @@ func Register() (*Registration, error) {
 	if len(enrollResult.Config.Peers) > 0 {
 		peer := enrollResult.Config.Peers[0]
 		peerPubKey = peer.PublicKey
-		endpointPorts = peer.Endpoint.Ports
-
-		if peer.Endpoint.V4 != "" {
-			host, _, err := net.SplitHostPort(peer.Endpoint.V4)
-			if err == nil {
-				endpointV4 = host
-			} else {
-				endpointV4 = peer.Endpoint.V4
-			}
-		}
-		if peer.Endpoint.V6 != "" {
-			host, _, err := net.SplitHostPort(peer.Endpoint.V6)
-			if err == nil {
-				endpointV6 = host
-			} else {
-				endpointV6 = strings.Trim(peer.Endpoint.V6, "[]")
-			}
-		}
+		endpointV4, endpointV6, endpointPorts = extractPeerEndpoints(
+			peer.Endpoint.V4, peer.Endpoint.V6, peer.Endpoint.Ports, peer.Endpoint.Host)
 	}
 	assignedV4 = enrollResult.Config.Interface.Addresses.V4
 	assignedV6 = enrollResult.Config.Interface.Addresses.V6
