@@ -14,6 +14,9 @@
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- VPN: WarpVpnService (BIND_VPN_SERVICE is a signature-granted permission) -->
+    <uses-permission android:name="android.permission.BIND_VPN_SERVICE" />
+    <uses-feature android:name="android.software.vpn" android:required="false" />
 
     <queries>
         <intent>
@@ -36,6 +39,7 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:launchMode="singleTask"
             android:configChanges="orientation|screenSize|keyboardHidden|uiMode"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
@@ -57,6 +61,12 @@
         <service
             android:name=".WailsForegroundService"
             android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <service
+            android:name=".WarpVpnService"
+            android:exported="false"
+            android:permission="android.permission.BIND_VPN_SERVICE"
             android:foregroundServiceType="dataSync" />
     </application>
 
