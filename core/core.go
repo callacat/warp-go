@@ -63,6 +63,11 @@ type Options struct {
 	// StateFile 是注册信息文件路径（默认 "reg.json"）。
 	StateFile string
 
+	// DataDir 非空时，所有相对运行时文件路径（config.json / reg.json /
+	// rules.txt / geo）锚定到该目录（Android 沙箱 getFilesDir()）。
+	// 空时保持默认行为：锚定到可执行文件所在目录（桌面便携部署）。
+	DataDir string
+
 	// ListenAddr 覆盖 config.json 的 listen_addr（CLI -l）。
 	ListenAddr string
 
@@ -143,9 +148,24 @@ func New(opts Options) *Server {
 	if opts.ScanTop == 0 {
 		opts.ScanTop = 4
 	}
-	opts.ConfigPath = resolveExecPath(opts.ConfigPath)
-	opts.StateFile = resolveExecPath(opts.StateFile)
+	opts.ConfigPath = resolveWithDir(opts.DataDir, opts.ConfigPath)
+	opts.StateFile = resolveWithDir(opts.DataDir, opts.StateFile)
 	return &Server{opts: opts}
+}
+
+// resolveWithDir 把相对路径解析为运行时文件绝对路径：
+//   - dir 非空（Android 沙箱）→ 锚定到 dir
+//   - 否则走默认 resolveExecPath（可执行文件目录 / 用户配置目录）
+//
+// 已是绝对路径或空串时原样返回。
+func resolveWithDir(dir, p string) string {
+	if p == "" || filepath.IsAbs(p) {
+		return p
+	}
+	if dir != "" {
+		return filepath.Join(dir, p)
+	}
+	return resolveExecPath(p)
 }
 
 // resolveExecPath 把相对路径解析为数据目录下的绝对路径：
@@ -202,9 +222,9 @@ func (s *Server) ensureConfig() (*Config, error) {
 	if strings.TrimSpace(s.opts.RulesPath) != "" {
 		cfg.RulesPath = s.opts.RulesPath
 	}
-	// config.json 内的相对路径同样锚定到可执行目录。
-	cfg.RulesPath = resolveExecPath(cfg.RulesPath)
-	cfg.GeoDir = resolveExecPath(cfg.GeoDir)
+	// config.json 内的相对路径同样锚定到运行时目录（DataDir 或可执行目录）。
+	cfg.RulesPath = resolveWithDir(s.opts.DataDir, cfg.RulesPath)
+	cfg.GeoDir = resolveWithDir(s.opts.DataDir, cfg.GeoDir)
 	s.cfg = cfg
 	return cfg, nil
 }
