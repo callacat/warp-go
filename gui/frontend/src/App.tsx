@@ -61,7 +61,7 @@ export default function App() {
       {/* Sidebar */}
       <aside
         className={`flex shrink-0 flex-col border-r border-slate-200 bg-white transition-all dark:border-slate-800 dark:bg-slate-900 ${
-          collapsed ? "w-20" : "w-52"
+          collapsed ? "w-16" : "w-16 md:w-52"
         }`}
       >
         <div className="flex items-center gap-2.5 px-4 py-4">
@@ -71,7 +71,7 @@ export default function App() {
             className="h-7 w-7 shrink-0"
           />
           {!collapsed && (
-            <div className="min-w-0">
+            <div className="hidden min-w-0 md:block">
               <p className="truncate text-sm font-semibold">warp-go GUI</p>
               <p className="truncate text-[10px] text-slate-400">Cloudflare WARP</p>
             </div>
@@ -91,7 +91,7 @@ export default function App() {
               }`}
             >
               <Icon className="h-4.5 w-4.5 shrink-0" />
-              {!collapsed && <span className="truncate">{label}</span>}
+              {!collapsed && <span className="hidden truncate md:inline">{label}</span>}
             </button>
           ))}
         </nav>
@@ -105,7 +105,7 @@ export default function App() {
             }`}
           >
             {dark ? <Sun className="h-4 w-4 shrink-0" /> : <Moon className="h-4 w-4 shrink-0" />}
-            {!collapsed && <span>{dark ? "浅色" : "深色"}</span>}
+            {!collapsed && <span className="hidden md:inline">{dark ? "浅色" : "深色"}</span>}
           </button>
           <button
             onClick={() => setCollapsed((c) => !c)}
