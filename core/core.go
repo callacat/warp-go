@@ -23,7 +23,6 @@ import (
 	"warp/registration"
 	"warp/route"
 	"warp/scanner"
-	"warp/sysproxy"
 	"warp/tunnel"
 )
 
@@ -375,7 +374,7 @@ func (s *Server) Start(ctx context.Context) error {
 	// 系统代理（Options.SysProxy 优先于 config.json 的 enable_system_proxy）。
 	if sysProxy := cfg.EnableSystemProxy; s.opts.SysProxy == nil || *s.opts.SysProxy == sysProxy {
 		if sysProxy {
-			if err := sysproxy.Set(listenAddr, true); err != nil {
+			if err := setSystemProxy(listenAddr, true); err != nil {
 				log.Printf("⚠ 设置系统代理失败（代理继续运行）：%v", err)
 			} else {
 				s.sysProxyEnabled.Store(true)
@@ -383,7 +382,7 @@ func (s *Server) Start(ctx context.Context) error {
 			}
 		}
 	} else if *s.opts.SysProxy {
-		if err := sysproxy.Set(listenAddr, true); err != nil {
+		if err := setSystemProxy(listenAddr, true); err != nil {
 			log.Printf("⚠ 设置系统代理失败（代理继续运行）：%v", err)
 		} else {
 			s.sysProxyEnabled.Store(true)
@@ -558,7 +557,7 @@ func (s *Server) shutdown() {
 		_ = server.Close()
 	}
 	if sysProxyEnabled {
-		if err := sysproxy.Set(listenAddr, false); err != nil {
+		if err := setSystemProxy(listenAddr, false); err != nil {
 			log.Printf("⚠ 清除系统代理失败：%v", err)
 		} else {
 			log.Println("✓ 系统代理已清除")
@@ -765,7 +764,7 @@ func (s *Server) geoUpdateOnce(ctx context.Context) {
 }
 
 // SetSystemProxy 开启/关闭系统代理，指向当前监听地址。运行中直接调用
-// sysproxy.Set；停止时记录配置意向并落盘（Start 时按配置应用）。GUI 开关专用。
+// setSystemProxy；停止时记录配置意向并落盘（Start 时按配置应用）。GUI 开关专用。
 func (s *Server) SetSystemProxy(enabled bool) error {
 	s.mu.Lock()
 	listenAddr := s.listenAddr
@@ -791,7 +790,7 @@ func (s *Server) SetSystemProxy(enabled bool) error {
 	if listenAddr == "" {
 		return fmt.Errorf("监听地址未知，无法设置系统代理")
 	}
-	if err := sysproxy.Set(listenAddr, enabled); err != nil {
+	if err := setSystemProxy(listenAddr, enabled); err != nil {
 		return err
 	}
 	s.sysProxyEnabled.Store(enabled)
@@ -894,14 +893,14 @@ func (s *Server) applyConfigReload(old, nc *Config) {
 
 	if nc.EnableSystemProxy != old.EnableSystemProxy {
 		if nc.EnableSystemProxy {
-			if err := sysproxy.Set(s.listenAddr, true); err != nil {
+			if err := setSystemProxy(s.listenAddr, true); err != nil {
 				log.Printf("⚠ 启用系统代理失败：%v", err)
 			} else {
 				s.sysProxyEnabled.Store(true)
 				log.Printf("✓ 系统代理已指向 %s", s.listenAddr)
 			}
 		} else {
-			if err := sysproxy.Set(s.listenAddr, false); err != nil {
+			if err := setSystemProxy(s.listenAddr, false); err != nil {
 				log.Printf("⚠ 清除系统代理失败：%v", err)
 			} else {
 				s.sysProxyEnabled.Store(false)
