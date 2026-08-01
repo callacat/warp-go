@@ -9,6 +9,7 @@ package androidvpn
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/netip"
 )
@@ -39,6 +40,34 @@ type Config struct {
 	Route      RouteFunc
 	TunnelDial TunnelDial
 	DirectDial DirectDial
+}
+
+// rejectErr 是命中 reject 规则时返回给调用方的错误（与 M6 桌面端
+// proxy.errRejected 语义一致：连接被规则拒绝，绝不建连）。
+var rejectErr = errors.New("rejected by route")
+
+// resolveAction 把判定结果解析为上游连接：proxy → TunnelDial；
+// direct → DirectDial（nil 时 net.Dialer）；reject → (nil, rejectErr, true)
+// 绝不拨号。second=true 表示 reject 命中，调用方必须立即关闭连接。
+// 与 decideAction 同属 host-compilable 逻辑，reject 分支契约由此可单测。
+func resolveAction(action string, ctx context.Context, targetAddr string, tunnelDial TunnelDial, directDial DirectDial) (net.Conn, error, bool) {
+	switch action {
+	case "reject":
+		return nil, rejectErr, true
+	case "proxy":
+		if tunnelDial == nil {
+			return nil, errors.New("tunnel not configured"), false
+		}
+		conn, err := tunnelDial(ctx, targetAddr)
+		return conn, err, false
+	default: // direct
+		if directDial != nil {
+			conn, err := directDial(ctx, targetAddr)
+			return conn, err, false
+		}
+		conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", targetAddr)
+		return conn, err, false
+	}
 }
 
 // decideAction 把 (host, ip) 判定为 proxy / direct / reject。

@@ -21,11 +21,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sagernet/sing-tun"
 	"github.com/sagernet/sing/common/buf"
 	"github.com/sagernet/sing/common/logger"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
-	"github.com/sagernet/sing-tun"
 )
 
 // stdLogger 把 Go 标准 log 适配到 sing 的 logger.Logger 接口。
@@ -152,26 +152,14 @@ func (v *Vpn) NewConnectionEx(ctx context.Context, conn net.Conn, source, destin
 		// proxy → 隧道；direct → 本地直连；reject → 拒连（绝不建连）。
 		// 未命中 → 隐式 direct 兜底（与桌面一致）。
 		action, _ := decideAction(v.cfg.Route, destination.AddrString(), netip.Addr{})
-		switch action {
-		case "reject":
+		upstream, err, rejected := resolveAction(action, ctx, destination.String(), v.cfg.TunnelDial, v.cfg.DirectDial)
+		if rejected {
 			log.Printf("[tun] 规则 reject：拒绝 %s → %s", source.AddrString(), destination.String())
 			_ = conn.Close()
 			if onClose != nil {
-				onClose(errors.New("rejected by route"))
+				onClose(err)
 			}
 			return
-		case "proxy":
-			if v.cfg.TunnelDial == nil {
-				err = errors.New("tunnel not configured")
-			} else {
-				upstream, err = v.cfg.TunnelDial(ctx, destination.String())
-			}
-		default: // direct
-			if v.cfg.DirectDial != nil {
-				upstream, err = v.cfg.DirectDial(ctx, destination.String())
-			} else {
-				upstream, err = (&net.Dialer{}).DialContext(ctx, "tcp", destination.String())
-			}
 		}
 		if err != nil {
 			log.Printf("[tun] 拨号失败 %s：%v", destination.String(), err)

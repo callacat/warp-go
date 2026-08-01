@@ -60,14 +60,20 @@ func (f *fakeDialer) isClosed() bool {
 // newTestKernel 用临时规则文件 + 假拨号器构建 Kernel（无网络）。
 func newTestKernel(t *testing.T) (*Kernel, *fakeDialer) {
 	t.Helper()
+	return newTestKernelRules(t, "proxy,domain:proxy.example\n"+
+		"direct,domain:direct.example\n")
+}
+
+// newTestKernelRules 与 newTestKernel 相同，但规则内容由调用方指定
+// （reject 等测试需要自定义规则文件）。
+func newTestKernelRules(t *testing.T, rules string) (*Kernel, *fakeDialer) {
+	t.Helper()
 	tmp := t.TempDir()
-	rules := filepath.Join(tmp, "rules.txt")
-	if err := os.WriteFile(rules, []byte(
-		"proxy,domain:proxy.example\n"+
-			"direct,domain:direct.example\n"), 0o644); err != nil {
+	rulesPath := filepath.Join(tmp, "rules.txt")
+	if err := os.WriteFile(rulesPath, []byte(rules), 0o644); err != nil {
 		t.Fatalf("写规则文件失败：%v", err)
 	}
-	cfg := &Config{RulesPath: rules, GeoDir: filepath.Join(tmp, "geo")}
+	cfg := &Config{RulesPath: rulesPath, GeoDir: filepath.Join(tmp, "geo")}
 	reg := &registration.Registration{
 		AssignedIPv4: "172.16.0.2",
 		AssignedIPv6: "2606:4700:110:8a2e:fb70:7a34:2f7e:1",
@@ -129,6 +135,20 @@ func TestKernelRouteDirect(t *testing.T) {
 	action, matched := k.Route("direct.example", netip.Addr{})
 	if action != "direct" || !matched {
 		t.Errorf("Route = (%q, %v)，期望 (\"direct\", true)", action, matched)
+	}
+}
+
+// T3b：命中 reject 规则 → ("reject", true)。验证 reject 规则能从规则文件
+// 解析（route 包 validActions 含 ActionReject）并原样透传到 Kernel.Route，
+// 由 androidvpn.NewConnectionEx 关闭连接（T7：Android TUN 的 REJECT 通路）。
+func TestKernelRouteReject(t *testing.T) {
+	k, _ := newTestKernelRules(t, "reject,domain:blocked.example\n")
+	action, matched := k.Route("blocked.example", netip.Addr{})
+	if action != "reject" || !matched {
+		t.Errorf("Route = (%q, %v)，期望 (\"reject\", true)", action, matched)
+	}
+	if action, matched := k.Route("allowed.example", netip.Addr{}); action != "" || matched {
+		t.Errorf("Route(未命中) = (%q, %v)，期望 (\"\", false)", action, matched)
 	}
 }
 

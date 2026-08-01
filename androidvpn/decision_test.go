@@ -3,6 +3,9 @@
 package androidvpn
 
 import (
+	"context"
+	"errors"
+	"net"
 	"net/netip"
 	"testing"
 )
@@ -101,6 +104,132 @@ func TestDecideAction(t *testing.T) {
 			}
 			if tt.check != nil {
 				tt.check(t)
+			}
+		})
+	}
+}
+
+// TestDecideActionRejectNeverDialed 锁定 NewConnectionEx 的调用契约：路由命中
+// reject 时 decideAction 返回 ("reject", true)，随后 resolveAction 必须返回
+// (nil, error, true) —— 隧道拨号与本地直连函数都绝不能被调用（与桌面端
+// proxy 包"reject 不建立连接"行为一致）。
+func TestDecideActionRejectNeverDialed(t *testing.T) {
+	const host = "blocked.example.com"
+	routeReject := func(string, netip.Addr) (string, bool) { return "reject", true }
+
+	// Given: 记录拨号是否被触碰的隧道/直连拨号函数。
+	tunnelDialed := false
+	directDialed := false
+	tunnelDial := func(context.Context, string) (net.Conn, error) {
+		tunnelDialed = true
+		return nil, errors.New("should not be called")
+	}
+	directDial := func(context.Context, string) (net.Conn, error) {
+		directDialed = true
+		return nil, errors.New("should not be called")
+	}
+
+	// When: 完整判定 + 解析流程（NewConnectionEx 的实际调用序列）。
+	action, matched := decideAction(routeReject, host, netip.Addr{})
+	upstream, err, rejected := resolveAction(action, context.Background(), host+":443", tunnelDial, directDial)
+
+	// Then: reject 原样透传，连接被拒绝，两个拨号函数零调用。
+	if action != "reject" || !matched {
+		t.Errorf("decideAction() = (%q, %v)，期望 (\"reject\", true)", action, matched)
+	}
+	if !rejected {
+		t.Error("resolveAction() rejected = false，期望 true（reject 必须拒连）")
+	}
+	if upstream != nil {
+		t.Errorf("resolveAction() upstream = %v，期望 nil（reject 绝不建连）", upstream)
+	}
+	if err == nil {
+		t.Error("resolveAction() err = nil，期望 reject 错误")
+	} else if !errors.Is(err, rejectErr) {
+		t.Errorf("resolveAction() err = %v，期望 errors.Is(err, rejectErr)", err)
+	}
+	if tunnelDialed {
+		t.Error("命中 reject 时 TunnelDial 被调用，期望零调用")
+	}
+	if directDialed {
+		t.Error("命中 reject 时 DirectDial 被调用，期望零调用")
+	}
+}
+
+// TestResolveAction 覆盖 resolveAction 全部分支的拨号委托契约：
+// proxy → TunnelDial；direct → DirectDial / 默认 net.Dialer；reject → 拒连。
+func TestResolveAction(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name         string
+		action       string
+		target       string
+		tunnelDial   TunnelDial
+		directDial   DirectDial
+		wantRejected bool
+		wantErr      bool
+		wantTunneled bool
+		wantDirect   bool
+	}{
+		{
+			name:         "reject → 拒连，绝不拨号",
+			action:       "reject",
+			tunnelDial:   func(context.Context, string) (net.Conn, error) { return nil, errors.New("unexpected") },
+			directDial:   func(context.Context, string) (net.Conn, error) { return nil, errors.New("unexpected") },
+			wantRejected: true,
+			wantErr:      true,
+		},
+		{
+			name:         "proxy → TunnelDial",
+			action:       "proxy",
+			tunnelDial:   func(context.Context, string) (net.Conn, error) { a, _ := net.Pipe(); return a, nil },
+			wantTunneled: true,
+		},
+		{
+			name:       "proxy 但 TunnelDial 未配置 → 错误",
+			action:     "proxy",
+			wantErr:    true,
+			wantDirect: false,
+		},
+		{
+			name:       "direct → DirectDial",
+			action:     "direct",
+			directDial: func(context.Context, string) (net.Conn, error) { a, _ := net.Pipe(); return a, nil },
+			wantDirect: true,
+		},
+		{
+			name:    "direct 但 DirectDial 未配置 → 默认 net.Dialer（回环端口拒绝，无网络依赖）",
+			action:  "direct",
+			target:  "127.0.0.1:1",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			target := tt.target
+			if target == "" {
+				target = "example.com:443"
+			}
+			upstream, err, rejected := resolveAction(tt.action, ctx, target, tt.tunnelDial, tt.directDial)
+			if rejected != tt.wantRejected {
+				t.Errorf("rejected = %v，期望 %v", rejected, tt.wantRejected)
+			}
+			if (err != nil) != tt.wantErr {
+				t.Errorf("err = %v，期望 err != nil: %v", err, tt.wantErr)
+			}
+			if tt.wantRejected && upstream != nil {
+				t.Errorf("reject 时 upstream = %v，期望 nil", upstream)
+			}
+			if tt.wantTunneled && tt.tunnelDial == nil {
+				t.Errorf("proxy 分支应使用 TunnelDial")
+			}
+			if tt.wantDirect && tt.directDial == nil {
+				t.Errorf("direct 分支应使用 DirectDial")
+			}
+			if upstream != nil {
+				_ = upstream.Close()
 			}
 		})
 	}
