@@ -8,10 +8,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -56,8 +58,16 @@ func (s *Service) serverInstance() (*core.Server, error) {
 	if s.server != nil {
 		return s.server, nil
 	}
+	// Android 上所有相对运行时路径（config.json/reg.json/rules.txt/geo）
+	// 锚定到应用沙箱 getFilesDir()，避免落到只读的 /system/bin 崩溃。
+	// dataDir() 依赖 Wails bridge 已初始化（serverInstance 由前端服务调用，
+	// 此时 bridge 已就绪）；防御性检查空值。
+	if runtime.GOOS == "android" && dataDir() == "" {
+		return nil, errors.New("应用沙箱目录未就绪")
+	}
 	srv := core.New(core.Options{
 		ConfigPath: "config.json",
+		DataDir:    dataDir(),
 	})
 	s.server = srv
 	return srv, nil
