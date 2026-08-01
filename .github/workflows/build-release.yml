@@ -274,6 +274,22 @@ jobs:
             -tags production,android -trimpath -buildvcs=false -ldflags="-w -s" \
             -o build/android/app/src/main/jniLibs/x86_64/libwails.so
 
+      # 反向 JNI 桥（androidbridge.go ↔ MainActivity.java）符号名必须严格一致，
+      # 否则运行期 UnsatisfiedLinkError / NoSuchMethodError。双侧 grep 断言。
+      - name: 校验 JNI 符号 Java↔Go 一致
+        working-directory: gui
+        run: |
+          grep -q 'nativeBridgeReady' build/android/app/src/main/java/com/wails/app/MainActivity.java
+          grep -q 'Java_com_wails_app_MainActivity_nativeBridgeReady' androidbridge.go
+          grep -q 'requestStartVpn' build/android/app/src/main/java/com/wails/app/MainActivity.java
+          grep -q 'requestStartVpn' androidbridge.go
+          grep -q 'requestStopVpn' build/android/app/src/main/java/com/wails/app/MainActivity.java
+          grep -q 'requestStopVpn' androidbridge.go
+          grep -q 'nativeStartVpn' build/android/app/src/main/java/com/wails/app/WarpVpnService.java
+          grep -q 'Java_com_wails_app_WarpVpnService_nativeStartVpn' androidbridge.go
+          grep -q 'nativeStopVpn' build/android/app/src/main/java/com/wails/app/WarpVpnService.java
+          grep -q 'Java_com_wails_app_WarpVpnService_nativeStopVpn' androidbridge.go
+
       # assembleRelease 用 debug keystore 兜底签名（app/build.gradle：
       # signingConfig hasKeystore ? signingConfigs.release : signingConfigs.debug），
       # 无需仓库 secrets；产物可安装。AAB 同理（Play 上传需正式 keystore，此处仅作产物）。

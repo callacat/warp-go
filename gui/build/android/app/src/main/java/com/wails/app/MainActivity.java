@@ -53,6 +53,25 @@ import java.util.List;
  * requiring a network server.
  */
 public class MainActivity extends AppCompatActivity {
+    // Reverse-JNI bridge: Go code (androidbridge.go) calls the static methods
+    // below to drive the VpnService lifecycle. sInstance is captured in
+    // onCreate; nativeBridgeReady caches the MainActivity global ref + method
+    // IDs on the Go side so calls from any Go goroutine are safe.
+    private static MainActivity sInstance;
+    private static native void nativeBridgeReady();
+
+    public static void requestStartVpn() {
+        MainActivity a = sInstance;
+        if (a == null) return;
+        a.runOnUiThread(() -> a.connectVpn());
+    }
+
+    public static void requestStopVpn() {
+        MainActivity a = sInstance;
+        if (a == null) return;
+        a.runOnUiThread(() -> a.stopService(new Intent(a, WarpVpnService.class)));
+    }
+
     private static final String TAG = "WailsActivity";
     private static final boolean DEBUG = BuildConfig.DEBUG;
     private static final String WAILS_SCHEME = "https";
@@ -102,6 +121,13 @@ public class MainActivity extends AppCompatActivity {
         // Initialize the native Go library
         bridge = new WailsBridge(this);
         bridge.initialize();
+
+        // Capture the activity instance and publish the reverse-JNI bridge to
+        // Go (androidbridge.go) so Go can request VPN start/stop from any
+        // goroutine. Must run before the first-run consent flow below so the
+        // bridge is ready when the UI asks for it.
+        sInstance = this;
+        nativeBridgeReady();
 
         // Set up WebView
         setupWebView();

@@ -213,7 +213,7 @@ public class WarpVpnService extends VpnService {
         NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationChannel ch = new NotificationChannel(
-                    CHANNEL_ID, "Background work", NotificationManager.IMPORTANCE_LOW);
+                    CHANNEL_ID, "warp-go VPN", NotificationManager.IMPORTANCE_LOW);
             nm.createNotificationChannel(ch);
         }
 

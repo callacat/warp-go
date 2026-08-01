@@ -39,11 +39,31 @@ static void storeJvm(JNIEnv* env) {
         (*env)->GetJavaVM(env, &g_jvm);
     }
 }
+
+// Reverse-JNI bridge primitives. JNIEnv calls must live in the C preamble
+// (cgo does not support the -> operator in Go code) — mirror of Wails'
+// storeBridgeRef helper pattern.
+static jclass newGlobalRef(JNIEnv* env, jclass cls) {
+    return (*env)->NewGlobalRef(env, cls);
+}
+
+static jmethodID getRequestStartMethod(JNIEnv* env, jclass cls) {
+    return (*env)->GetStaticMethodID(env, cls, "requestStartVpn", "()V");
+}
+
+static jmethodID getRequestStopMethod(JNIEnv* env, jclass cls) {
+    return (*env)->GetStaticMethodID(env, cls, "requestStopVpn", "()V");
+}
+
+static void callStaticVoidMethod(JNIEnv* env, jclass cls, jmethodID mid) {
+    (*env)->CallStaticVoidMethod(env, cls, mid);
+}
 */
 import "C"
 
 import (
 	"context"
+	"errors"
 	"log"
 	"sync"
 
@@ -61,6 +81,18 @@ var androidRuntime struct {
 	vpn     *androidvpn.Vpn
 	cancel  context.CancelFunc
 	started bool
+	lastErr string
+}
+
+// androidCtl 持有反向 JNI 桥的 MainActivity 全局引用与方法 ID。
+// nativeBridgeReady 在 Java 主线程（onCreate）缓存它们，避免从任意 Go
+// goroutine FindClass 错失应用 classloader。
+var androidCtl struct {
+	mu     sync.Mutex
+	cls    C.jclass // MainActivity 全局引用
+	startM C.jmethodID
+	stopM  C.jmethodID
+	ready  bool
 }
 
 // Java_com_wails_app_WarpVpnService_nativeStartVpn 是 Java 侧
@@ -130,8 +162,22 @@ func Java_com_wails_app_WarpVpnService_nativeStartVpn(env *C.JNIEnv, obj C.jobje
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	go func() { _ = kernel.Start(ctx) }()
-	go func() { _ = vpn.Start(ctx) }()
+	go func() {
+		if err := kernel.Start(ctx); err != nil {
+			log.Printf("⚠ nativeStartVpn：kernel 启动失败：%v", err)
+			androidRuntime.mu.Lock()
+			androidRuntime.lastErr = err.Error()
+			androidRuntime.mu.Unlock()
+		}
+	}()
+	go func() {
+		if err := vpn.Start(ctx); err != nil {
+			log.Printf("⚠ nativeStartVpn：TUN 栈启动失败：%v", err)
+			androidRuntime.mu.Lock()
+			androidRuntime.lastErr = err.Error()
+			androidRuntime.mu.Unlock()
+		}
+	}()
 
 	androidRuntime.mu.Lock()
 	androidRuntime.kernel = kernel
@@ -174,4 +220,82 @@ func Java_com_wails_app_WarpVpnService_nativeStopVpn(env *C.JNIEnv, obj C.jobjec
 	}
 	log.Println("✓ VPN 已停止")
 	return 0
+}
+
+// Java_com_wails_app_MainActivity_nativeBridgeReady 是 MainActivity.onCreate
+// 的反向桥初始化：在 Java 主线程缓存 MainActivity 全局引用与静态方法 ID，
+// 使任意 Go goroutine 都能安全地请求 VPN 启动/停止。
+//
+//export Java_com_wails_app_MainActivity_nativeBridgeReady
+func Java_com_wails_app_MainActivity_nativeBridgeReady(env *C.JNIEnv, cls C.jclass) C.jint {
+	C.storeJvm(env)
+	clsRef := C.newGlobalRef(env, cls)
+	if clsRef == nil {
+		log.Println("⚠ nativeBridgeReady：无法创建 MainActivity 全局引用")
+		return -1
+	}
+	startM := C.getRequestStartMethod(env, clsRef)
+	stopM := C.getRequestStopMethod(env, clsRef)
+	if startM == nil || stopM == nil {
+		log.Println("⚠ nativeBridgeReady：找不到 requestStartVpn/requestStopVpn 静态方法")
+		return -1
+	}
+	androidCtl.mu.Lock()
+	androidCtl.cls = clsRef
+	androidCtl.startM = startM
+	androidCtl.stopM = stopM
+	androidCtl.ready = true
+	androidCtl.mu.Unlock()
+	log.Println("✓ Android 反向 JNI 桥就绪（requestStartVpn/requestStopVpn）")
+	return 0
+}
+
+// androidRequestVpnStart 请求 Java 侧启动 VPN（consent 流 + VpnService）。
+func androidRequestVpnStart() error {
+	androidCtl.mu.Lock()
+	cls, startM, ready := androidCtl.cls, androidCtl.startM, androidCtl.ready
+	androidCtl.mu.Unlock()
+	if !ready || cls == nil || startM == nil {
+		return errors.New("Android VPN 桥未就绪（MainActivity 未初始化）")
+	}
+	needsDetach := 0
+	env := C.getEnv(&needsDetach)
+	if env == nil {
+		return errors.New("Android VPN 桥：无法获取 JNIEnv")
+	}
+	defer C.releaseEnv(needsDetach)
+	C.callStaticVoidMethod(env, cls, startM)
+	return nil
+}
+
+// androidRequestVpnStop 请求 Java 侧停止 VPN。
+func androidRequestVpnStop() error {
+	androidCtl.mu.Lock()
+	cls, stopM, ready := androidCtl.cls, androidCtl.stopM, androidCtl.ready
+	androidCtl.mu.Unlock()
+	if !ready || cls == nil || stopM == nil {
+		return nil // 桥未就绪 = 尚未启动，停止为幂等 no-op
+	}
+	needsDetach := 0
+	env := C.getEnv(&needsDetach)
+	if env == nil {
+		return errors.New("Android VPN 桥：无法获取 JNIEnv")
+	}
+	defer C.releaseEnv(needsDetach)
+	C.callStaticVoidMethod(env, cls, stopM)
+	return nil
+}
+
+// androidVpnRunning 报告 VPN 是否运行中（androidRuntime 状态）。
+func androidVpnRunning() bool {
+	androidRuntime.mu.Lock()
+	defer androidRuntime.mu.Unlock()
+	return androidRuntime.started
+}
+
+// androidVpnLastError 返回最近一次 VPN/内核错误。
+func androidVpnLastError() string {
+	androidRuntime.mu.Lock()
+	defer androidRuntime.mu.Unlock()
+	return androidRuntime.lastErr
 }
