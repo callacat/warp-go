@@ -35,6 +35,12 @@ jobs:
       - name: 编译
         run: go build ./...
 
+      # Android 目标编译检查（CGO=0：androidbridge.go 的 JNI cgo 代码被排除，
+      # 但 T2 桩 / T4 kernel / androidconfig.go 等 android 标签代码必须可编译）。
+      # 真实的 cgo 编译门在 build-android job 的 NDK c-shared 构建。
+      - name: 编译（Android 目标）
+        run: GOOS=android GOARCH=arm64 CGO_ENABLED=0 go build ./...
+
       - name: 运行测试
         run: go test ./...
 
@@ -161,8 +167,127 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  # Android：Wails v3 c-shared（JNI .so）+ gradle APK/AAB。
+  # 与 build-gui 同理，Android 构建失败不阻塞 CLI Release（continue-on-error）。
+  # 与桌面 GUI 不同的是 Android 走 NDK 交叉编译（CGO_ENABLED=1 + NDK clang，
+  # 标签 android），无本地 WebView 依赖。
+  build-android:
+    needs: test
+    continue-on-error: true
+    runs-on: ubuntu-24.04
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      # 与 Taskfile compile:go:shared 的提示一致：sdkmanager 安装的 NDK 版本。
+      # 安装后 ANDROID_NDK_HOME 由 android-actions/setup-android@v3 导出。
+      NDK_VERSION: 26.3.11579264
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+
+      - name: 设置 Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: 安装 SDK 组件（platform-tools / platforms / build-tools / NDK）
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0" "ndk;${{ env.NDK_VERSION }}" >/dev/null
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/${{ env.NDK_VERSION }}" >> "$GITHUB_ENV"
+
+      - name: 设置 Go 1.26
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.x'
+          check-latest: true
+
+      - name: 设置 Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: 安装 wails3 CLI
+        run: |
+          go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-alpha2.119
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      # go mod tidy：gui/go.mod 尚未收录 androidvpn（sing-tun）依赖，
+      # 桌面构建不触发 android 标签，故 tidy 只在 Android 构建前执行。
+      - name: 整理 Go 依赖
+        working-directory: gui
+        run: go mod tidy
+
+      - name: 生成 Android overlay
+        working-directory: gui
+        run: wails3 android overlay:gen -out build/android/overlay.json -config build/config.yml
+
+      # 与 generate:android:bindings 任务一致：CGO 关闭，无需 NDK。
+      # 先于前端构建：前端 api.ts 静态 import bindings。
+      - name: 生成 Wails 绑定（Android 标签）
+        working-directory: gui
+        env:
+          GOOS: android
+          CGO_ENABLED: 0
+        run: wails3 generate bindings -f '-tags android' -clean=true
+
+      - name: 构建前端
+        working-directory: gui/frontend
+        run: |
+          npm ci || npm install
+          npm run build
+
+      - name: 编译 c-shared 库（arm64-v8a）
+        working-directory: gui
+        env:
+          CC: ${{ env.ANDROID_NDK_HOME }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang
+          CGO_ENABLED: '1'
+          GOOS: android
+          GOARCH: arm64
+        run: |
+          mkdir -p build/android/app/src/main/jniLibs/arm64-v8a
+          go build -buildmode=c-shared -overlay build/android/overlay.json \
+            -tags production,android -trimpath -buildvcs=false -ldflags="-w -s" \
+            -o build/android/app/src/main/jniLibs/arm64-v8a/libwails.so
+
+      - name: 编译 c-shared 库（x86_64）
+        working-directory: gui
+        env:
+          CC: ${{ env.ANDROID_NDK_HOME }}/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android21-clang
+          CGO_ENABLED: '1'
+          GOOS: android
+          GOARCH: amd64
+        run: |
+          mkdir -p build/android/app/src/main/jniLibs/x86_64
+          go build -buildmode=c-shared -overlay build/android/overlay.json \
+            -tags production,android -trimpath -buildvcs=false -ldflags="-w -s" \
+            -o build/android/app/src/main/jniLibs/x86_64/libwails.so
+
+      # assembleRelease 用 debug keystore 兜底签名（app/build.gradle：
+      # signingConfig hasKeystore ? signingConfigs.release : signingConfigs.debug），
+      # 无需仓库 secrets；产物可安装。AAB 同理（Play 上传需正式 keystore，此处仅作产物）。
+      - name: 构建 Release APK 与 AAB
+        working-directory: gui/build/android
+        run: |
+          chmod +x ./gradlew
+          ./gradlew assembleRelease bundleRelease --no-daemon
+
+      - name: 上传 Android 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: warp-android
+          path: |
+            gui/build/android/app/build/outputs/apk/release/app-release.apk
+            gui/build/android/app/build/outputs/bundle/release/app-release.aab
+          if-no-files-found: error
+          retention-days: 14
+
   release:
-    needs: [build-binary, build-gui]
+    needs: [build-binary, build-gui, build-android]
     # 仅 tag 推送时创建 Release；workflow_dispatch 手动触发时跳过
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
