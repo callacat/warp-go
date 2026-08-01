@@ -19,7 +19,6 @@ import java.io.IOException;
 import java.net.Inet4Address;
 import java.net.Inet6Address;
 import java.net.InetAddress;
-import java.net.SocketException;
 
 /**
  * WarpVpnService owns the Android TUN device and hands its file descriptor to
@@ -97,7 +96,7 @@ public class WarpVpnService extends VpnService {
         ParcelFileDescriptor pfd;
         try {
             pfd = builder.establish();
-        } catch (IllegalArgumentException | SecurityException | SocketException e) {
+        } catch (IllegalArgumentException | SecurityException e) {
             Log.e(TAG, "establish() failed", e);
             stopSelf();
             return START_NOT_STICKY;
