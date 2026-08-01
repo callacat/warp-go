@@ -9,7 +9,6 @@ import (
 	"io/fs"
 	"log"
 	"net"
-	"net/netip"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -23,7 +22,6 @@ import (
 	"warp/registration"
 	"warp/route"
 	"warp/scanner"
-	"warp/tunnel"
 )
 
 // defaultStateFile holds the registration: keys, token, edge endpoint and the
@@ -109,8 +107,7 @@ type Server struct {
 
 	cfg             *Config
 	reg             *registration.Registration
-	engine          *engineHolder
-	tunnel          *tunnel.MasqueClient
+	kernel          *Kernel
 	server          *proxy.Server
 	listenAddr      string
 	edgeAddrs       []string
@@ -330,22 +327,15 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 	}
 
-	// MASQUE 隧道（重试到连通，Close 前不返回错误）。
-	proxyClient, err := tunnel.NewMasqueClient(edgeAddrs, tlsConfig, regData.Token)
+	// Kernel：MASQUE 隧道 + 分流引擎（NewKernel 内部先建隧道后建引擎，
+	// 与旧时序一致；隧道重试到连通，引擎自动初始化默认 rules.txt 模板、
+	// 加载规则与 GEO 库——缺失时降级 rules-only、启动规则文件热重载）。
+	kernel, err := NewKernel(cfg, regData, edgeAddrs, tlsConfig)
 	if err != nil {
-		return fmt.Errorf("MASQUE 连接失败（意外）：%w", err)
+		return fmt.Errorf("Kernel 初始化失败：%w", err)
 	}
 	log.Println("✓ MASQUE 连接已建立")
-
-	// 分流引擎：自动初始化默认 rules.txt 模板、加载规则与 GEO 库（GEO
-	// 缺失时降级为 rules-only 并打 warning）、启动规则文件热重载。
-	eng := &engineHolder{}
-	engine, err := route.NewEngine(cfg.RulesPath, cfg.GeoDir)
-	if err != nil {
-		return fmt.Errorf("分流引擎初始化失败：%w", err)
-	}
-	eng.e = engine
-	log.Printf("✓ 分流引擎就绪（规则=%s，%d 条；GEO=%s）", cfg.RulesPath, len(engine.Rules()), cfg.GeoDir)
+	log.Printf("✓ 分流引擎就绪（规则=%s，%d 条；GEO=%s）", cfg.RulesPath, len(kernel.engine.get().Rules()), cfg.GeoDir)
 
 	// mixed 代理：同一端口按首字节嗅探 HTTP 与 SOCKS5。Router 命中
 	// "direct" 时本地直连，命中 "proxy"（或未配置规则）时走 WARP 隧道。
@@ -358,17 +348,8 @@ func (s *Server) Start(ctx context.Context) error {
 		Username:   s.opts.Username,
 		Password:   s.opts.Password,
 		AllowUDP:   cfg.AllowUDP,
-		Router: func(host string, ip netip.Addr) (string, bool) {
-			e := eng.get()
-			if e == nil {
-				return "", false // 引擎未就绪时按未匹配处理（本地直连）
-			}
-			action, _, matched := e.Match(host, ip)
-			return action, matched
-		},
-		TunnelDial: func(ctx context.Context, targetAddr string) (net.Conn, error) {
-			return proxyClient.DialTunnel(ctx, targetAddr)
-		},
+		Router:     kernel.Route,
+		TunnelDial: kernel.DialTunnel,
 	})
 
 	// 系统代理（Options.SysProxy 优先于 config.json 的 enable_system_proxy）。
@@ -441,8 +422,7 @@ func (s *Server) Start(ctx context.Context) error {
 	s.mu.Lock()
 	s.cfg = cfg
 	s.reg = regData
-	s.engine = eng
-	s.tunnel = proxyClient
+	s.kernel = kernel
 	s.server = server
 	s.listenAddr = listenAddr
 	s.edgeAddrs = edgeAddrs
@@ -537,14 +517,12 @@ func (s *Server) shutdown() {
 	geoCancel := s.geoCancel
 	server := s.server
 	stopWatch := s.stopWatch
-	eng := s.engine
-	cli := s.tunnel
+	kernel := s.kernel
 	listenAddr := s.listenAddr
 	sysProxyEnabled := s.sysProxyEnabled.Load()
 
 	s.server = nil
-	s.tunnel = nil
-	s.engine = nil
+	s.kernel = nil
 	s.geoCancel = nil
 	s.stopWatch = nil
 	s.st = stateStopped
@@ -566,11 +544,8 @@ func (s *Server) shutdown() {
 	if stopWatch != nil {
 		stopWatch()
 	}
-	if eng != nil {
-		eng.close()
-	}
-	if cli != nil {
-		cli.Close()
+	if kernel != nil {
+		_ = kernel.Close()
 	}
 	log.Println("已退出")
 }
@@ -601,8 +576,8 @@ func (s *Server) Status() Status {
 		c := *s.cfg
 		st.Config = &c
 	}
-	if s.engine != nil {
-		if e := s.engine.get(); e != nil {
+	if s.kernel != nil {
+		if e := s.kernel.engine.get(); e != nil {
 			st.RulesCount = len(e.Rules())
 			st.Stats = e.Stats()
 		}
@@ -622,7 +597,7 @@ func (s *Server) UpdateGeo(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	s.mu.Lock()
-	eng := s.engine
+	k := s.kernel
 	s.mu.Unlock()
 
 	updated, err := route.UpdateGeoData(ctx, cfg.GeoDir, cfg.GeoSiteURL(), cfg.GeoIPURL())
@@ -632,12 +607,12 @@ func (s *Server) UpdateGeo(ctx context.Context) (bool, error) {
 	if !updated {
 		return false, nil
 	}
-	if eng != nil {
+	if k != nil {
 		ne, err := route.NewEngine(cfg.RulesPath, cfg.GeoDir)
 		if err != nil {
 			return true, fmt.Errorf("GEO 数据已更新，但重建引擎失败（重启后生效）：%w", err)
 		}
-		eng.swap(ne)
+		k.engine.swap(ne)
 	}
 	return true, nil
 }
@@ -835,12 +810,12 @@ func (s *Server) AutostartEnabled() bool {
 // 手动触发；与文件热重载同一 applyRules 路径）。
 func (s *Server) ReloadRules() error {
 	s.mu.Lock()
-	eng := s.engine
+	k := s.kernel
 	s.mu.Unlock()
-	if eng == nil {
+	if k == nil {
 		return fmt.Errorf("分流引擎未初始化")
 	}
-	return eng.get().Reload()
+	return k.engine.get().Reload()
 }
 
 // SaveConfig 校验并原子写回 config.json；运行中由 WatchConfig 热重载应用。
@@ -880,10 +855,10 @@ func (s *Server) applyConfigReload(old, nc *Config) {
 			log.Printf("⚠ 规则/GEO 路径变更后重建引擎失败（保持旧引擎）：%v", err)
 		} else {
 			s.mu.Lock()
-			eng := s.engine
+			k := s.kernel
 			s.mu.Unlock()
-			if eng != nil {
-				eng.swap(ne)
+			if k != nil {
+				k.engine.swap(ne)
 			} else {
 				ne.Close()
 			}
@@ -924,41 +899,6 @@ func (s *Server) applyConfigReload(old, nc *Config) {
 	}
 	if len(restart) > 0 {
 		log.Printf("⚠ 配置变更需重启生效：%s", strings.Join(restart, "、"))
-	}
-}
-
-// engineHolder 持有当前分流引擎，支持整体替换（GEO 更新 / 路径变更后热加载
-// 新库与新规则），并保证并发 Match 永远读到一致实例；替换或关闭时旧引擎的
-// 规则文件监听随之停掉。
-type engineHolder struct {
-	mu sync.RWMutex
-	e  *route.Engine
-}
-
-func (h *engineHolder) get() *route.Engine {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	return h.e
-}
-
-func (h *engineHolder) swap(e *route.Engine) {
-	h.mu.Lock()
-	old := h.e
-	h.e = e
-	h.mu.Unlock()
-	if old != nil {
-		old.Close()
-	}
-}
-
-// close 停止引擎并可重复调用（与 swap 并发时不会双重 Close 同一实例）。
-func (h *engineHolder) close() {
-	h.mu.Lock()
-	e := h.e
-	h.e = nil
-	h.mu.Unlock()
-	if e != nil {
-		e.Close()
 	}
 }
 
