@@ -131,7 +131,8 @@ direct,geoip:cn
   "geo_repo": "https://github.com/MetaCubeX/meta-rules-dat",
   "geo_auto_update_days": 7,
   "enable_system_proxy": false,
-  "allow_udp": false
+  "allow_udp": false,
+  "download_proxy": "https://gh-proxy.org/"
 }
 ```
 
@@ -144,6 +145,7 @@ direct,geoip:cn
 | `geo_auto_update_days` | GEO 自动更新间隔（天），0 关闭（GUI 可设） |
 | `enable_system_proxy` | 启动时是否把系统代理指向本地端口 |
 | `allow_udp` | 是否响应 SOCKS5 UDP ASSOCIATE（数据报直连，不经隧道） |
+| `download_proxy` | GitHub 下载加速前缀（GUI 可编辑），仅对 github.com / raw.githubusercontent.com 的下载 URL 生效；置空关闭 |
 
 优先级：**命令行旗标 > config.json > 默认值**。热重载基于 mtime + 内容 hash 检测。
 

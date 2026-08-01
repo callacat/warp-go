@@ -117,6 +117,17 @@ export default function SettingsPage() {
                 onChange={(e) => set("geoBaseURL", e.target.value)}
               />
             </Field>
+            <Field
+              label="下载加速前缀"
+              hint="GitHub 加速（如 https://gh-proxy.org/），置空关闭"
+            >
+              <input
+                className={inputCls}
+                value={cfg.downloadProxy}
+                onChange={(e) => set("downloadProxy", e.target.value)}
+                placeholder="https://gh-proxy.org/"
+              />
+            </Field>
             <Field label="日志目录" hint="logs 目录（相对执行目录，可选）">
               <input
                 className={inputCls}

@@ -44,6 +44,7 @@ export interface AppConfig {
   logDir: string;
   systemProxy: boolean;
   allowUDP: boolean;
+  downloadProxy: string;
 }
 
 export type RuleAction = "proxy" | "direct";
@@ -147,6 +148,7 @@ export function fromConfig(v: unknown): AppConfig {
     logDir: str(o.log_dir ?? o.logDir, "logs"),
     systemProxy: o.enable_system_proxy === true || o.systemProxy === true,
     allowUDP: o.allow_udp === true || o.allowUDP === true,
+    downloadProxy: str(o.download_proxy ?? o.downloadProxy, "https://gh-proxy.org/"),
   };
 }
 

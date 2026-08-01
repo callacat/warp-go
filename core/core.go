@@ -663,7 +663,7 @@ func (s *Server) InitDefaults(ctx context.Context) error {
 	}
 	if _, err := os.Stat(cfg.RulesPath); errors.Is(err, fs.ErrNotExist) {
 		log.Println("首次启动：正在下载默认规则模板...")
-		updated, derr := route.DownloadDefaultRules(ctx, cfg.RulesPath, route.DefaultRulesURL)
+		updated, derr := route.DownloadDefaultRules(ctx, cfg.RulesPath, cfg.AccelerateURL(route.DefaultRulesURL))
 		if derr != nil {
 			log.Printf("⚠ 默认规则下载失败（回退内置模板）：%v", derr)
 			if _, err := route.EnsureRulesFile(cfg.RulesPath); err != nil {

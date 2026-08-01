@@ -41,6 +41,10 @@ type Config struct {
 	EnableSystemProxy bool `json:"enable_system_proxy"`
 	// AllowUDP 控制是否响应 SOCKS5 UDP ASSOCIATE（数据报直连，不经隧道）。
 	AllowUDP bool `json:"allow_udp"`
+	// DownloadProxy 是 GitHub 下载加速前缀（如 https://gh-proxy.org/）。
+	// 仅对 GitHub 官方域名（github.com / raw.githubusercontent.com）的下载
+	// URL 生效；置空关闭加速。GEO 数据库与默认规则下载共用。
+	DownloadProxy string `json:"download_proxy"`
 }
 
 // DefaultConfig 返回内置默认值。LoadConfig 以它为基底，JSON 反序列化只覆盖
@@ -54,17 +58,34 @@ func DefaultConfig() *Config {
 		GeoAutoUpdateDays: 7,
 		EnableSystemProxy: false,
 		AllowUDP:          false,
+		DownloadProxy:     "https://gh-proxy.org/",
 	}
 }
 
-// GeoSiteURL 由 GeoRepo 推导 geosite.dat 的下载地址；仓库为空时回退到内置默认。
-func (c *Config) GeoSiteURL() string {
-	return c.geoURL("geosite.dat")
+// AccelerateURL 对 GitHub 官方域名的下载 URL 应用加速前缀；非 GitHub URL
+// （镜像仓库、本地测试地址）原样返回。DownloadProxy 为空时关闭加速。
+func (c *Config) AccelerateURL(raw string) string {
+	proxy := strings.TrimRight(c.DownloadProxy, "/")
+	if proxy == "" {
+		return raw
+	}
+	if strings.HasPrefix(raw, "https://github.com/") ||
+		strings.HasPrefix(raw, "https://raw.githubusercontent.com/") {
+		return proxy + "/" + raw
+	}
+	return raw
 }
 
-// GeoIPURL 由 GeoRepo 推导 geoip-lite.dat 的下载地址；仓库为空时回退到内置默认。
+// GeoSiteURL 由 GeoRepo 推导 geosite.dat 的下载地址；仓库为空时回退到内置
+// 默认。返回的 URL 已应用 DownloadProxy 加速前缀。
+func (c *Config) GeoSiteURL() string {
+	return c.AccelerateURL(c.geoURL("geosite.dat"))
+}
+
+// GeoIPURL 由 GeoRepo 推导 geoip-lite.dat 的下载地址；仓库为空时回退到内置
+// 默认。返回的 URL 已应用 DownloadProxy 加速前缀。
 func (c *Config) GeoIPURL() string {
-	return c.geoURL("geoip-lite.dat")
+	return c.AccelerateURL(c.geoURL("geoip-lite.dat"))
 }
 
 func (c *Config) geoURL(name string) string {

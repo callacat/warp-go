@@ -145,6 +145,7 @@ function mockConfig(): AppConfig {
     logDir: "logs",
     systemProxy: mockState.sysProxy,
     allowUDP: false,
+    downloadProxy: "https://gh-proxy.org/",
   };
 }
 
@@ -391,6 +392,7 @@ export async function saveConfig(config: AppConfig): Promise<void> {
     geo_auto_update_days: config.autoUpdateDays,
     enable_system_proxy: config.systemProxy,
     allow_udp: config.allowUDP,
+    download_proxy: config.downloadProxy,
   });
 }
 

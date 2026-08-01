@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -148,29 +149,69 @@ func TestWriteConfigPerm(t *testing.T) {
 	}
 }
 
-// TestGeoURLs 验证 GeoRepo 推导下载地址、空仓库回退到 route 内置默认。
+// TestGeoURLs 验证 GeoRepo 推导下载地址、空仓库回退到 route 内置默认，
+// 以及默认下载加速前缀（DownloadProxy）的拼接。
 func TestGeoURLs(t *testing.T) {
 	cfg := DefaultConfig()
-	if got, want := cfg.GeoSiteURL(), "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geosite.dat"; got != want {
+	// 默认 DownloadProxy = https://gh-proxy.org/ → GitHub 官方 URL 前拼接加速。
+	if got, want := cfg.GeoSiteURL(), "https://gh-proxy.org/https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geosite.dat"; got != want {
 		t.Errorf("GeoSiteURL = %q，期望 %q", got, want)
 	}
-	if got, want := cfg.GeoIPURL(), "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip-lite.dat"; got != want {
+	if got, want := cfg.GeoIPURL(), "https://gh-proxy.org/https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip-lite.dat"; got != want {
 		t.Errorf("GeoIPURL = %q，期望 %q", got, want)
 	}
 
 	// 仓库尾斜杠不应产生双斜杠。
 	cfg.GeoRepo = "https://github.com/owner/repo/"
-	if got := cfg.GeoSiteURL(); got != "https://github.com/owner/repo/releases/download/latest/geosite.dat" {
+	if got := cfg.GeoSiteURL(); got != "https://gh-proxy.org/https://github.com/owner/repo/releases/download/latest/geosite.dat" {
 		t.Errorf("带尾斜杠 GeoSiteURL = %q", got)
 	}
 
-	// 空仓库回退内置默认。
+	// 空仓库回退内置默认（同样加速）。
 	cfg.GeoRepo = ""
-	if got := cfg.GeoSiteURL(); got != route.DefaultGeoSiteURL {
-		t.Errorf("空仓库 GeoSiteURL = %q，期望内置 %q", got, route.DefaultGeoSiteURL)
+	if got := cfg.GeoSiteURL(); got != "https://gh-proxy.org/"+route.DefaultGeoSiteURL {
+		t.Errorf("空仓库 GeoSiteURL = %q，期望加速内置 %q", got, "https://gh-proxy.org/"+route.DefaultGeoSiteURL)
 	}
-	if got := cfg.GeoIPURL(); got != route.DefaultGeoIPURL {
-		t.Errorf("空仓库 GeoIPURL = %q，期望内置 %q", got, route.DefaultGeoIPURL)
+	if got := cfg.GeoIPURL(); got != "https://gh-proxy.org/"+route.DefaultGeoIPURL {
+		t.Errorf("空仓库 GeoIPURL = %q，期望加速内置 %q", got, "https://gh-proxy.org/"+route.DefaultGeoIPURL)
+	}
+}
+
+// TestDownloadProxy 验证加速前缀的行为：
+//   - 非 GitHub 域名（镜像仓库、本地测试）不加速
+//   - DownloadProxy 置空可完全关闭加速
+//   - 自定义加速前缀生效
+func TestDownloadProxy(t *testing.T) {
+	cfg := DefaultConfig()
+
+	// 非 github.com 的 GeoRepo（如 gitee 镜像）不加加速前缀。
+	cfg.GeoRepo = "https://gitee.com/mirrors/meta-rules-dat"
+	if got := cfg.GeoSiteURL(); got != "https://gitee.com/mirrors/meta-rules-dat/releases/download/latest/geosite.dat" {
+		t.Errorf("非 GitHub 仓库不应加速，得到 %q", got)
+	}
+
+	// DownloadProxy 置空 → 完全关闭加速，GitHub URL 原样。
+	cfg = DefaultConfig()
+	cfg.DownloadProxy = ""
+	if got := cfg.GeoSiteURL(); got != "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geosite.dat" {
+		t.Errorf("DownloadProxy 空时不应加速，得到 %q", got)
+	}
+
+	// 自定义加速前缀生效（形如 https://gh-proxy.org/ 的任意前缀）。
+	cfg = DefaultConfig()
+	cfg.DownloadProxy = "https://mirror.example.com/"
+	if got := cfg.GeoSiteURL(); !strings.HasPrefix(got, "https://mirror.example.com/https://github.com/") {
+		t.Errorf("自定义加速前缀未生效：%q", got)
+	}
+
+	// AccelerateURL 对 raw.githubusercontent.com 同样生效（规则下载用）。
+	cfg = DefaultConfig()
+	if got := cfg.AccelerateURL(route.DefaultRulesURL); got != "https://gh-proxy.org/"+route.DefaultRulesURL {
+		t.Errorf("AccelerateURL(raw) = %q，期望 %q", got, "https://gh-proxy.org/"+route.DefaultRulesURL)
+	}
+	// 非 GitHub URL 不加速。
+	if got := cfg.AccelerateURL("https://example.com/x.txt"); got != "https://example.com/x.txt" {
+		t.Errorf("AccelerateURL(非GitHub) = %q，应原样", got)
 	}
 }
 
