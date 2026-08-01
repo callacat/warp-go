@@ -672,7 +672,6 @@ func (s *Server) ScanEdgesFamily(ctx context.Context, ipMode string) ([]string, 
 	// 默认扫注册信息给出的地址族；ipMode 参数（"4"/"6"）优先，
 	// 显式 EdgeIP 为 host:port 时用它的地址族段。
 	v6 := false
-	fallback := []string{}
 	edgeSpec := ipMode
 	if edgeSpec == "" {
 		edgeSpec = s.opts.EdgeIP
@@ -680,15 +679,12 @@ func (s *Server) ScanEdgesFamily(ctx context.Context, ipMode string) ([]string, 
 	if edgeSpec == "" {
 		edgeSpec = "4"
 	}
-	switch edgeSpec {
-	case "4":
-		fallback = append(fallback, net.JoinHostPort(regData.EndpointV4, "443"))
-	case "6":
+	fallback, err := scanFallback(regData, edgeSpec)
+	if err != nil {
+		return nil, err
+	}
+	if edgeSpec == "6" {
 		v6 = true
-		fallback = append(fallback, net.JoinHostPort(regData.EndpointV6, "443"))
-	default:
-		// 显式端点：不扫描（与 CLI 一致），返回它本身。
-		return []string{edgeSpec}, nil
 	}
 
 	// 复用 runEndpointScan：默认段 + 注册端口，RTT 升序 top-N。
@@ -928,6 +924,27 @@ func resolveEdge(spec string) ([]string, error) {
 		out = append(out, net.JoinHostPort(a.IP.String(), port))
 	}
 	return out, nil
+}
+
+// scanFallback 构建扫描失败时的注册端点兜底候选；对应地址族缺失时返回
+// 清晰错误（修复前 net.JoinHostPort("","443") 会生成 ":443" 垃圾候选，
+// 前端表现为"扫描无可用候选"且无解释）。
+func scanFallback(reg *registration.Registration, edgeSpec string) ([]string, error) {
+	switch edgeSpec {
+	case "4":
+		if reg.EndpointV4 != "" {
+			return []string{net.JoinHostPort(reg.EndpointV4, "443")}, nil
+		}
+		return nil, errors.New("注册信息缺少 IPv4 边缘地址，请重新注册后重试")
+	case "6":
+		if reg.EndpointV6 != "" {
+			return []string{net.JoinHostPort(reg.EndpointV6, "443")}, nil
+		}
+		return nil, errors.New("注册信息缺少 IPv6 边缘地址，请重新注册后重试")
+	default:
+		// 显式端点：不扫描（与 CLI 一致），返回它本身。
+		return []string{edgeSpec}, nil
+	}
 }
 
 // runEndpointScan 在启动前对 WARP 边缘全段做扫描优选，返回替换后的 edgeAddrs。
