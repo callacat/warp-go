@@ -257,62 +257,15 @@ func (s *Server) Start(ctx context.Context) error {
 
 	// 边缘候选：-ip 取 "4"/"6" 时按注册信息展开端口列表；显式 host:port
 	// 走系统解析器（此时隧道尚未建立，in-tunnel DoH 不可用）。
-	var edgeAddrs []string
-	if strings.TrimSpace(cfg.EdgeAddr) != "" && s.opts.EdgeIP == "" {
-		// 扫描应用的边缘地址优先（config.json edge_addr）。
-		if edgeAddrs, err = resolveEdge(cfg.EdgeAddr); err != nil {
-			return fmt.Errorf("edge_addr %q 无法解析：%w", cfg.EdgeAddr, err)
-		}
-		log.Printf("WARP 代理启动中（边缘=已应用扫描结果 %s，mixed=%s）",
-			cfg.EdgeAddr, s.opts.ListenAddr)
-	} else {
-		switch s.opts.EdgeIP {
-		case "4", "6":
-			endpointHost, other := regData.EndpointV4, "6"
-			if s.opts.EdgeIP == "6" {
-				endpointHost, other = regData.EndpointV6, "4"
-			}
-			if endpointHost == "" {
-				return fmt.Errorf("注册信息中没有 IPv%s 边缘地址。"+
-					"可改用 -ip %s，或依次执行 -del 与 -reg 重新注册", s.opts.EdgeIP, other)
-			}
-			ports := regData.EndpointPorts
-			if len(ports) == 0 {
-				ports = []int{443}
-			}
-			for _, p := range ports {
-				edgeAddrs = append(edgeAddrs, net.JoinHostPort(endpointHost, strconv.Itoa(p)))
-			}
-			log.Printf("WARP 代理启动中（边缘=IPv%s %s 端口=%v，mixed=%s）",
-				s.opts.EdgeIP, endpointHost, ports, s.opts.ListenAddr)
-		default:
-			if edgeAddrs, err = resolveEdge(s.opts.EdgeIP); err != nil {
-				return fmt.Errorf("-ip %q 既不是 4 或 6，也不是可用地址：%w", s.opts.EdgeIP, err)
-			}
-			log.Printf("WARP 代理启动中（边缘=%s → %v，mixed=%s）", s.opts.EdgeIP, edgeAddrs, s.opts.ListenAddr)
-		}
+	edgeAddrs, err := ResolveEdgeAddrs(cfg, s.opts.EdgeIP, s.opts.ListenAddr, regData)
+	if err != nil {
+		return err
 	}
 
 	// 公钥固定 + TLS 配置（与官方 warp-svc 对齐，见逆向文档）。
-	verifyEdge, err := regData.PeerPublicKeyVerifier()
+	tlsConfig, err := BuildTLSConfig(regData)
 	if err != nil {
-		return fmt.Errorf("边缘公钥固定初始化失败：%w", err)
-	}
-	tlsConfig := &tls.Config{
-		ServerName:            "consumer-masque-proxy.cloudflareclient.com",
-		NextProtos:            []string{"h3"},
-		InsecureSkipVerify:    true,
-		MinVersion:            tls.VersionTLS13,
-		Certificates:          []tls.Certificate{regData.ClientCert},
-		VerifyPeerCertificate: verifyEdge,
-		// warp-svc 只提供 NIST 曲线，Go 默认先发 X25519 会引来一次额外的
-		// HelloRetryRequest 往返。
-		CurvePreferences: []tls.CurveID{tls.CurveP256, tls.CurveP384, tls.CurveP521},
-	}
-	if verifyEdge != nil {
-		log.Println("✓ 边缘公钥固定已启用")
-	} else {
-		log.Println("⚠ 注册信息中没有边缘公钥，公钥固定已禁用（请重新执行 -reg）")
+		return err
 	}
 
 	// 可选：启动前边缘延迟扫描（-ip 为显式端点时忽略，显式端点优先）。
