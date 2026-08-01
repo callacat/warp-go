@@ -1,0 +1,243 @@
+package com.wails.app;
+
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
+import android.content.Intent;
+import android.content.pm.ServiceInfo;
+import android.net.VpnService;
+import android.os.Build;
+import android.os.IBinder;
+import android.os.ParcelFileDescriptor;
+import android.util.Log;
+
+import androidx.annotation.Nullable;
+import androidx.core.app.NotificationCompat;
+
+import java.io.IOException;
+import java.net.Inet4Address;
+import java.net.Inet6Address;
+import java.net.InetAddress;
+import java.net.SocketException;
+
+/**
+ * WarpVpnService owns the Android TUN device and hands its file descriptor to
+ * the Go native library ({@code gui/androidbridge.go}) via JNI:
+ *
+ * <pre>
+ *   Java_com_wails_app_WarpVpnService_nativeStartVpn(int fd) -> 0 ok / -1 fail
+ *   Java_com_wails_app_WarpVpnService_nativeStopVpn()        -> idempotent
+ * </pre>
+ *
+ * The Go side runs the MASQUE/QUIC tunnel over the TUN fd and routes the
+ * resulting packets back through the Android network stack. The service is
+ * started from MainActivity (after the VpnService consent flow) with the IPs
+ * WARP assigned to the device passed as extras
+ * ({@link #EXTRA_ASSIGNED_IPV4} / {@link #EXTRA_ASSIGNED_IPV6}); the extras
+ * may be absent, in which case the tunnel is still established with catch-all
+ * routes only.
+ */
+public class WarpVpnService extends VpnService {
+    private static final String TAG = "warp-go";
+
+    /** Extra: IPv4 address assigned to this device, string, may be absent. */
+    public static final String EXTRA_ASSIGNED_IPV4 = "assigned_ipv4";
+
+    /** Extra: IPv6 address assigned to this device, string, may be absent. */
+    public static final String EXTRA_ASSIGNED_IPV6 = "assigned_ipv6";
+
+    // Reuse the channel WailsForegroundService already creates:
+    // createNotificationChannel is idempotent, so no duplicate channel is
+    // produced when both services run in the same process.
+    private static final String CHANNEL_ID = "wails_foreground";
+
+    // Distinct from WailsForegroundService.NOTIFICATION_ID (0x57A1) so the
+    // two foreground notifications can coexist.
+    private static final int NOTIFICATION_ID = 0x57A2; // "WAR"
+
+    // Native methods implemented in Go (gui/androidbridge.go). JNI resolves
+    // them as Java_com_wails_app_WarpVpnService_nativeStartVpn /
+    // Java_com_wails_app_WarpVpnService_nativeStopVpn.
+    private static native int nativeStartVpn(int fd);
+    private static native int nativeStopVpn();
+
+    static {
+        // Same .so as WailsBridge: it carries both Wails' exports and ours.
+        // Loading twice in one process is harmless, and this guarantees the
+        // library is present even if the service starts standalone.
+        System.loadLibrary("wails");
+    }
+
+    private volatile ParcelFileDescriptor vpnPfd;
+    private volatile boolean nativeRunning = false;
+
+    @Override
+    public int onStartCommand(Intent intent, int flags, int startId) {
+        if (vpnPfd != null) {
+            // Already running (START_STICKY may redeliver); nothing to do.
+            return START_STICKY;
+        }
+
+        startForeground();
+
+        String ipv4 = intent != null ? intent.getStringExtra(EXTRA_ASSIGNED_IPV4) : null;
+        String ipv6 = intent != null ? intent.getStringExtra(EXTRA_ASSIGNED_IPV6) : null;
+
+        VpnService.Builder builder = new VpnService.Builder();
+        builder.setSession("warp-go");
+        builder.setMtu(1500);
+        builder.setBlocking(true);
+        builder.addRoute("0.0.0.0", 0);
+        builder.addRoute("::", 0);
+
+        addAddress(builder, ipv4);
+        addAddress(builder, ipv6);
+
+        ParcelFileDescriptor pfd;
+        try {
+            pfd = builder.establish();
+        } catch (IllegalArgumentException | SecurityException | SocketException e) {
+            Log.e(TAG, "establish() failed", e);
+            stopSelf();
+            return START_NOT_STICKY;
+        }
+        if (pfd == null) {
+            // The user revoked the VPN permission (or a concurrent prepare()
+            // consumed it) between prepare and establish.
+            Log.e(TAG, "establish() returned null - VPN permission not granted");
+            stopSelf();
+            return START_NOT_STICKY;
+        }
+
+        int fd = pfd.getFd();
+        Log.i(TAG, "TUN established, handing fd=" + fd + " to nativeStartVpn");
+        int result;
+        try {
+            result = nativeStartVpn(fd);
+        } catch (Throwable t) {
+            Log.e(TAG, "nativeStartVpn threw", t);
+            result = -1;
+        }
+        if (result != 0) {
+            Log.e(TAG, "nativeStartVpn returned " + result + ", tearing down");
+            closePfd(pfd);
+            stopSelf();
+            return START_NOT_STICKY;
+        }
+
+        vpnPfd = pfd;
+        nativeRunning = true;
+        Log.i(TAG, "VPN running (fd=" + fd + ")");
+        return START_STICKY;
+    }
+
+    /**
+     * Add an assigned address (if present and parseable) to the builder.
+     * IPv4 addresses are added with prefix 32, IPv6 with prefix 128. The
+     * unspecified/any-local addresses are skipped - they are not assignable.
+     */
+    private void addAddress(VpnService.Builder builder, String ip) {
+        if (ip == null || ip.isEmpty()) {
+            return;
+        }
+        try {
+            InetAddress addr = InetAddress.getByName(ip);
+            if (addr.isAnyLocalAddress()) {
+                Log.w(TAG, "skipping any-local address: " + ip);
+                return;
+            }
+            boolean isV6 = addr instanceof Inet6Address; // Inet4Address/Inet6Address are siblings
+            builder.addAddress(addr, isV6 ? 128 : 32);
+            Log.i(TAG, "assigned " + (isV6 ? "IPv6" : "IPv4") + " " + ip);
+        } catch (Exception e) {
+            Log.w(TAG, "invalid assigned IP: " + ip, e);
+        }
+    }
+
+    @Override
+    public void onDestroy() {
+        Log.i(TAG, "onDestroy - stopping VPN");
+        stopNativeAndClose();
+        super.onDestroy();
+    }
+
+    @Override
+    public void onRevoke() {
+        // The user revoked the VPN permission; the system stops the service
+        // after this, so stop the tunnel and release the TUN now.
+        Log.i(TAG, "onRevoke - VPN permission revoked");
+        stopNativeAndClose();
+        stopSelf();
+    }
+
+    /**
+     * Idempotent teardown: stops the Go tunnel (no-op if never started) and
+     * closes the TUN fd. Safe to run more than once - onDestroy may follow
+     * onRevoke, and both must not double-close the ParcelFileDescriptor.
+     */
+    private void stopNativeAndClose() {
+        if (nativeRunning) {
+            try {
+                nativeStopVpn();
+            } catch (Throwable t) {
+                Log.e(TAG, "nativeStopVpn threw", t);
+            } finally {
+                nativeRunning = false;
+            }
+        }
+        ParcelFileDescriptor pfd = vpnPfd;
+        vpnPfd = null;
+        if (pfd != null) {
+            closePfd(pfd);
+        }
+    }
+
+    private void closePfd(ParcelFileDescriptor pfd) {
+        try {
+            pfd.close();
+        } catch (IOException e) {
+            Log.w(TAG, "close failed", e);
+        }
+    }
+
+    private void startForeground() {
+        Notification n = buildNotification();
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(NOTIFICATION_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
+        } else {
+            startForeground(NOTIFICATION_ID, n);
+        }
+    }
+
+    private Notification buildNotification() {
+        NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            NotificationChannel ch = new NotificationChannel(
+                    CHANNEL_ID, "Background work", NotificationManager.IMPORTANCE_LOW);
+            nm.createNotificationChannel(ch);
+        }
+
+        PendingIntent contentIntent = null;
+        Intent launch = getPackageManager().getLaunchIntentForPackage(getPackageName());
+        if (launch != null) {
+            int piFlags = Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
+                    ? PendingIntent.FLAG_IMMUTABLE : 0;
+            contentIntent = PendingIntent.getActivity(this, 0, launch, piFlags);
+        }
+
+        return new NotificationCompat.Builder(this, CHANNEL_ID)
+                .setSmallIcon(android.R.drawable.ic_popup_sync)
+                .setContentTitle("warp-go")
+                .setContentText("Secure tunnel active")
+                .setOngoing(true)
+                .setContentIntent(contentIntent)
+                .build();
+    }
+
+    @Nullable
+    @Override
+    public IBinder onBind(Intent intent) {
+        return null;
+    }
+}
