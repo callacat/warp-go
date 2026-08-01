@@ -184,6 +184,13 @@ jobs:
       - name: 检出代码
         uses: actions/checkout@v4
 
+      # wails3 CLI 在 linux 上编译需要 gtk4/webkitgtk pkg-config（与 build-gui
+      # linux job 相同）；Android job 的 c-shared 构建本身不需要，但 CLI 安装需要。
+      - name: 安装 Linux GUI 构建依赖（wails3 CLI 编译需要）
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-4-dev libwebkitgtk-6.0-dev
+
       - name: 设置 JDK 21
         uses: actions/setup-java@v4
         with:
