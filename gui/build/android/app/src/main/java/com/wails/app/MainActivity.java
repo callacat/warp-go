@@ -34,6 +34,7 @@ import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.content.ContextCompat;
 import androidx.core.content.FileProvider;
+import androidx.core.view.WindowCompat;
 import androidx.webkit.WebViewAssetLoader;
 
 import org.json.JSONObject;
@@ -74,6 +75,9 @@ public class MainActivity extends AppCompatActivity {
     private static final int PHOTO_CAPTURE_REQUEST = 7002;
     private static final int VIDEO_CAPTURE_REQUEST = 7003;
     private static final int CAMERA_PERMISSION_REQUEST = 7010;
+    // POST_NOTIFICATIONS runtime request (Android 13+): without it the VPN
+    // foreground notification stays hidden from the notification shade.
+    private static final int NOTIFICATION_PERMISSION_REQUEST = 7011;
     private File pendingCaptureFile;
     private boolean pendingCaptureIsVideo;
 
@@ -89,6 +93,10 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        // Android 15+ (API 35) 默认强制 edge-to-edge，WebView 内容会绘制到
+        // 状态栏下方覆盖通知栏。显式声明 content 适配系统栏（所有 API 级别
+        // 一致）：WebView 从状态栏下方开始布局，不再占用顶部通知栏。
+        WindowCompat.setDecorFitsSystemWindows(getWindow(), true);
         setContentView(R.layout.activity_main);
 
         // Initialize the native Go library
@@ -103,6 +111,16 @@ public class MainActivity extends AppCompatActivity {
         if (!getSharedPreferences("warp_prefs", MODE_PRIVATE).getBoolean("vpn_consent_prompted", false)) {
             getSharedPreferences("warp_prefs", MODE_PRIVATE).edit().putBoolean("vpn_consent_prompted", true).apply();
             connectVpn();
+        }
+
+        // Android 13+: request notification permission so the VPN foreground
+        // notification is visible in the shade (not just the Task Manager).
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+                && checkSelfPermission("android.permission.POST_NOTIFICATIONS")
+                   != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(
+                    new String[]{"android.permission.POST_NOTIFICATIONS"},
+                    NOTIFICATION_PERMISSION_REQUEST);
         }
 
         // Load the application
@@ -294,6 +312,11 @@ public class MainActivity extends AppCompatActivity {
             } else {
                 bridge.emitEvent("common:capture", "{\"error\":\"camera permission denied\"}");
             }
+            return;
+        }
+        if (requestCode == NOTIFICATION_PERMISSION_REQUEST) {
+            // VPN notification visibility is best-effort; denial is not fatal
+            // (the service still runs, shown in the Task Manager).
             return;
         }
         if (bridge != null) {
