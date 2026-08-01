@@ -41,33 +41,8 @@ func (stdLogger) Error(args ...any) { log.Print(args...) }
 func (stdLogger) Fatal(args ...any) { log.Fatal(args...) }
 func (stdLogger) Panic(args ...any) { log.Panic(args...) }
 
-// RouteFunc 判定 (host, ip) 的转发行为，返回 "proxy" / "direct"。
-// 与 core 的 route.Engine.Match 语义一致；nil 时全部走 proxy（隧道）。
-type RouteFunc func(host string, ip netip.Addr) (action string, matched bool)
-
-// TunnelDial 建立到目标的 WARP 隧道字节流（core.MasqueClient.DialTunnel）。
-type TunnelDial func(ctx context.Context, targetAddr string) (net.Conn, error)
-
-// DirectDial 建立到目标的本地直连（nil 时用 net.Dialer）。
-type DirectDial func(ctx context.Context, targetAddr string) (net.Conn, error)
-
-// Config 配置 TUN 服务。
-type Config struct {
-	// FileDescriptor 是 Java VpnService.Builder.establish() 的 TUN fd。
-	FileDescriptor int
-	// MTU 默认 1500；由 Java 侧传入（与 VpnService.Builder.setMtu 一致）。
-	MTU uint32
-	// Inet4Address / Inet6Address 是分配给 TUN 网卡的隧道内地址
-	// （来自注册信息 assigned_ipv4/assigned_ipv6）。
-	Inet4Address []netip.Prefix
-	Inet6Address []netip.Prefix
-	// DNSServers 是 TUN 内 DNS 服务器（默认 1.1.1.1）。
-	DNSServers []netip.Addr
-
-	Route      RouteFunc
-	TunnelDial TunnelDial
-	DirectDial DirectDial
-}
+// RouteFunc / TunnelDial / DirectDial / Config 与 decideAction 定义在
+// decision.go（无 Android 依赖，宿主与 Android 均编译，可单测）。
 
 // Vpn 是 Android TUN 服务的运行实例。
 type Vpn struct {
@@ -172,13 +147,26 @@ func (v *Vpn) NewConnectionEx(ctx context.Context, conn net.Conn, source, destin
 	go func() {
 		var upstream net.Conn
 		var err error
-		if v.shouldProxy(destination.AddrString()) {
+
+		// 路由判定委托 decision.go 的 decideAction：
+		// proxy → 隧道；direct → 本地直连；reject → 拒连（绝不建连）。
+		// 未命中 → 隐式 direct 兜底（与桌面一致）。
+		action, _ := decideAction(v.cfg.Route, destination.AddrString(), netip.Addr{})
+		switch action {
+		case "reject":
+			log.Printf("[tun] 规则 reject：拒绝 %s → %s", source.AddrString(), destination.String())
+			_ = conn.Close()
+			if onClose != nil {
+				onClose(errors.New("rejected by route"))
+			}
+			return
+		case "proxy":
 			if v.cfg.TunnelDial == nil {
 				err = errors.New("tunnel not configured")
 			} else {
 				upstream, err = v.cfg.TunnelDial(ctx, destination.String())
 			}
-		} else {
+		default: // direct
 			if v.cfg.DirectDial != nil {
 				upstream, err = v.cfg.DirectDial(ctx, destination.String())
 			} else {
@@ -216,18 +204,6 @@ func (v *Vpn) NewPacketConnectionEx(ctx context.Context, conn N.PacketConn, sour
 	// UDP：当前直接经本机网络栈转发（与桌面端"UDP 不走隧道"一致）。
 	log.Printf("[tun] UDP %s → %s（直连）", source.AddrString(), destination.String())
 	go v.relayUDP(ctx, conn, destination, onClose)
-}
-
-// shouldProxy 用 RouteFunc 判定是否走隧道；无 RouteFunc 时全走隧道。
-func (v *Vpn) shouldProxy(host string) bool {
-	if v.cfg.Route == nil {
-		return true
-	}
-	action, matched := v.cfg.Route(host, netip.Addr{})
-	if !matched {
-		return false // 未命中 → direct（与桌面一致）
-	}
-	return action == "proxy"
 }
 
 // relayUDP 把 TUN 上收到的 UDP 数据报经本机栈转发到目标。
