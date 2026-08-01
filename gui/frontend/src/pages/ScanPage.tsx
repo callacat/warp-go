@@ -14,6 +14,7 @@ export default function ScanPage() {
   const [applied, setApplied] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [noticeKind, setNoticeKind] = useState<"info" | "warn">("info");
 
   const onScan = async (family: "v4" | "v6") => {
     setBusy(family);
@@ -26,7 +27,12 @@ export default function ScanPage() {
         const rest = rs.filter((r) => r.family !== family);
         return [...rest, { family, edges }];
       });
-      if (edges.length === 0) setNotice("未扫描到可用端点");
+      if (edges.length === 0) {
+        setNoticeKind("warn");
+        setNotice(
+          "未扫描到可用端点：可能是当前网络限制了 QUIC，或注册信息缺少边缘地址。请回到状态页确认已注册，或重新注册后重试。"
+        );
+      }
     } catch (e) {
       setError(String(e));
     } finally {
@@ -40,6 +46,7 @@ export default function ScanPage() {
     try {
       await applyEdge(addr);
       setApplied(addr);
+      setNoticeKind("info");
       setNotice(`已应用边缘 ${addr}（下次启动生效）`);
     } catch (e) {
       setError(String(e));
@@ -64,7 +71,13 @@ export default function ScanPage() {
             <Radar className="h-4 w-4" /> 扫描 IPv6 边缘
           </Button>
           {notice && (
-            <span className="self-center text-sm text-emerald-600 dark:text-emerald-400">
+            <span
+              className={`self-center rounded-lg px-4 py-3 text-sm ${
+                noticeKind === "warn"
+                  ? "bg-amber-50 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
+                  : "text-emerald-600 dark:text-emerald-400"
+              }`}
+            >
               {notice}
             </span>
           )}
