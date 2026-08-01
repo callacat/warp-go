@@ -1,18 +1,8 @@
 import { useState } from "react";
-import {
-  Activity,
-  FileText,
-  Globe,
-  Monitor,
-  Moon,
-  PanelLeftClose,
-  PanelRightClose,
-  Radar,
-  Settings,
-  Sun,
-  ScrollText,
-} from "lucide-react";
+import { Monitor, Moon, PanelLeftClose, PanelRightClose, Sun } from "lucide-react";
 import { useTheme } from "./lib/useTheme";
+import { NAV, TITLES } from "./lib/nav";
+import type { PageKey } from "./lib/nav";
 import type { ThemeMode } from "./lib/theme";
 import StatusPage from "./pages/StatusPage";
 import RulesPage from "./pages/RulesPage";
@@ -20,26 +10,6 @@ import GeoPage from "./pages/GeoPage";
 import ScanPage from "./pages/ScanPage";
 import SettingsPage from "./pages/SettingsPage";
 import LogsPage from "./pages/LogsPage";
-
-type PageKey = "status" | "rules" | "geo" | "scan" | "settings" | "logs";
-
-const NAV: { key: PageKey; label: string; icon: typeof Activity }[] = [
-  { key: "status", label: "状态", icon: Activity },
-  { key: "rules", label: "规则", icon: FileText },
-  { key: "geo", label: "GEO", icon: Globe },
-  { key: "scan", label: "扫描", icon: Radar },
-  { key: "settings", label: "设置", icon: Settings },
-  { key: "logs", label: "日志", icon: ScrollText },
-];
-
-const TITLES: Record<PageKey, string> = {
-  status: "状态",
-  rules: "路由规则",
-  geo: "GEO 数据库",
-  scan: "边缘扫描",
-  settings: "设置",
-  logs: "运行日志",
-};
 
 /** Sidebar toggle cycles light → dark → system → light. */
 const NEXT_MODE: Record<ThemeMode, ThemeMode> = {
@@ -70,7 +40,7 @@ export default function App() {
     <div className="flex h-full bg-slate-100 text-slate-900 dark:bg-slate-950 dark:text-slate-100">
       {/* Sidebar */}
       <aside
-        className={`flex shrink-0 flex-col border-r border-slate-200 bg-white transition-all dark:border-slate-800 dark:bg-slate-900 ${
+        className={`hidden shrink-0 flex-col border-r border-slate-200 bg-white transition-all md:flex dark:border-slate-800 dark:bg-slate-900 ${
           collapsed ? "w-16" : "w-16 md:w-52"
         }`}
       >
@@ -140,7 +110,7 @@ export default function App() {
             MASQUE over QUIC · SOCKS5 代理
           </span>
         </header>
-        <div className="flex-1 overflow-y-auto p-6">
+        <div className="flex-1 overflow-y-auto p-6 pb-16 md:pb-6">
           <div className="mx-auto max-w-5xl">
             {page === "status" && <StatusPage />}
             {page === "rules" && <RulesPage />}
@@ -151,6 +121,34 @@ export default function App() {
           </div>
         </div>
       </main>
+
+      {/* Bottom nav (mobile, <md) */}
+      <nav className="fixed inset-x-0 bottom-0 z-40 flex items-stretch border-t border-slate-200 bg-white/95 pb-[env(safe-area-inset-bottom)] backdrop-blur dark:border-slate-800 dark:bg-slate-900/95 md:hidden">
+        {NAV.map(({ key, label, icon: Icon }) => (
+          <button
+            key={key}
+            onClick={() => setPage(key)}
+            title={label}
+            className={`flex flex-1 flex-col items-center justify-center gap-0.5 py-2 text-[10px] transition-colors ${
+              page === key
+                ? "text-orange-600 dark:text-orange-400"
+                : "text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200"
+            }`}
+          >
+            <Icon className="h-5 w-5" />
+            <span>{label}</span>
+          </button>
+        ))}
+        {/* theme toggle cell */}
+        <button
+          onClick={() => setMode(NEXT_MODE[mode])}
+          title={`主题：${MODE_LABEL[mode]}，点击切换`}
+          className="flex flex-1 flex-col items-center justify-center gap-0.5 py-2 text-[10px] text-slate-500 dark:text-slate-400"
+        >
+          <ThemeIcon className="h-5 w-5" />
+          <span>{MODE_LABEL[mode]}</span>
+        </button>
+      </nav>
     </div>
   );
 }
