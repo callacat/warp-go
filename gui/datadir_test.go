@@ -56,3 +56,11 @@ func TestDataDirAnchorsConfigPath(t *testing.T) {
 		t.Errorf("config.json 未写入 DataDir=%s：%v", dir, err)
 	}
 }
+
+// TestCachedDataDirEmptyOnDesktop 验证桌面端 cachedDataDir() 恒返回空串：
+// GetStatus 的沙箱兜底检查在桌面端不触发（桌面无沙箱概念，零回归）。
+func TestCachedDataDirEmptyOnDesktop(t *testing.T) {
+	if got := cachedDataDir(); got != "" {
+		t.Errorf("桌面端 cachedDataDir() = %q，期望空串", got)
+	}
+}

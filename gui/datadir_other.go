@@ -9,3 +9,8 @@ package main
 func dataDir() string {
 	return ""
 }
+
+// cachedDataDir 桌面端恒返回空串（无沙箱概念）。
+func cachedDataDir() string {
+	return ""
+}

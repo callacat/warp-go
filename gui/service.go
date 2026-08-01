@@ -109,9 +109,36 @@ func (s *Service) InitDefaults() {
 func (s *Service) GetStatus() core.Status {
 	srv, err := s.serverInstance()
 	if err != nil {
+		if runtime.GOOS == "android" {
+			// Android 上 serverInstance 可能因沙箱桥接瞬时失败（Wails bridge
+			// 抖动，StoragePath 返回 ""）。此时用缓存的沙箱目录兜底检查
+			// reg.json，避免已注册状态被误报为"尚未注册"（页面切换触发）。
+			st := core.Status{State: "stopped", LastError: err.Error()}
+			if dir := cachedDataDir(); dir != "" {
+				if _, serr := os.Stat(filepath.Join(dir, "reg.json")); serr == nil {
+					st.Registered = true
+				}
+			}
+			if androidVpnRunning() {
+				st.State = "running"
+			}
+			return st
+		}
 		return core.Status{State: "stopped", LastError: err.Error()}
 	}
 	st := srv.Status()
+	if runtime.GOOS == "android" {
+		// Android 上真实隧道状态在 androidRuntime（VpnService 驱动），
+		// SOCKS server 永不运行；用 VPN 状态覆盖生命周期字段。
+		if androidVpnRunning() {
+			st.State = "running"
+		} else if st.State != "running" {
+			st.State = "stopped"
+		}
+		if e := androidVpnLastError(); e != "" && st.LastError == "" {
+			st.LastError = e
+		}
+	}
 	s.mu.Lock()
 	if s.startErr != nil && st.LastError == "" {
 		st.LastError = s.startErr.Error()
@@ -122,9 +149,17 @@ func (s *Service) GetStatus() core.Status {
 
 // Start 启动代理（幂等：已在运行则无操作）。
 //
-// core.Server.Start 是阻塞设计（CLI 主流程用）；GUI 里必须在 goroutine 中
-// 异步启动，否则会卡死 Wails 服务线程导致整个界面冻结。
+// Android 上直接桥接 VpnService（反向 JNI，见 androidbridge.go）；桌面走
+// core.Server.Start（阻塞设计，GUI 里必须在 goroutine 中异步启动）。
 func (s *Service) Start() error {
+	if runtime.GOOS == "android" {
+		// 幂等：VPN 已在运行则无操作。
+		if androidVpnRunning() {
+			return nil
+		}
+		return androidRequestVpnStart()
+	}
+
 	s.mu.Lock()
 	if s.started {
 		s.mu.Unlock()
@@ -158,6 +193,10 @@ func (s *Service) Start() error {
 
 // Stop 停止代理（幂等）。
 func (s *Service) Stop() error {
+	if runtime.GOOS == "android" {
+		return androidRequestVpnStop()
+	}
+
 	s.mu.Lock()
 	srv := s.server
 	started := s.started
@@ -172,6 +211,9 @@ func (s *Service) Stop() error {
 
 // IsRunning 报告代理是否运行中。
 func (s *Service) IsRunning() bool {
+	if runtime.GOOS == "android" {
+		return androidVpnRunning()
+	}
 	srv, err := s.serverInstance()
 	if err != nil {
 		return false
