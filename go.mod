@@ -4,6 +4,8 @@ go 1.26.5
 
 require (
 	github.com/quic-go/quic-go v0.61.0
+	github.com/sagernet/sing v0.8.0
+	github.com/sagernet/sing-tun v0.8.11
 	github.com/v2fly/v2ray-core/v5 v5.52.0
 	golang.org/x/crypto v0.54.0
 	golang.org/x/net v0.56.0
@@ -26,8 +28,6 @@ require (
 	github.com/sagernet/gvisor v0.0.0-20250811.0-sing-box-mod.1 // indirect
 	github.com/sagernet/netlink v0.0.0-20240612041022-b9a21c07ac6a // indirect
 	github.com/sagernet/nftables v0.3.0-mod.2 // indirect
-	github.com/sagernet/sing v0.8.0 // indirect
-	github.com/sagernet/sing-tun v0.8.11 // indirect
 	github.com/vishvananda/netns v0.0.4 // indirect
 	go4.org/netipx v0.0.0-20231129151722-fdeea329fbba // indirect
 	golang.org/x/exp v0.0.0-20240613232115-7f521ea00fb8 // indirect
