@@ -151,7 +151,13 @@ func (v *Vpn) NewConnectionEx(ctx context.Context, conn net.Conn, source, destin
 		// 路由判定委托 decision.go 的 decideAction：
 		// proxy → 隧道；direct → 本地直连；reject → 拒连（绝不建连）。
 		// 未命中 → 隐式 direct 兜底（与桌面一致）。
-		action, _ := decideAction(v.cfg.Route, destination.AddrString(), netip.Addr{})
+		//
+		// 传入真实目标 IP（T8）：sing 的 Socksaddr 对 IP 字面量目标在 Addr
+		// 字段保存真实 netip.Addr（Fqdn 为空），对域名目标 Addr 恒为零值
+		// （ParseSocksaddrHostPort 只填 Fqdn），二者互斥——因此无条件传
+		// destination.Addr 即可：IP 字面量目标让 geoip: 规则可命中，域名
+		// 目标退化为零值、仅 host/geosite 规则生效（与修复前行为一致）。
+		action, _ := decideAction(v.cfg.Route, destination.AddrString(), destination.Addr)
 		upstream, err, rejected := resolveAction(action, ctx, destination.String(), v.cfg.TunnelDial, v.cfg.DirectDial)
 		if rejected {
 			log.Printf("[tun] 规则 reject：拒绝 %s → %s", source.AddrString(), destination.String())

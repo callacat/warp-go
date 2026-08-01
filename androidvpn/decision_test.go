@@ -109,6 +109,65 @@ func TestDecideAction(t *testing.T) {
 	}
 }
 
+// TestDecideActionForwardsIP 锁定 NewConnectionEx 的调用契约（T8）：调用方
+// 把真实目标 IP 传给 decideAction 后，必须原样透传给 RouteFunc——geoip:
+// 规则正是靠这个 ip 参数命中 IP 字面量目标。域名目标（ip 为 netip.Addr{}
+// 零值）同样原样透传，host/geosite 规则照常生效。
+func TestDecideActionForwardsIP(t *testing.T) {
+	// Given: 记录 route 收到的 host 与 ip 的录制型 RouteFunc。
+	var gotHost string
+	var gotIP netip.Addr
+	record := func(host string, ip netip.Addr) (string, bool) {
+		gotHost, gotIP = host, ip
+		return "direct", true
+	}
+
+	tests := []struct {
+		name     string
+		host     string
+		ip       netip.Addr
+		wantHost string
+		wantIP   netip.Addr
+	}{
+		{
+			// IP 字面量目标：sing Socksaddr.Addr 为真实 IP，route 必须收到
+			// 同一个 IP（geoip:private / geoip:cn 等规则因此可命中）。
+			name:     "IP literal destination → route receives real IP",
+			host:     "1.2.3.4",
+			ip:       netip.MustParseAddr("1.2.3.4"),
+			wantHost: "1.2.3.4",
+			wantIP:   netip.MustParseAddr("1.2.3.4"),
+		},
+		{
+			// 域名目标：sing Socksaddr.Addr 恒为零值，route 收到零值
+			// （退化与修复前一致，仅 host/geosite 规则生效）。
+			name:     "domain destination → route receives zero Addr",
+			host:     "example.com",
+			ip:       netip.Addr{},
+			wantHost: "example.com",
+			wantIP:   netip.Addr{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// When: 调用方调用序列（NewConnectionEx 的实际判定调用）。
+			action, matched := decideAction(record, tt.host, tt.ip)
+
+			// Then: action 命中透传，route 原样收到 host 与 ip。
+			if action != "direct" || !matched {
+				t.Errorf("decideAction() = (%q, %v)，期望 (\"direct\", true)", action, matched)
+			}
+			if gotHost != tt.wantHost {
+				t.Errorf("route received host %q, want %q", gotHost, tt.wantHost)
+			}
+			if gotIP != tt.wantIP {
+				t.Errorf("route received ip %v, want %v", gotIP, tt.wantIP)
+			}
+		})
+	}
+}
+
 // TestDecideActionRejectNeverDialed 锁定 NewConnectionEx 的调用契约：路由命中
 // reject 时 decideAction 返回 ("reject", true)，随后 resolveAction 必须返回
 // (nil, error, true) —— 隧道拨号与本地直连函数都绝不能被调用（与桌面端
