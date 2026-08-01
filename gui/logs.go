@@ -4,10 +4,22 @@ package main
 // 的输出同时写入这里；GetLogs 供前端轮询最近 N 条。
 
 import (
+	"log"
 	"strings"
 	"sync"
 	"time"
 )
+
+// init 在包加载时（c-shared 库加载、任何 JNI 导出可被调用之前）就把标准库
+// log 路由到环形缓冲。Android 上 main() 经 Wails 在 goroutine 中异步执行
+// （application_android.go go mainFunc()），WarpVpnService 的 nativeStartVpn
+// 可能先于 newService()→initLogging() 触发——若等 newService 才设
+// log.SetOutput，早期内核日志只会进 logcat 而不到 GUI 日志页（用户看到
+// "无日志"）。包 init 保证时序：日志路由先于一切 JNI 调用就绪。
+func init() {
+	log.SetOutput(logWriter{})
+	log.SetFlags(0)
+}
 
 // LogEntry 是日志页展示的单条记录。
 type LogEntry struct {
