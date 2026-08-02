@@ -10,8 +10,10 @@ import (
 	"embed"
 	"log"
 	"runtime"
+	"time"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
+	"github.com/wailsapp/wails/v3/pkg/events"
 	"github.com/wailsapp/wails/v3/pkg/icons"
 )
 
@@ -45,6 +47,18 @@ func main() {
 		URL:       "/",
 	})
 
+	// 关闭按钮 → 最小化到托盘（而非退出程序）。WindowClosing 事件在窗口
+	// 真正销毁前触发，hook 里 Cancel() + Hide() 即可拦截关闭、保留进程与
+	// 托盘。真正退出走托盘菜单的 app.Quit()（不触发 WindowClosing）。
+	window.RegisterHook(events.Common.WindowClosing, func(e *application.WindowEvent) {
+		if runtime.GOOS == "darwin" {
+			// macOS 约定：关闭窗口即退出（与系统行为一致），不藏托盘。
+			return
+		}
+		e.Cancel()
+		window.Hide()
+	})
+
 	// 系统托盘：状态菜单 + 快速开关 + 退出。
 	tray := app.SystemTray.New()
 	if runtime.GOOS == "darwin" {
@@ -72,10 +86,15 @@ func main() {
 	menu.AddSeparator()
 	menu.Add("退出").OnClick(func(*application.Context) {
 		_ = svc.Stop()
-		// 先显式关闭窗口再退出：托盘 AttachWindow 后仅 app.Quit() 在部分
-		// 平台（尤其 Linux GTK）不会销毁已附加的主窗口，导致"退出无效，
-		// 主窗口还在"。
-		window.Close()
+		// Stop 是异步信号（Server.Stop 只置位 + 关 stopCh），shutdown 在
+		// Start 的 select 醒来后执行（含清除系统代理）。短暂等待保证
+		// 退出前系统代理已同步关闭，避免 app.Quit 抢先终止进程留下残留。
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) && svc.IsRunning() {
+			time.Sleep(50 * time.Millisecond)
+		}
+		// 直接 Quit（销毁 impl 结束进程）。不要调 window.Close()——
+		// 它触发 WindowClosing 会被上面 hook 拦截成"隐藏到托盘"。
 		app.Quit()
 	})
 	tray.SetMenu(menu)

@@ -8,7 +8,7 @@ import {
   start,
   stop,
 } from "../lib/api";
-import { fromStatus, fromConfig, AppStatus, AppConfig } from "../lib/types";
+import { fromConfig, AppConfig, AppStatus } from "../lib/types";
 import { Card, Button, Toggle, StatusPill } from "../components/ui";
 
 function usePoll<T>(fn: () => Promise<T>, ms: number, deps: unknown[] = []) {
@@ -41,18 +41,37 @@ function usePoll<T>(fn: () => Promise<T>, ms: number, deps: unknown[] = []) {
 export default function StatusPage() {
   const [refreshKey, setRefreshKey] = useState(0);
   const { data: statusRaw } = usePoll(getStatus, 2000, [refreshKey]);
-  const status: AppStatus = fromStatus(statusRaw);
   const { data: configRaw } = usePoll(getConfigOnce, 5000);
   const config: AppConfig = fromConfig(configRaw);
+  // getStatus 已返回 fromStatus 归一化后的 AppStatus（camelCase），不要再
+  // 包一层 fromStatus——二次归一化会把 initDone/isAndroid 读成 undefined
+  // （它们只认 init_done/is_android 的 snake_case），导致"初始化完成但按钮
+  // 灰"和"Android 系统代理卡片不隐藏"（v0.5.7 真机反馈）。首次加载前为
+  // null，用兜底值避免渲染期空指针。
+  const status: AppStatus = statusRaw ?? {
+    running: false,
+    listening: "127.0.0.1:40000",
+    registered: false,
+    isAndroid: false,
+    initDone: false,
+    sysProxyOn: false,
+    counters: { proxy: 0, direct: 0, miss: 0, rejected: 0 },
+    registration: null,
+  };
 
   const [busy, setBusy] = useState<string | null>(null);
+  // proxyEnabled 跟随轮询的 status.sysProxyOn（后端每 2s 读真实系统状态）：
+  // 外部软件关闭系统代理时开关自动变关（v0.5.7 反馈"其它软件关闭时 GUI
+  // 应跟随"）。初始化时读一次兜底（首帧 bridge 未就绪时 status 为 null）。
   const [proxyEnabled, setProxyEnabled] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
   useEffect(() => {
-    getSystemProxyOnce().then(setProxyEnabled);
-  }, []);
+    if (statusRaw) setProxyEnabled(statusRaw.sysProxyOn);
+    else getSystemProxyOnce().then(setProxyEnabled);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [statusRaw]);
 
   const toggleRunning = async () => {
     setBusy(status.running ? "stop" : "start");

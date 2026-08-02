@@ -508,12 +508,16 @@ func (s *Server) shutdown() {
 	if server != nil {
 		_ = server.Close()
 	}
-	if sysProxyEnabled {
+	if listenAddr != "" && sysProxyCurrentlyOn(listenAddr) {
+		// 系统代理当前指向本程序才清除：避免误关其它软件设置的代理
+		// （外部代理工具可能已把系统代理改指向自己，我们退出不该动它）。
 		if err := setSystemProxy(listenAddr, false); err != nil {
 			log.Printf("⚠ 清除系统代理失败：%v", err)
 		} else {
 			log.Println("✓ 系统代理已清除")
 		}
+	} else if sysProxyEnabled {
+		log.Println("系统代理未指向本程序，跳过清除（保留外部代理设置）")
 	}
 	if stopWatch != nil {
 		stopWatch()
@@ -536,12 +540,21 @@ func (s *Server) Status() Status {
 		stateRunning:  "running",
 		stateStopping: "stopping",
 	}
+	// SysProxyOn 读真实系统状态而非内存标志：外部软件（其它 VPN/代理
+	// 工具）关闭系统代理时，本程序设置的内存标志仍为 true，但系统已是
+	// off——GUI 开关会误显示"开"。监听地址未知时回退内存标志。
+	// 只有内存标志为 true（本程序设置过代理）才去读系统状态，避免无谓
+	// 的外部命令调用（gsettings/networksetup 每 2s 轮询有开销）。
+	sysProxyOn := s.sysProxyEnabled.Load()
+	if sysProxyOn && s.listenAddr != "" {
+		sysProxyOn = sysProxyCurrentlyOn(s.listenAddr)
+	}
 	st := Status{
 		State:      names[s.st],
 		ListenAddr: s.listenAddr,
 		EdgeAddrs:  s.edgeAddrs,
 		GeoReady:   s.cfg != nil && geoDataPresent(s.cfg.GeoDir),
-		SysProxyOn: s.sysProxyEnabled.Load(),
+		SysProxyOn: sysProxyOn,
 		Registered: registrationFileExists(s.opts.StateFile),
 		IsAndroid:  runtime.GOOS == "android",
 		StartTime:  s.startTime,
@@ -599,6 +612,21 @@ func (s *Server) UpdateGeo(ctx context.Context) (bool, error) {
 		k.engine.swap(ne)
 	}
 	return true, nil
+}
+
+// InitDone 报告基础文件是否已就绪（rules.txt 存在 + GEO 数据齐全）。
+// 供 GUI 判断"初始化是否完成"：文件已就绪即为完成，不依赖本次会话是否
+// 执行过 InitDefaults——否则每次重开 GUI（内存标志丢失）都会重新初始化，
+// 前端一直显示"正在初始化"无法启动（v0.5.7 反馈）。
+func (s *Server) InitDone() bool {
+	cfg, err := s.ensureConfig()
+	if err != nil {
+		return false
+	}
+	if _, err := os.Stat(cfg.RulesPath); err != nil {
+		return false
+	}
+	return geoDataPresent(cfg.GeoDir)
 }
 
 // InitDefaults 初始化不依赖注册的基础文件（幂等）：

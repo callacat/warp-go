@@ -96,6 +96,15 @@ func (s *Service) InitDefaults() {
 		log.Printf("⚠ 初始化失败：%v", err)
 		return
 	}
+	// 文件已就绪（上一版本的文件都在）时直接标记完成，不再重复下载——
+	// 否则每次重开 GUI 都会重新初始化并反复打"初始化完成"，前端又因
+	// InitDone 卡住无法启动（v0.5.7 反馈"重开又初始化、无限循环"）。
+	if srv.InitDone() {
+		s.mu.Lock()
+		s.defaultsInit = true
+		s.mu.Unlock()
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	if err := srv.InitDefaults(ctx); err != nil {
@@ -133,7 +142,8 @@ func (s *Service) GetStatus() core.Status {
 		return core.Status{State: "stopped", InitDone: initDone, LastError: err.Error()}
 	}
 	st := srv.Status()
-	st.InitDone = initDone
+	// InitDone = 本会话已初始化 || 运行时文件已就绪（重启后不再卡初始化）。
+	st.InitDone = initDone || srv.InitDone()
 	if runtime.GOOS == "android" {
 		// Android 上真实隧道状态在 androidRuntime（VpnService 驱动），
 		// SOCKS server 永不运行；用 VPN 状态覆盖生命周期字段。

@@ -127,6 +127,7 @@ function mockStatus(): AppStatus {
     registered: true,
     isAndroid: false,
     initDone: true,
+    sysProxyOn: mockState.sysProxy,
     registration: {
       id: "demo-reg-id",
       assignedIPv4: "172.16.0.2",

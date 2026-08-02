@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { RefreshCw, Database, Clock } from "lucide-react";
 import { getGeo, updateGeo, isDemoMode } from "../lib/api";
-import { fromGeo, GeoInfo } from "../lib/types";
+import { GeoInfo } from "../lib/types";
 import { Button, Card, StatusPill } from "../components/ui";
 
 export default function GeoPage() {
@@ -18,7 +18,9 @@ export default function GeoPage() {
 
   const refresh = async () => {
     try {
-      setGeo(fromGeo(await getGeo()));
+      // getGeo 已返回 fromGeo 归一化后的 GeoInfo，不要再包一层 fromGeo
+      // （双重归一化，v0.5.7 与 StatusPage 同源 bug）。
+      setGeo(await getGeo());
       setError(null);
     } catch (e) {
       setError(String(e));

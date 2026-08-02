@@ -8,3 +8,8 @@ package sysproxy
 func set(host, port string, enabled bool) error {
 	return nil
 }
+
+// enabled 在 Android 上恒 false：VPN 接管全部流量，无系统代理概念。
+func enabled(host, port string) (bool, error) {
+	return false, nil
+}

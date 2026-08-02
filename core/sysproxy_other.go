@@ -9,3 +9,10 @@ import "warp/sysproxy"
 func setSystemProxy(addr string, enabled bool) error {
 	return sysproxy.Set(addr, enabled)
 }
+
+// sysProxyCurrentlyOn 报告系统代理当前是否指向 addr。读取失败返回 false
+// （与 sysproxy.Enabled 的语义一致：读不到就当作未开启，避免 GUI 误显示）。
+func sysProxyCurrentlyOn(addr string) bool {
+	on, err := sysproxy.Enabled(addr)
+	return err == nil && on
+}

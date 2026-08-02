@@ -3,7 +3,45 @@
 本项目所有值得记录的变更。格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased] — v0.5.6 计划中
+## [Unreleased] — v0.5.8 计划中
+
+### 修复
+
+- **初始化完成但状态页仍显示"正在初始化"无法启动**（win/Android 真机，
+  v0.5.7 引入）：StatusPage 对 `getStatus` 返回值二次 `fromStatus`——getStatus
+  已返回 camelCase 归一化对象，二次归一化只认 snake_case 的 `init_done`/
+  `is_android` → 恒 false。修复：页面直接用 getStatus 返回值（null 兜底），
+  GeoPage/SettingsPage 同源修复（getGeo/getConfig 也去掉二次归一化）。
+- **重开 GUI 又初始化、无限循环**（win/Android 真机）：`Service.defaultsInit`
+  是内存标志，重启丢失；文件已就绪仍重新下载并反复打"初始化完成"。新增
+  `core.Server.InitDone()`（基于 rules.txt + GEO 文件就绪），InitDefaults 与
+  GetStatus 据此判断——文件在则直接完成，不重复下载。
+- **Android 默认白天模式**（真机）：React mount 时 Wails bridge 未就绪，
+  `System.IsDarkMode()` 返回 false → 首帧误用浅色，且 `android:ThemeChanged`
+  事件早于 mount 发出被漏掉。`useTheme` mount 后延迟 300ms 重查一次。
+- **Android 状态页仍显示系统代理**（真机）：双重归一化导致 `isAndroid` 恒
+  false，卡片未隐藏。随第一项修复（页面直接用 getStatus 返回值）。
+- **Windows 启动后也卡"正在初始化"**（win 真机，v0.5.7 引入）：同第一项
+  （双重归一化）——上一版本文件都在，但 initDone 恒 false 禁用了启动按钮。
+  已修复；同时 `SetSystemProxy` 自动启动内核的旁路不受影响。
+- **其它软件关闭系统代理时 GUI 不跟随**（win 真机）：后端 `Status.SysProxyOn`
+  原读内存标志，外部关闭后仍显示"开"。新增 `sysproxy.Enabled(addr)`（三平台
+  读真实系统状态：Windows 注册表 / darwin networksetup / linux gsettings）+
+  `core.sysProxyCurrentlyOn`；`Status()` 只在本程序设置过代理时读真实状态
+  （避免每 2s 轮询外部命令开销）；前端 `proxyEnabled` 跟随轮询的 `sysProxyOn`
+  自动变关。
+
+### 变更
+
+- **停止内核同步关闭系统代理**：`Server.shutdown()` 改为"系统代理当前指向
+  本程序才清除"——外部软件已改走别的代理时不动它（避免误关其它软件设置）。
+- **托盘退出同步关闭系统代理**：托盘"退出"在 `app.Quit()` 前等待内核
+  shutdown（最多 2s，含清系统代理），避免进程终止残留代理。
+- **关闭按钮最小化到托盘**（win/linux）：`RegisterHook(WindowClosing)` +
+  `event.Cancel()` + `window.Hide()`，点关闭藏托盘而非退出；macOS 保持关闭
+  即退出（系统惯例）。托盘"退出"改直接 `app.Quit()`（避免被 hook 拦）。
+
+## [v0.5.7] - 2026-08-02
 
 ### 修复
 
@@ -18,13 +56,12 @@
   account/密钥类型/边缘端口字段。补全 9 字段；`types.test.ts` 断言全映射。
 - **Android 无法开启系统代理**（真机）：`SetSystemProxy` 无 android 分支，走
   桌面逻辑等 SOCKS server running（Android 永不运行）→ 静默超时。现 Android
-  明确报错"VPN 接管全部流量，无需系统代理"，前端隐藏系统代理卡片
-  （`System.IsAndroid()`）。
+  明确报错"VPN 接管全部流量，无需系统代理"，前端隐藏系统代理卡片。
 - **Android 注销失败**（真机）：`DeleteRegistration` API 注销失败只 log 警告
   不返回错误 → 用户不知 API 侧注册仍在。现 API 失败返回错误（本地仍删除）；
   GUI `Deregister` 用 `cachedDataDir()` 兜底，不依赖可能失败的 serverInstance。
 
-### 新增（本轮）
+### 新增
 
 - **注册信息完整显示**（win/Android 真机）：`core.Status()` 在 `s.reg` 为 nil
   （GUI 打开、尚未启动）时从磁盘补读 reg.json 视图并缓存，注册卡片在未启动
@@ -32,8 +69,7 @@
   缓存、Deregister 后清空缓存。新增 `status_registration_test.go` 两个回归测试。
 - **初始化完成门控**：`Service.InitDefaults` 完成后日志打出"✓ 初始化完成…
   现在可以启动内核"，`Status.InitDone` 置 true；前端启动按钮在初始化完成前
-  禁用并提示"正在初始化（默认规则 / GEO 数据库下载中）"——默认配置、默认
-  规则、GEO 数据库就绪前不再允许点启动。
+  禁用并提示"正在初始化（默认规则 / GEO 数据库下载中）"。
 - **Android 启动/停止/注销全程日志**（真机"点击启动无反映也无日志"）：Java
   侧 `WarpVpnService` 的 establish 失败、授权失效、内核启动失败、onDestroy/
   onRevoke 全部经 `nativeLogMessage` 转发进 GUI 日志页；`Service.Start/Stop`

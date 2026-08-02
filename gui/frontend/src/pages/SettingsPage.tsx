@@ -9,7 +9,7 @@ import {
   saveConfig,
   setAutostart,
 } from "../lib/api";
-import { fromConfig, AppConfig } from "../lib/types";
+import { AppConfig } from "../lib/types";
 import { useTheme } from "../lib/useTheme";
 import type { ThemeMode } from "../lib/theme";
 import { Button, Card, Field, Toggle, inputCls } from "../components/ui";
@@ -64,7 +64,9 @@ export default function SettingsPage() {
 
   const load = async () => {
     try {
-      setCfg(fromConfig(await getConfig()));
+      // getConfig 已返回 fromConfig 归一化后的 AppConfig，不要再包一层
+      // fromConfig（双重归一化，v0.5.7 与 StatusPage 同源 bug）。
+      setCfg(await getConfig());
       setError(null);
     } catch (e) {
       setError(String(e));

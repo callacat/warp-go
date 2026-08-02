@@ -94,8 +94,13 @@ export function useTheme(): {
   const [systemDark, setSystemDark] = useState<boolean>(() => matchMediaDark());
 
   // Resolve the real OS preference through the runtime bridge on mount.
+  // Android: React mount 时 bridge 可能未就绪，System.IsDarkMode() 返回
+  // false → 首帧误用浅色（用户反馈"默认白天模式"）。延迟重查一次，
+  // 等 bridge 就绪后拿真实值。
   useEffect(() => {
     querySystemDark(setSystemDark);
+    const t = setTimeout(() => querySystemDark(setSystemDark), 300);
+    return () => clearTimeout(t);
   }, []);
 
   // Apply the resolved theme class and persist the choice.

@@ -27,3 +27,39 @@ func Set(addr string, enabled bool) error {
 	}
 	return set(host, port, enabled)
 }
+
+// Enabled 报告系统代理当前是否启用且指向 addr（本程序设置的地址）。
+// 用于检测"外部软件关闭了系统代理"——GUI 轮询它来同步开关状态。
+// addr 形如 "host:port"，与 Set 一致。
+func Enabled(addr string) (bool, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false, fmt.Errorf("系统代理地址 %q 非法：%w", addr, err)
+	}
+	if strings.TrimSpace(host) == "" {
+		return false, fmt.Errorf("系统代理地址 %q 缺少主机名", addr)
+	}
+	if strings.TrimSpace(port) == "" {
+		return false, fmt.Errorf("系统代理地址 %q 缺少端口", addr)
+	}
+	return enabled(host, port)
+}
+
+// containsTarget 检查代理配置字符串中是否含 "host:port" 段（按 ; 与 ,
+// 分隔的协议段，忽略 "proto=" 前缀）。命中任一即 true。Windows 的
+// ProxyServer（"http=host:port;https=host:port;socks=host:port"）用它判断
+// 系统代理是否仍指向目标地址。
+func containsTarget(proxyConfig, ep string) bool {
+	for _, seg := range strings.FieldsFunc(proxyConfig, func(r rune) bool {
+		return r == ';' || r == ','
+	}) {
+		seg = strings.TrimSpace(seg)
+		if i := strings.IndexByte(seg, '='); i >= 0 {
+			seg = seg[i+1:]
+		}
+		if seg == ep {
+			return true
+		}
+	}
+	return false
+}

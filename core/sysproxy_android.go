@@ -11,3 +11,8 @@ func setSystemProxy(addr string, enabled bool) error {
 	log.Printf("Android：系统代理由 VPN 接管，跳过系统代理设置（addr=%s enabled=%v）", addr, enabled)
 	return nil
 }
+
+// sysProxyCurrentlyOn 在 Android 上恒 false：VPN 接管全部流量，无系统代理。
+func sysProxyCurrentlyOn(addr string) bool {
+	return false
+}

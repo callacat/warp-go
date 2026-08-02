@@ -56,6 +56,12 @@ describe("fromStatus", () => {
     expect(fromStatus({ init_done: false }).initDone).toBe(false);
     expect(fromStatus({}).initDone).toBe(false);
   });
+
+  it("maps sys_proxy_on flag", () => {
+    expect(fromStatus({ sys_proxy_on: true }).sysProxyOn).toBe(true);
+    expect(fromStatus({ sys_proxy_on: false }).sysProxyOn).toBe(false);
+    expect(fromStatus({}).sysProxyOn).toBe(false);
+  });
 });
 
 describe("fromGeo", () => {

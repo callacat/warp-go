@@ -71,3 +71,59 @@ func setService(svc, kind, host, port string, enabled bool) error {
 	}
 	return nil
 }
+
+// enabled 报告系统代理是否启用且指向目标地址：任一网络服务的 web 或 secure
+// 代理状态为 Enabled 且 host/port 匹配即视为"本程序设置的代理仍在"。
+// 外部软件关闭代理（proxystate off 或改地址）时返回 false。
+func enabled(host, port string) (bool, error) {
+	services, err := networkServices()
+	if err != nil {
+		return false, err
+	}
+	for _, svc := range services {
+		for _, kind := range []string{"web", "secure"} {
+			on, h, p, err := getService(svc, kind)
+			if err != nil {
+				return false, err
+			}
+			if on && h == host && p == port {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+// getService 读取单个网络服务上一类代理的状态（web/secure）：
+// networksetup -getwebproxy 输出形如：
+//
+//	Enabled: Yes
+//	Server: 127.0.0.1
+//	Port: 40000
+func getService(svc, kind string) (on bool, host, port string, err error) {
+	out, err := exec.Command("networksetup", "-get"+kind+"proxy", svc).Output()
+	if err != nil {
+		return false, "", "", fmt.Errorf("networksetup -get%[1]sproxy %[2]q 失败：%[3]v", kind, svc, err)
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		key, val, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		val = strings.TrimSpace(val)
+		switch key {
+		case "Enabled":
+			on = strings.EqualFold(val, "Yes")
+		case "Server":
+			host = val
+		case "Port":
+			port = val
+		}
+	}
+	return on, host, port, nil
+}

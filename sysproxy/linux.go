@@ -5,6 +5,7 @@ package sysproxy
 import (
 	"fmt"
 	"os/exec"
+	"strings"
 )
 
 // set 通过 gsettings（GNOME）配置系统代理：启用时先写各协议的 host/port 再
@@ -39,4 +40,45 @@ func gsettings(schema, key, value string) error {
 		return fmt.Errorf("gsettings set %s %s %q 失败：%w", schema, key, value, err)
 	}
 	return nil
+}
+
+// enabled 读 gsettings org.gnome.system.proxy：mode=manual 且 http/https 的
+// host/port 与目标一致时返回 true。外部软件把 mode 改回 none（或改地址）
+// 时返回 false，GUI 据此同步开关。
+func enabled(host, port string) (bool, error) {
+	if _, err := exec.LookPath("gsettings"); err != nil {
+		return false, fmt.Errorf("Linux 桌面代理需 gsettings（GNOME）；未找到 gsettings")
+	}
+	mode, err := gsettingsGet("org.gnome.system.proxy", "mode")
+	if err != nil {
+		return false, err
+	}
+	if mode != "manual" {
+		return false, nil
+	}
+	// http 与 https 的 host/port 都指向目标地址才算（混合代理两者同设）。
+	for _, proto := range []string{"http", "https"} {
+		base := "org.gnome.system.proxy." + proto
+		h, err := gsettingsGet(base, "host")
+		if err != nil {
+			return false, err
+		}
+		p, err := gsettingsGet(base, "port")
+		if err != nil {
+			return false, err
+		}
+		if h != host || p != port {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// gsettingsGet 读取 gsettings 键值（字符串形式）。
+func gsettingsGet(schema, key string) (string, error) {
+	out, err := exec.Command("gsettings", "get", schema, key).Output()
+	if err != nil {
+		return "", fmt.Errorf("gsettings get %s %s 失败：%w", schema, key, err)
+	}
+	return strings.Trim(strings.TrimSpace(string(out)), "'\""), nil
 }

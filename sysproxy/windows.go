@@ -5,6 +5,7 @@ package sysproxy
 import (
 	"fmt"
 	"net"
+	"strings"
 
 	"golang.org/x/sys/windows/registry"
 )
@@ -40,4 +41,33 @@ func set(host, port string, enabled bool) error {
 		return fmt.Errorf("写入 ProxyEnable=1 失败：%w", err)
 	}
 	return nil
+}
+
+// enabled 读 HKCU Internet Settings 的 ProxyEnable/ProxyServer，报告系统
+// 代理是否启用且指向 (host, port)。其它软件（VPN/代理工具）关闭系统代理
+// 时 ProxyEnable=0 → 返回 false，GUI 据此同步开关。
+func enabled(host, port string) (bool, error) {
+	k, err := registry.OpenKey(registry.CURRENT_USER,
+		`Software\Microsoft\Windows\CurrentVersion\Internet Settings`,
+		registry.QUERY_VALUE)
+	if err != nil {
+		return false, fmt.Errorf("打开 Internet Settings 注册表键失败：%w", err)
+	}
+	defer k.Close()
+
+	enable, _, err := k.GetIntegerValue("ProxyEnable")
+	if err != nil {
+		return false, fmt.Errorf("读取 ProxyEnable 失败：%w", err)
+	}
+	if enable == 0 {
+		return false, nil
+	}
+	proxyServer, _, err := k.GetStringValue("ProxyServer")
+	if err != nil {
+		return false, fmt.Errorf("读取 ProxyServer 失败：%w", err)
+	}
+	// ProxyServer 形如 "http=host:port;https=host:port;socks=host:port"。
+	// 任一协议段指向目标地址即视为"本程序设置的代理仍在"。
+	ep := net.JoinHostPort(host, port)
+	return containsTarget(proxyServer, ep), nil
 }
