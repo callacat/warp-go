@@ -28,6 +28,11 @@ func (s *Server) Registered() (bool, error) {
 func (s *Server) Register() (existing bool, id string, err error) {
 	switch existing, err := registration.Load(s.opts.StateFile); {
 	case err == nil:
+		// 同步缓存，避免 GUI 轮询 Status 时才补读（Register 后立即刷新注册
+		// 卡片需要 s.reg 已就绪）。
+		s.mu.Lock()
+		s.reg = existing
+		s.mu.Unlock()
 		return true, existing.ID, nil
 	case !errors.Is(err, fs.ErrNotExist):
 		return false, "", err
@@ -40,13 +45,22 @@ func (s *Server) Register() (existing bool, id string, err error) {
 	if err := regData.Save(s.opts.StateFile); err != nil {
 		return false, "", err
 	}
+	s.mu.Lock()
+	s.reg = regData
+	s.mu.Unlock()
 	return false, regData.ID, nil
 }
 
 // Deregister 向 API 注销并删除本地注册信息。仅需 id 与 token，不依赖私钥
 // 材料（registration.DeleteRegistration 保证）。
 func (s *Server) Deregister() error {
-	return registration.DeleteRegistration(s.opts.StateFile)
+	err := registration.DeleteRegistration(s.opts.StateFile)
+	// 注销后清空缓存（无论 API 成功与否，本地文件已删除；下次 Status 会
+	// 重新从磁盘判断 Registered）。
+	s.mu.Lock()
+	s.reg = nil
+	s.mu.Unlock()
+	return err
 }
 
 // RegistrationInfo 返回注册信息的无密钥材料视图；reg.json 缺失时返回

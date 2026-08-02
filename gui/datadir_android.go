@@ -44,8 +44,18 @@ func dataDir() string {
 // cachedDataDir 返回已缓存的沙箱目录（可能为空：尚未成功获取过）。
 // GetStatus 在 serverInstance 失败时用它兜底检查沙箱内 reg.json，
 // 避免桥接抖动把已注册状态误报为未注册。
+//
+// 为空时尝试现取（dataDir 会缓存成功值），避免 serverInstance 已就绪但
+// 缓存未建立时（如首次打开即点注销）Deregister 兜底拿不到目录。
 func cachedDataDir() string {
 	dataDirCache.Lock()
 	defer dataDirCache.Unlock()
+	if dataDirCache.v != "" {
+		return dataDirCache.v
+	}
+	d := application.Android.StoragePath()
+	if d != "" {
+		dataDirCache.v = d
+	}
 	return dataDirCache.v
 }

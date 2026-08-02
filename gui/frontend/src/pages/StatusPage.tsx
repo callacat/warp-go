@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import { KeyRound, Play, Square, Globe, Trash2 } from "lucide-react";
-import { System } from "@wailsio/runtime";
 import {
   deregister,
   getStatus,
@@ -11,9 +10,6 @@ import {
 } from "../lib/api";
 import { fromStatus, fromConfig, AppStatus, AppConfig } from "../lib/types";
 import { Card, Button, Toggle, StatusPill } from "../components/ui";
-
-// Android 由 VpnService TUN 接管全部流量，无系统代理概念；桌面端才显示。
-const isAndroid = System.IsAndroid();
 
 function usePoll<T>(fn: () => Promise<T>, ms: number, deps: unknown[] = []) {
   const [data, setData] = useState<T | null>(null);
@@ -157,7 +153,7 @@ export default function StatusPage() {
           </div>
           <div>
             <p className="text-xs text-slate-500 dark:text-slate-400">规则文件</p>
-            <p className="mt-1 font-mono text-sm text-slate-900 dark:text-slate-100">
+            <p className="mt-1 break-all font-mono text-sm text-slate-900 dark:text-slate-100">
               {config.rulesPath}
             </p>
           </div>
@@ -172,6 +168,7 @@ export default function StatusPage() {
             onClick={toggleRunning}
             variant={status.running ? "danger" : "primary"}
             loading={busy !== null}
+            disabled={!status.running && !status.initDone}
           >
             {status.running ? (
               <>
@@ -183,6 +180,11 @@ export default function StatusPage() {
               </>
             )}
           </Button>
+          {!status.initDone && !status.running && (
+            <span className="text-xs text-amber-600 dark:text-amber-400">
+              正在初始化（默认规则 / GEO 数据库下载中），完成后即可启动
+            </span>
+          )}
           <Button onClick={onDeregister} loading={busy === "deregister"} variant="danger">
             <Trash2 className="h-4 w-4" /> 注销（-del）
           </Button>
@@ -286,7 +288,7 @@ export default function StatusPage() {
         </div>
       </Card>
 
-      {!isAndroid && (
+      {!status.isAndroid && (
         <Card title="系统代理">
           <div className="flex items-center justify-between gap-4">
             <div className="flex items-center gap-3">

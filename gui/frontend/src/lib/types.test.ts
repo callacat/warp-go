@@ -44,6 +44,18 @@ describe("fromStatus", () => {
   it("state is empty when status lacks state field", () => {
     expect(fromStatus({}).running).toBe(false);
   });
+
+  it("maps is_android flag", () => {
+    expect(fromStatus({ is_android: true }).isAndroid).toBe(true);
+    expect(fromStatus({ is_android: false }).isAndroid).toBe(false);
+    expect(fromStatus({}).isAndroid).toBe(false);
+  });
+
+  it("maps init_done flag", () => {
+    expect(fromStatus({ init_done: true }).initDone).toBe(true);
+    expect(fromStatus({ init_done: false }).initDone).toBe(false);
+    expect(fromStatus({}).initDone).toBe(false);
+  });
 });
 
 describe("fromGeo", () => {

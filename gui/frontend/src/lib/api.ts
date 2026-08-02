@@ -125,6 +125,8 @@ function mockStatus(): AppStatus {
     listening: "127.0.0.1:40000",
     startedAt: mockState.startedAt,
     registered: true,
+    isAndroid: false,
+    initDone: true,
     registration: {
       id: "demo-reg-id",
       assignedIPv4: "172.16.0.2",
@@ -211,8 +213,17 @@ export async function register(): Promise<RegisterResult> {
     mockState.logs.push({ time: now(), level: "info", msg: "已注册（演示）" });
     return { existing: false, id: "demo-id" };
   }
-  const raw = (await svc.Register()) as { existing?: boolean; id?: string } | null;
-  return { existing: raw?.existing ?? false, id: raw?.id ?? "" };
+  const raw = (await svc.Register()) as
+    | [boolean, string]
+    | { existing?: boolean; id?: string }
+    | { existing?: boolean; id?: string }[]
+    | null;
+  // Wails 把 Go 多返回值 (existing, id, error) 序列化为元组 [boolean, string]，
+  // 旧代码按对象读导致 id 恒空（"注册成功（id=）"）。兼容对象/数组两种形态。
+  if (Array.isArray(raw)) {
+    return { existing: raw[0] === true, id: typeof raw[1] === "string" ? raw[1] : "" };
+  }
+  return { existing: raw?.existing === true, id: typeof raw?.id === "string" ? raw.id : "" };
 }
 
 export async function deregister(): Promise<void> {

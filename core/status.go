@@ -18,6 +18,8 @@ type Status struct {
 	GeoReady   bool        `json:"geo_ready"`
 	SysProxyOn bool        `json:"sys_proxy_on"` // 系统代理当前是否指向本程序
 	Registered bool        `json:"registered"`   // 本机是否有可用注册信息
+	IsAndroid  bool        `json:"is_android"`   // 运行平台（Android 隐藏系统代理 UI）
+	InitDone   bool        `json:"init_done"`    // 基础文件初始化（默认规则/GEO）是否完成，完成后才可启动
 	Stats      route.Stats `json:"stats"`
 	StartTime  time.Time   `json:"start_time,omitempty"`
 	LastError  string      `json:"last_error,omitempty"`

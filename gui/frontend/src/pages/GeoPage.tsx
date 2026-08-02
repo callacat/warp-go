@@ -59,7 +59,7 @@ export default function GeoPage() {
             <p className="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
               <Database className="h-3.5 w-3.5" /> geosite.dat
             </p>
-            <p className="mt-1 font-mono text-sm text-slate-900 dark:text-slate-100">
+            <p className="mt-1 break-all font-mono text-sm text-slate-900 dark:text-slate-100">
               {geo ? geo.geositePath : "…"}
             </p>
             <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
@@ -70,7 +70,7 @@ export default function GeoPage() {
             <p className="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
               <Database className="h-3.5 w-3.5" /> geoip-lite.dat
             </p>
-            <p className="mt-1 font-mono text-sm text-slate-900 dark:text-slate-100">
+            <p className="mt-1 break-all font-mono text-sm text-slate-900 dark:text-slate-100">
               {geo ? geo.geoipPath : "…"}
             </p>
             <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">

@@ -66,6 +66,8 @@ import (
 	"errors"
 	"log"
 	"sync"
+	"time"
+	_ "time/tzdata" // 内嵌时区数据库：Android 系统无 tzdata，不导入 LoadLocation 必失败
 	"unsafe"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
@@ -313,6 +315,80 @@ func androidRequestVpnStop() error {
 	defer C.releaseEnv(needsDetach)
 	C.callStaticVoidMethod(env, cls, stopM)
 	return nil
+}
+
+// Java_com_wails_app_MainActivity_nativeLogMessage 是 Java 侧把日志送入
+// GUI 环形缓冲的入口：MainActivity.requestStartVpn/requestStopVpn 等 Java
+// 路径的失败（sInstance 为 null、consent 拒绝等）只打 logcat，用户看不到
+// 也进不了 GUI 日志页。此导出让 Java 侧把关键消息转发到 GUI 日志页。
+//
+//export Java_com_wails_app_MainActivity_nativeLogMessage
+func Java_com_wails_app_MainActivity_nativeLogMessage(env *C.JNIEnv, obj C.jobject, level C.jstring, msg C.jstring) C.jint {
+	toGo := func(j C.jstring) string {
+		if unsafe.Pointer(j) == nil {
+			return ""
+		}
+		C.storeJvm(env)
+		var needsDetach C.int
+		e := C.getEnv(&needsDetach)
+		if e == nil {
+			return ""
+		}
+		defer C.releaseEnv(needsDetach)
+		chars := (*e).GetStringUTFChars(e, j, nil)
+		if unsafe.Pointer(chars) == nil {
+			return ""
+		}
+		defer (*e).ReleaseStringUTFChars(e, j, chars)
+		return C.GoString(chars)
+	}
+	lvl := toGo(level)
+	text := toGo(msg)
+	if text == "" {
+		return 0
+	}
+	switch lvl {
+	case "error":
+		log.Printf("⚠ %s", text)
+	case "warn":
+		log.Printf("⚠ %s", text)
+	default:
+		log.Printf("%s", text)
+	}
+	return 0
+}
+
+// Java_com_wails_app_MainActivity_nativeSetTimeZone 同步 Android 系统时区到
+// Go 运行时：Android 上 Go 的 time.Local 默认是 UTC，日志时间戳（logs.go
+// 的 HH:MM:SS）会与状态栏系统时间不一致（用户报告"日志显示的不是系统
+// 时间"）。MainActivity.onCreate 把 TimeZone.getDefault().getID() 传进来，
+// 设置 time.Local 后所有日志/文件时间戳都走设备本地时区。
+//
+//export Java_com_wails_app_MainActivity_nativeSetTimeZone
+func Java_com_wails_app_MainActivity_nativeSetTimeZone(env *C.JNIEnv, obj C.jobject, tz C.jstring) C.jint {
+	if unsafe.Pointer(tz) == nil {
+		return 0
+	}
+	C.storeJvm(env)
+	var needsDetach C.int
+	e := C.getEnv(&needsDetach)
+	if e == nil {
+		return -1
+	}
+	defer C.releaseEnv(needsDetach)
+	chars := (*e).GetStringUTFChars(e, tz, nil)
+	if unsafe.Pointer(chars) == nil {
+		return 0
+	}
+	defer (*e).ReleaseStringUTFChars(e, tz, chars)
+	id := C.GoString(chars)
+	if loc, err := time.LoadLocation(id); err == nil {
+		time.Local = loc
+		log.Printf("✓ 已同步系统时区：%s", id)
+	} else {
+		log.Printf("⚠ 无法加载时区 %q：%v", id, err)
+	}
+	return 0
 }
 
 // androidVpnRunning 报告 VPN 是否运行中（androidRuntime 状态）。

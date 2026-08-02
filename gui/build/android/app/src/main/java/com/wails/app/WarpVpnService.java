@@ -98,6 +98,7 @@ public class WarpVpnService extends VpnService {
             pfd = builder.establish();
         } catch (IllegalArgumentException | SecurityException e) {
             Log.e(TAG, "establish() failed", e);
+            MainActivity.nativeLogMessage("error", "VPN 建立失败：" + e.getMessage());
             stopSelf();
             return START_NOT_STICKY;
         }
@@ -105,12 +106,14 @@ public class WarpVpnService extends VpnService {
             // The user revoked the VPN permission (or a concurrent prepare()
             // consumed it) between prepare and establish.
             Log.e(TAG, "establish() returned null - VPN permission not granted");
+            MainActivity.nativeLogMessage("error", "VPN 授权已失效（可能已在系统设置中关闭），请重新授权后启动");
             stopSelf();
             return START_NOT_STICKY;
         }
 
         int fd = pfd.getFd();
         Log.i(TAG, "TUN established, handing fd=" + fd + " to nativeStartVpn");
+        MainActivity.nativeLogMessage("info", "VPN 隧道已建立（fd=" + fd + "），正在启动内核...");
         int result;
         try {
             result = nativeStartVpn(fd);
@@ -120,6 +123,7 @@ public class WarpVpnService extends VpnService {
         }
         if (result != 0) {
             Log.e(TAG, "nativeStartVpn returned " + result + ", tearing down");
+            MainActivity.nativeLogMessage("error", "内核启动失败（错误码 " + result + "），请查看日志页");
             closePfd(pfd);
             stopSelf();
             return START_NOT_STICKY;
@@ -128,6 +132,7 @@ public class WarpVpnService extends VpnService {
         vpnPfd = pfd;
         nativeRunning = true;
         Log.i(TAG, "VPN running (fd=" + fd + ")");
+        MainActivity.nativeLogMessage("info", "✓ VPN 已运行（fd=" + fd + "）");
         return START_STICKY;
     }
 
@@ -157,6 +162,7 @@ public class WarpVpnService extends VpnService {
     @Override
     public void onDestroy() {
         Log.i(TAG, "onDestroy - stopping VPN");
+        MainActivity.nativeLogMessage("info", "正在停止 VPN...");
         stopNativeAndClose();
         super.onDestroy();
     }
@@ -166,6 +172,7 @@ public class WarpVpnService extends VpnService {
         // The user revoked the VPN permission; the system stops the service
         // after this, so stop the tunnel and release the TUN now.
         Log.i(TAG, "onRevoke - VPN permission revoked");
+        MainActivity.nativeLogMessage("error", "VPN 授权被撤销（系统设置中关闭），隧道已停止");
         stopNativeAndClose();
         stopSelf();
     }

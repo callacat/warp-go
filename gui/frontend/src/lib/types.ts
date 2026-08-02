@@ -30,6 +30,8 @@ export interface AppStatus {
   startedAt?: string;
   error?: string;
   registered: boolean;
+  isAndroid: boolean;
+  initDone: boolean;
   counters: ProxyCounters;
   registration: RegistrationInfo | null;
 }
@@ -111,6 +113,8 @@ export function fromStatus(v: unknown): AppStatus {
           ? o.error
           : undefined,
     registered: o.registered === true || o.Registered === true,
+    isAndroid: o.is_android === true,
+    initDone: o.init_done === true || o.InitDone === true,
     counters: fromCounters(o.stats ?? o.counters),
     registration: fromRegistration(o.registration),
   };

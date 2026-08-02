@@ -155,6 +155,14 @@ jobs:
           go install github.com/josephspurrier/goversioninfo/cmd/goversioninfo@latest
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
+      # Windows GUI 应用图标：从 appicon.png（仓库唯一图标源）生成 .ico，
+      # 供 go generate（goversioninfo，gui/versioninfo.json IconPath）嵌入 PE 资源。
+      - name: 生成 Windows 应用图标
+        if: matrix.os == 'windows'
+        working-directory: gui/build
+        run: |
+          wails3 generate icons -input appicon.png -windowsfilename windows/icon.ico
+
       # 先生成 bindings 再构建前端：前端 api.ts 静态 import bindings，
       # 若顺序颠倒，npm build 会打进占位文件（演示模式）。
       - name: 生成 Wails 绑定
@@ -329,6 +337,10 @@ jobs:
           grep -qE 'Java_com_wails_app_WarpVpnService_nativeStartVpn.*C\.jint' androidbridge.go
           grep -qE 'int +nativeStopVpn *\(\)' build/android/app/src/main/java/com/wails/app/WarpVpnService.java
           grep -qE 'Java_com_wails_app_WarpVpnService_nativeStopVpn.*C\.jint' androidbridge.go
+          grep -qE 'int +nativeLogMessage *\(String level, String msg\)' build/android/app/src/main/java/com/wails/app/MainActivity.java
+          grep -qE 'Java_com_wails_app_MainActivity_nativeLogMessage.*C\.jint' androidbridge.go
+          grep -qE 'int +nativeSetTimeZone *\(String tz\)' build/android/app/src/main/java/com/wails/app/MainActivity.java
+          grep -qE 'Java_com_wails_app_MainActivity_nativeSetTimeZone.*C\.jint' androidbridge.go
 
       # assembleRelease 用 debug keystore 兜底签名（app/build.gradle：
       # signingConfig hasKeystore ? signingConfigs.release : signingConfigs.debug），

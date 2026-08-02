@@ -79,7 +79,8 @@ func (s *Service) serverInstance() (*core.Server, error) {
 // ---------------------------------------------------------------------------
 
 // InitDefaults 初始化基础文件（rules.txt 下载/模板 + GEO 下载，不依赖注册）。
-// GUI 首次启动时调用；幂等，可安全重复。
+// GUI 首次启动时调用；幂等，可安全重复。完成后日志打出"初始化完成"，
+// GetStatus.InitDone 置 true（前端据此在初始化完成前禁用启动按钮）。
 func (s *Service) InitDefaults() {
 	s.mu.Lock()
 	if s.defaultsInit {
@@ -104,17 +105,21 @@ func (s *Service) InitDefaults() {
 	s.mu.Lock()
 	s.defaultsInit = true
 	s.mu.Unlock()
+	log.Println("✓ 初始化完成（默认配置、默认规则、GEO 数据库已就绪），现在可以启动内核")
 }
 
 // GetStatus 返回当前状态快照。
 func (s *Service) GetStatus() core.Status {
+	s.mu.Lock()
+	initDone := s.defaultsInit
+	s.mu.Unlock()
 	srv, err := s.serverInstance()
 	if err != nil {
 		if runtime.GOOS == "android" {
 			// Android 上 serverInstance 可能因沙箱桥接瞬时失败（Wails bridge
 			// 抖动，StoragePath 返回 ""）。此时用缓存的沙箱目录兜底检查
 			// reg.json，避免已注册状态被误报为"尚未注册"（页面切换触发）。
-			st := core.Status{State: "stopped", LastError: err.Error()}
+			st := core.Status{State: "stopped", InitDone: initDone, LastError: err.Error()}
 			if dir := cachedDataDir(); dir != "" {
 				if _, serr := os.Stat(filepath.Join(dir, "reg.json")); serr == nil {
 					st.Registered = true
@@ -125,9 +130,10 @@ func (s *Service) GetStatus() core.Status {
 			}
 			return st
 		}
-		return core.Status{State: "stopped", LastError: err.Error()}
+		return core.Status{State: "stopped", InitDone: initDone, LastError: err.Error()}
 	}
 	st := srv.Status()
+	st.InitDone = initDone
 	if runtime.GOOS == "android" {
 		// Android 上真实隧道状态在 androidRuntime（VpnService 驱动），
 		// SOCKS server 永不运行；用 VPN 状态覆盖生命周期字段。
@@ -156,9 +162,14 @@ func (s *Service) Start() error {
 	if runtime.GOOS == "android" {
 		// 幂等：VPN 已在运行则无操作。
 		if androidVpnRunning() {
+			log.Println("✓ VPN 已在运行（幂等跳过）")
 			return nil
 		}
-		return androidRequestVpnStart()
+		log.Println("正在启动 VPN（请求系统授权）...")
+		if err := androidRequestVpnStart(); err != nil {
+			return err
+		}
+		return nil
 	}
 
 	s.mu.Lock()
@@ -203,7 +214,11 @@ func (s *Service) Start() error {
 // Stop 停止代理（幂等）。
 func (s *Service) Stop() error {
 	if runtime.GOOS == "android" {
-		return androidRequestVpnStop()
+		log.Println("正在停止 VPN...")
+		if err := androidRequestVpnStop(); err != nil {
+			return err
+		}
+		return nil
 	}
 
 	s.mu.Lock()

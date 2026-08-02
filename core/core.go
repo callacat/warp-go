@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -542,6 +543,7 @@ func (s *Server) Status() Status {
 		GeoReady:   s.cfg != nil && geoDataPresent(s.cfg.GeoDir),
 		SysProxyOn: s.sysProxyEnabled.Load(),
 		Registered: registrationFileExists(s.opts.StateFile),
+		IsAndroid:  runtime.GOOS == "android",
 		StartTime:  s.startTime,
 		LastError:  s.lastError,
 	}
@@ -557,6 +559,15 @@ func (s *Server) Status() Status {
 	}
 	if s.reg != nil {
 		st.Registration = registrationView(s.reg)
+	} else if st.Registered {
+		// GUI 打开时 s.reg 为 nil（只在 Start/Register 后赋值）：从磁盘补
+		// 读注册信息视图并缓存，保证"注册信息"卡片在未启动时也完整显示
+		// （修复"注册信息不全"）。读取失败不致命：Registered 仍为 true，
+		// 启动时 Start 会给出明确错误。
+		if reg, err := registration.Load(s.opts.StateFile); err == nil {
+			s.reg = reg
+			st.Registration = registrationView(reg)
+		}
 	}
 	return st
 }

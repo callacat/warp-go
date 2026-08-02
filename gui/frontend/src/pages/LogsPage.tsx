@@ -5,7 +5,7 @@ import { fromLogs, LogEntry } from "../lib/types";
 import { Button, Card } from "../components/ui";
 
 const LEVEL_COLOR: Record<LogEntry["level"], string> = {
-  debug: "text-slate-400 dark:text-slate-500",
+  debug: "text-slate-500 dark:text-slate-500",
   info: "text-slate-700 dark:text-slate-300",
   warn: "text-amber-600 dark:text-amber-400",
   error: "text-red-600 dark:text-red-400",
@@ -74,14 +74,14 @@ export default function LogsPage() {
       >
         <div
           ref={boxRef}
-          className="h-[420px] overflow-auto rounded-lg border border-slate-200 bg-slate-950 p-3 font-mono text-xs leading-5 dark:border-slate-800"
+          className="h-[420px] overflow-auto rounded-lg border border-slate-200 bg-slate-50 p-3 font-mono text-xs leading-5 dark:border-slate-800 dark:bg-slate-950"
         >
           {logs.length === 0 ? (
-            <p className="text-slate-500">暂无日志</p>
+            <p className="text-slate-500 dark:text-slate-400">暂无日志</p>
           ) : (
             logs.map((l, i) => (
               <div key={i} className="whitespace-pre-wrap break-all">
-                <span className="text-slate-500">{l.time}</span>{" "}
+                <span className="text-slate-400 dark:text-slate-500">{l.time}</span>{" "}
                 <span className={`font-semibold uppercase ${LEVEL_COLOR[l.level]}`}>
                   {l.level}
                 </span>{" "}

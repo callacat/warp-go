@@ -24,6 +24,37 @@
   不返回错误 → 用户不知 API 侧注册仍在。现 API 失败返回错误（本地仍删除）；
   GUI `Deregister` 用 `cachedDataDir()` 兜底，不依赖可能失败的 serverInstance。
 
+### 新增（本轮）
+
+- **注册信息完整显示**（win/Android 真机）：`core.Status()` 在 `s.reg` 为 nil
+  （GUI 打开、尚未启动）时从磁盘补读 reg.json 视图并缓存，注册卡片在未启动
+  时也显示 id/账号/密钥类型/边缘地址端口/分配 IP 全部 9 字段；Register 后同步
+  缓存、Deregister 后清空缓存。新增 `status_registration_test.go` 两个回归测试。
+- **初始化完成门控**：`Service.InitDefaults` 完成后日志打出"✓ 初始化完成…
+  现在可以启动内核"，`Status.InitDone` 置 true；前端启动按钮在初始化完成前
+  禁用并提示"正在初始化（默认规则 / GEO 数据库下载中）"——默认配置、默认
+  规则、GEO 数据库就绪前不再允许点启动。
+- **Android 启动/停止/注销全程日志**（真机"点击启动无反映也无日志"）：Java
+  侧 `WarpVpnService` 的 establish 失败、授权失效、内核启动失败、onDestroy/
+  onRevoke 全部经 `nativeLogMessage` 转发进 GUI 日志页；`Service.Start/Stop`
+  Android 分支成功路径也打日志。
+- **Android 日志时间显示系统时间**（真机"日志不是系统时间"）：Go 运行时内嵌
+  `time/tzdata`（Android 无系统时区库），`nativeSetTimeZone` 的
+  `time.LoadLocation` 不再失败。
+- **Android 通知栏对比度修正**（真机"通知栏看不清"）：v0.5.5 误用
+  `SYSTEM_UI_FLAG_LIGHT_STATUS_BAR`（深色图标）配深色底 → 深色图标看不清。
+  移除该 flag，深底配默认浅色（白色）图标，始终可见。
+- **应用图标**（全平台）：从 `appicon.png` 生成 Windows `.ico`（PE 资源 +
+  versioninfo IconPath）、macOS `icons.icns`、Android `ic_launcher`/`ic_launcher_round`
+  五个密度 mipmap（白底圆角 + 居中图标）。
+- **浅色模式日志框**（全平台）：日志框由恒黑底改为浅色 `bg-slate-50` / 深色
+  `dark:bg-slate-950`，浅色主题不再伤眼；debug 级别颜色调高对比。
+- **长路径换行**（全平台）：状态页规则文件路径、GEO 页 geosite/geoip 数据库
+  地址加 `break-all`，竖屏窄宽度不再溢出。
+- **注册按钮 id 显示**（win 真机"注册成功（id=）"）：Wails 把 Go 多返回值
+  `(existing, id, error)` 序列化为元组 `[boolean, string]`，`api.ts` 旧代码按
+  对象读导致 id 恒空。现兼容元组/对象两种形态。
+
 ## [v0.5.5] - 2026-08-02
 
 ### 修复

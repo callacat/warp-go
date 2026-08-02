@@ -31,6 +31,8 @@ import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 
+import java.util.TimeZone;
+
 import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.content.ContextCompat;
@@ -60,6 +62,12 @@ public class MainActivity extends AppCompatActivity {
     // IDs on the Go side so calls from any Go goroutine are safe.
     private static MainActivity sInstance;
     private static native int nativeBridgeReady();
+    // Java→Go 日志转发：把本类失败路径（sInstance 为 null、consent 拒绝等）
+    // 写入 GUI 日志环形缓冲（androidbridge.go 的 nativeLogMessage 导出）。
+    private static native int nativeLogMessage(String level, String msg);
+    // Java→Go 时区同步：把设备系统时区传给 Go（time.Local），使 GUI 日志
+    // 时间戳与状态栏系统时间一致（Go 默认 UTC，不设会显示错误时间）。
+    private static native int nativeSetTimeZone(String tz);
 
     public static void requestStartVpn() {
         MainActivity a = sInstance;
@@ -68,6 +76,7 @@ public class MainActivity extends AppCompatActivity {
             // 后 sInstance 为 null（onCreate 才会重新赋值），此时明确打日志
             // 供用户排查（logcat 与 GUI 日志页）。
             Log.w(TAG, "requestStartVpn: sInstance 为 null（Activity 未初始化）");
+            nativeLogMessage("error", "启动失败：Activity 未初始化（请重新打开应用）");
             return;
         }
         a.runOnUiThread(() -> a.connectVpn());
@@ -75,7 +84,10 @@ public class MainActivity extends AppCompatActivity {
 
     public static void requestStopVpn() {
         MainActivity a = sInstance;
-        if (a == null) return;
+        if (a == null) {
+            nativeLogMessage("error", "停止失败：Activity 未初始化");
+            return;
+        }
         a.runOnUiThread(() -> a.stopService(new Intent(a, WarpVpnService.class)));
     }
 
@@ -125,13 +137,11 @@ public class MainActivity extends AppCompatActivity {
         WindowCompat.setDecorFitsSystemWindows(getWindow(), true);
         // edge-to-edge 下 statusBarColor 默认透明，通知栏文字/图标与内容
         // 混杂看不清。显式设为不透明深色 + 浅色图标（与 themes.xml 一致），
-        // 通知栏始终可见。
+        // 通知栏始终可见。注意：不要设 SYSTEM_UI_FLAG_LIGHT_STATUS_BAR——
+        // 那是"深色图标适配浅色底"，配深色底会得到深色图标看不清（用户
+        // 反馈"通知栏看不清"的根因）。深底用默认浅色（白色）图标。
         getWindow().setStatusBarColor(0xFF1B2636);
         getWindow().setNavigationBarColor(0xFF1B2636);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            getWindow().getDecorView().setSystemUiVisibility(
-                    View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR); // 深底浅字
-        }
         setContentView(R.layout.activity_main);
 
         // Initialize the native Go library
@@ -144,6 +154,8 @@ public class MainActivity extends AppCompatActivity {
         // bridge is ready when the UI asks for it.
         sInstance = this;
         nativeBridgeReady();
+        // 时区同步：Go 默认 UTC，日志时间戳会与系统状态栏时间不一致。
+        nativeSetTimeZone(TimeZone.getDefault().getID());
 
         // Set up WebView
         setupWebView();
@@ -565,6 +577,7 @@ public class MainActivity extends AppCompatActivity {
                 startVpnService();
             } else {
                 Log.i(TAG, "VPN consent denied");
+                nativeLogMessage("error", "VPN 授权被拒绝：无法启动（请在系统设置中允许）");
             }
             return;
         }
