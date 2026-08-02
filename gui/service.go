@@ -161,18 +161,26 @@ func (s *Service) Start() error {
 	}
 
 	s.mu.Lock()
+	started := s.started
+	s.mu.Unlock()
+	if started {
+		return nil
+	}
+
+	// 注意：不能在持有 s.mu 时调用 serverInstance()——其内部再次加锁
+	// （sync.Mutex 不可重入），会自死锁：GUI 服务线程永久阻塞，之后所有
+	// 服务调用（GetStatus/GetRules/GetGeo…）都卡在锁上，表现为"点击启动
+	// 卡死，其他页全部无法显示"。与 InitDefaults 的注释同源。
+	srv, err := s.serverInstance()
+	if err != nil {
+		return err
+	}
+
+	s.mu.Lock()
 	if s.started {
 		s.mu.Unlock()
 		return nil
 	}
-	srv, err := s.serverInstance()
-	if err != nil {
-		s.mu.Unlock()
-		return err
-	}
-	s.mu.Unlock()
-
-	s.mu.Lock()
 	s.started = true
 	s.startErr = nil
 	s.mu.Unlock()
