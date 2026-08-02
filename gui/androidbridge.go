@@ -278,12 +278,19 @@ func androidRequestVpnStart() error {
 	cls, startM, ready := androidCtl.cls, androidCtl.startM, androidCtl.ready
 	androidCtl.mu.Unlock()
 	if !ready || unsafe.Pointer(cls) == nil || unsafe.Pointer(startM) == nil {
-		return errors.New("Android VPN 桥未就绪（MainActivity 未初始化）")
+		// 桥未就绪 = MainActivity 尚未初始化（首启时序问题）。错误必须
+		// 记录到 GUI 日志页（logWriter 环形缓冲），否则用户"点击启动无反应
+		// 也没有日志"——前端按钮旁的错误小字在手机上极易忽略。
+		err := errors.New("Android VPN 桥未就绪（MainActivity 未初始化，请稍候重试）")
+		log.Printf("⚠ 启动失败：%v", err)
+		return err
 	}
 	var needsDetach C.int
 	env := C.getEnv(&needsDetach)
 	if env == nil {
-		return errors.New("Android VPN 桥：无法获取 JNIEnv")
+		err := errors.New("Android VPN 桥：无法获取 JNIEnv")
+		log.Printf("⚠ 启动失败：%v", err)
+		return err
 	}
 	defer C.releaseEnv(needsDetach)
 	C.callStaticVoidMethod(env, cls, startM)

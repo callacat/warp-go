@@ -5,6 +5,14 @@
 
 ## [Unreleased] — v0.5.4 计划中
 
+### 修复
+
+- **GUI 点击"启动"卡死 + 其他页全部无法显示**（Windows/桌面，v0.5.1 起）：
+  `Service.Start()` 持 `s.mu` 调用 `serverInstance()`（内部再次加锁，
+  sync.Mutex 不可重入 → 自死锁），GUI 服务线程永久阻塞，所有服务调用
+  （GetStatus/GetRules/GetGeo…）卡在锁上。修复：锁内先读状态，锁外调用
+  `serverInstance()`；`service_test.go` 加 goroutine+超时回归测试。
+
 ### 新增
 
 - **构建产物版本号**：版本号单一来源 = release tag（`v0.5.3` → `0.5.3`），经

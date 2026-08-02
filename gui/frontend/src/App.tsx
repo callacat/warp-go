@@ -1,9 +1,7 @@
 import { useState } from "react";
-import { Monitor, Moon, PanelLeftClose, PanelRightClose, Sun } from "lucide-react";
-import { useTheme } from "./lib/useTheme";
+import { PanelLeftClose, PanelRightClose } from "lucide-react";
 import { NAV, TITLES } from "./lib/nav";
 import type { PageKey } from "./lib/nav";
-import type { ThemeMode } from "./lib/theme";
 import StatusPage from "./pages/StatusPage";
 import RulesPage from "./pages/RulesPage";
 import GeoPage from "./pages/GeoPage";
@@ -11,30 +9,9 @@ import ScanPage from "./pages/ScanPage";
 import SettingsPage from "./pages/SettingsPage";
 import LogsPage from "./pages/LogsPage";
 
-/** Sidebar toggle cycles light → dark → system → light. */
-const NEXT_MODE: Record<ThemeMode, ThemeMode> = {
-  light: "dark",
-  dark: "system",
-  system: "light",
-};
-
-const MODE_ICON: Record<ThemeMode, typeof Sun> = {
-  light: Sun,
-  dark: Moon,
-  system: Monitor,
-};
-
-const MODE_LABEL: Record<ThemeMode, string> = {
-  light: "浅色",
-  dark: "深色",
-  system: "跟随系统",
-};
-
 export default function App() {
   const [page, setPage] = useState<PageKey>("status");
   const [collapsed, setCollapsed] = useState(false);
-  const { mode, setMode } = useTheme();
-  const ThemeIcon = MODE_ICON[mode];
 
   return (
     <div className="flex h-full bg-slate-100 text-slate-900 dark:bg-slate-950 dark:text-slate-100">
@@ -77,16 +54,6 @@ export default function App() {
         </nav>
 
         <div className="flex items-center gap-1 border-t border-slate-200 p-2 dark:border-slate-800">
-          <button
-            onClick={() => setMode(NEXT_MODE[mode])}
-            title={`主题：${MODE_LABEL[mode]}，点击切换`}
-            className={`flex min-w-0 flex-1 items-center justify-center rounded-lg text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800 ${
-              collapsed ? "px-0 py-2" : "gap-2 px-3 py-2 text-sm"
-            }`}
-          >
-            <ThemeIcon className="h-4 w-4 shrink-0" />
-            {!collapsed && <span className="hidden md:inline">{MODE_LABEL[mode]}</span>}
-          </button>
           <button
             onClick={() => setCollapsed((c) => !c)}
             title={collapsed ? "展开侧边栏" : "收起侧边栏"}
@@ -139,15 +106,6 @@ export default function App() {
             <span>{label}</span>
           </button>
         ))}
-        {/* theme toggle cell */}
-        <button
-          onClick={() => setMode(NEXT_MODE[mode])}
-          title={`主题：${MODE_LABEL[mode]}，点击切换`}
-          className="flex flex-1 flex-col items-center justify-center gap-0.5 py-2 text-[10px] text-slate-500 dark:text-slate-400"
-        >
-          <ThemeIcon className="h-5 w-5" />
-          <span>{MODE_LABEL[mode]}</span>
-        </button>
       </nav>
     </div>
   );

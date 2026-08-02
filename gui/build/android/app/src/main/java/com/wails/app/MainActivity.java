@@ -62,7 +62,13 @@ public class MainActivity extends AppCompatActivity {
 
     public static void requestStartVpn() {
         MainActivity a = sInstance;
-        if (a == null) return;
+        if (a == null) {
+            // 静默失败会让 GUI"点击启动无反应"且无日志。Activity 销毁重建
+            // 后 sInstance 为 null（onCreate 才会重新赋值），此时明确打日志
+            // 供用户排查（logcat 与 GUI 日志页）。
+            Log.w(TAG, "requestStartVpn: sInstance 为 null（Activity 未初始化）");
+            return;
+        }
         a.runOnUiThread(() -> a.connectVpn());
     }
 
@@ -116,6 +122,15 @@ public class MainActivity extends AppCompatActivity {
         // 状态栏下方覆盖通知栏。显式声明 content 适配系统栏（所有 API 级别
         // 一致）：WebView 从状态栏下方开始布局，不再占用顶部通知栏。
         WindowCompat.setDecorFitsSystemWindows(getWindow(), true);
+        // edge-to-edge 下 statusBarColor 默认透明，通知栏文字/图标与内容
+        // 混杂看不清。显式设为不透明深色 + 浅色图标（与 themes.xml 一致），
+        // 通知栏始终可见。
+        getWindow().setStatusBarColor(0xFF1B2636);
+        getWindow().setNavigationBarColor(0xFF1B2636);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            getWindow().getDecorView().setSystemUiVisibility(
+                    View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR); // 深底浅字
+        }
         setContentView(R.layout.activity_main);
 
         // Initialize the native Go library
