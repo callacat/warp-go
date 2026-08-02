@@ -124,7 +124,7 @@ go test ./androidvpn/... ./gui/...                       # 决策逻辑 + androi
 | M8 版本号 + 检查更新（v0.5.4 计划中） | 🔄 | **产物版本号**：单源 = release tag，`-ldflags -X main.version` 注入 CLI（`-version` flag）/ GUI（设置页"关于"卡片）/ Android（gradle versionCode 语义单调递增 0.5.3→503）；Windows PE 版本资源（`go:generate goversioninfo` + `versioninfo.json`，CI sed 写版本再生成 `.syso`，资源管理器可见 → 降低报毒误报）；Release 产物命名带版本。**检查更新**：`core/updater.go` 查 GitHub Releases API（`compareVersions` 纯函数 + 单测），CLI `-check-update` + GUI 设置页按钮，网络失败非致命；CI build-release 各 job 注入 VERSION |
 | M8.5 v0.5.7 反馈修复（win/Android 真机） | ✅ | **注册信息完整显示**：`core.Status()` 在 s.reg 为 nil 时从磁盘补读并缓存（GUI 未启动也显示 9 字段）；Register 同步缓存 / Deregister 清空。**初始化完成门控**：`Status.InitDone` + 前端禁用启动按钮直至默认规则/GEO 就绪。**Android 启动/停止/注销全程日志**（WarpVpnService 失败路径经 nativeLogMessage 转发）。**Android 日志系统时间**：`import _ "time/tzdata"`（Android 无系统时区库）。**Android 通知栏对比度**：移除 `SYSTEM_UI_FLAG_LIGHT_STATUS_BAR`（深底配深色图标看不见）。**应用图标**：appicon.png → Windows .ico（PE 资源）/ macOS .icns / Android mipmap 五密度。**浅色日志框** + 长路径 break-all。**注册 id 显示**：Wails 多返回值是元组 `[boolean,string]`，api.ts 兼容两种形态；tag v0.5.7 |
 | M8.6 v0.5.8 反馈修复（win/Android 真机） | ✅ | **双重归一化修复**：StatusPage/GeoPage/SettingsPage 对 getStatus/getGeo/getConfig 返回值二次 fromXxx（已归一化 camelCase，二次只认 snake_case → initDone/isAndroid/sysProxyOn 恒 false）→ 页面直接用返回值 + null 兜底。**InitDone 持久化**：`core.Server.InitDone()` 基于 rules.txt+GEO 文件就绪，重开 GUI 不再重复初始化/卡启动。**主题默认跟随系统**：useTheme mount 后延迟 300ms 重查 IsDarkMode（Android bridge 时序）。**系统代理真实状态**：`sysproxy.Enabled(addr)` 三平台读（win 注册表/darwin networksetup/linux gsettings），Status.SysProxyOn 读真实状态，前端开关跟随外部关闭。**停止/退出同步清系统代理**（shutdown 只清指向本程序的）；**关闭按钮最小化到托盘**（RegisterHook WindowClosing + Cancel + Hide，macOS 除外）；tag v0.5.8 |
-| M8.7 v0.5.9 反馈修复（Android 真机） | 🔄 | **VPN 建立失败修复**：WarpVpnService 从沙箱 reg.json 读 assigned_ipv4/6 兜底（startVpnService 不传 extras → VpnService.Builder 无地址 establish 抛异常）。**注销无确认框**：window.confirm 在 Android WebView 静默 false → 自绘两段确认（首次点击进确认态，5s 自动取消），全平台一致 |
+| M8.7 v0.5.9 反馈修复（Android 真机） | ✅ | **VPN 建立失败修复**：WarpVpnService 从沙箱 reg.json 读 assigned_ipv4/6 兜底（startVpnService 不传 extras → VpnService.Builder 无地址 establish 抛异常）。**注销无确认框**：window.confirm 在 Android WebView 静默 false → 自绘两段确认（首次点击进确认态，5s 自动取消），全平台一致。**启动报 `-ip ""` 边缘解析失败**：`core.ResolveEdgeAddrs` 双空（cfg.EdgeAddr + optsEdgeIP 均空，Android 桥常态）回落 "4"（注册 IPv4 端口展开），不再把空串当显式端点。**应用扫描 IP 后再次启动 GUI ANR 卡死 + VPN 无网**：`nativeStartVpn` 原在 Java 主线程同步装配 Kernel——`NewMasqueClient` 初始拨号无限指数退避重试阻塞主线程 → 5s ANR；TUN fd 已建立但内核未接手 → 无流量。现异步化（`startVpnKernel` goroutine，前置校验后立即返回 0"已受理"）+ 装配取消信号（nativeStartVpn 前置建 ctx，装配各阶段查 ctx.Err，nativeStopVpn 装配中到达即取消）+ 新增 JNI 导出 `nativeVpnRunning`（Java 重入守卫区分"真在运行"与"异步失败"→ stale TUN 重建）；`vpnPfd/nativeRunning` 置位提前到 nativeStartVpn 前；CI JNI 断言加 nativeVpnRunning 签名级检查 |
 
 ## 6.6 上游冲突处理（重要）
 
@@ -232,9 +232,12 @@ release 同名 tag 冲突），但期间 Agent 均提前报告"Android 版已成
 - **v0.5.1 修复（2026-08-01）**：`core.Options.DataDir`（`resolveWithDir` 分派，空值=默认执行目录锚定，桌面零回归）；`gui/datadir_{android,other}.go`；`gui` module 已 `go mod tidy`（补 sing-tun 等间接依赖）；前端引入 vitest（theme/useTheme 18 单测）；主题事件名 5 平台（`common:/windows:/linux:/android:/ios:ThemeChanged`），Android 由 MainActivity `emitTheme()` 发 `android:ThemeChanged`；`@wailsio/runtime` 的 `Events.On` 回调收到的是 `WailsEvent{name,data}` 对象（payload 在 `.data`，Android 为 JSON 字符串 `{"isDarkMode":bool}`）
 - `go.mod` 依赖：sing-tun v0.8.11 为 direct require（T1 已提升）；无 gomobile
 - `androidvpn/` 已接线（不再是孤儿包）：`decision.go` 宿主可测（`//go:build android || linux`），TUN 栈 `androidvpn.go` 仅 `//go:build android`
-- JNI 导出面（v0.5.7 起 4 个）：`gui/androidbridge.go` 的
-  `Java_com_wails_app_WarpVpnService_nativeStartVpn/nativeStopVpn` +
+- JNI 导出面（v0.5.9 起 5 个）：`gui/androidbridge.go` 的
+  `Java_com_wails_app_WarpVpnService_nativeStartVpn/nativeStopVpn/nativeVpnRunning` +
   `Java_com_wails_app_MainActivity_nativeLogMessage/nativeSetTimeZone`；Java 侧
-  `WarpVpnService.java`（前两者）+ `MainActivity.java`（后两者，`nativeLogMessage`
+  `WarpVpnService.java`（前三个）+ `MainActivity.java`（后两个，`nativeLogMessage`
   为 package 可见——WarpVpnService 也调用）；CI 双侧 grep 断言保障符号一致。
-  **改 JNI 前必读 §6.8.3**（Go 侧不能直接调 JNIEnv 方法，必须走 C preamble helper）
+  **改 JNI 前必读 §6.8.3**（Go 侧不能直接调 JNIEnv 方法，必须走 C preamble helper）。
+  **nativeStartVpn 必须保持异步**（v0.5.9 ANR 教训）：Java 主线程同步装配 Kernel
+  （拨号无限重试）会 5s ANR；只做轻量前置校验 + 返回 0"已受理"，装配进 goroutine，
+  失败经 androidRuntime.lastErr 上报

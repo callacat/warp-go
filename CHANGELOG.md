@@ -3,7 +3,43 @@
 本项目所有值得记录的变更。格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased] — v0.5.9 计划中
+## [Unreleased] — v0.5.10 计划中
+
+### 修复
+
+- **Android 初始化成功后点启动报 `nativeStartVpn：边缘地址解析失败：-ip ""`
+  （真机，v0.5.9）**：Android 桥调 `core.ResolveEdgeAddrs(cfg, "", "", reg)`，
+  当 `cfg.EdgeAddr` 与 `optsEdgeIP` 均为空时落入 default 分支，把空串当
+  显式端点解析 → "missing port in address"。现 `ResolveEdgeAddrs` 双空时
+  回落 `"4"`（按注册信息 IPv4 端点展开端口列表，与 CLI 默认 `-ip 4` 一致）；
+  补 2 个回归单测（双空回落 / 双空缺 IPv4 报错）。
+- **Android 应用扫描 IP 后再次启动 GUI 卡死（ANR）、VPN 无互联网**（真机，
+  v0.5.9）：`nativeStartVpn` 在 Java 主线程（`onStartCommand`）同步执行
+  Kernel 装配——`NewMasqueClient` 初始拨号无限指数退避重试（每候选 2s
+  超时），边缘不可达时永久阻塞主线程 → 5s 后系统 ANR"卡死"；TUN fd 已由
+  `establish()` 建立但从未交给 Go 内核 → VPN 已激活但无流量。现：
+  - `nativeStartVpn` 改为轻量前置校验 + 立即返回 0（"已受理"），Kernel
+    装配/拨号全部移入 Go goroutine（`startVpnKernel`），主线程不再阻塞；
+  - 新增装配取消信号：`nativeStartVpn` 前置创建 `context.WithCancel`，
+    `nativeStopVpn` 在装配完成前到达即取消，装配各阶段检查 `ctx.Err()`
+    中止并释放已建资源（防止"启动后立刻停止"仍运行）；
+  - 新增 `Java_com_wails_app_WarpVpnService_nativeVpnRunning` JNI 导出，
+    Java 重入守卫据此区分"内核真在运行"（幂等跳过）与"已受理但异步失败"
+    （释放旧 TUN fd 重新建立）——否则失败后 `vpnPfd` 残留导致重试被拦；
+  - `onStartCommand` 的 `vpnPfd`/`nativeRunning` 置位提前到
+    `nativeStartVpn` 之前（异步返回后置位会漏掉 START_STICKY 重投/重入）；
+  - `WarpVpnService.closeNative()` 抽取幂等 teardown，`stopNativeAndClose`
+    复用。
+  - CI `build-release.yml` JNI 双侧 grep 断言新增 `nativeVpnRunning` 签名级
+    检查。
+
+### 文档
+
+- README 新增 **Docker 部署**章节（拉取/注册/启动/验证/注意事项）；
+  `docker-compose.example.yml` 注释完善（首次注册 → 日常启动 → 配置文件
+  进阶的完整切换说明）。
+
+## [v0.5.9] - 2026-08-02
 
 ### 修复
 
