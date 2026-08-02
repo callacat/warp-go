@@ -89,6 +89,10 @@ warp —— Cloudflare WARP 客户端（MASQUE over QUIC/HTTP-3，mixed HTTP+SOC
   -scan-timeout <dur>  扫描总超时（默认 45s）
   -scan-per-probe <dur> 单探针超时（默认 3s）
   -scan-top <n>        选用 RTT 最低的 N 个端点前置（默认 4）
+
+版本：
+  -version         打印版本号（如 warp v0.5.3）并退出
+  -check-update    检查 GitHub Releases 是否有新版本并退出
 ```
 
 ## 路由规则（rules.txt）
@@ -267,6 +271,7 @@ warp-go/
 
 | 版本 | 日期 | 摘要 |
 |---|---|---|
+| [v0.5.4](CHANGELOG.md#unreleased) | 计划中 | 构建产物版本号（CLI -version + Windows PE 版本资源 + GUI 显示 + 产物命名）、检查更新（CLI + GUI 设置页） |
 | [v0.5.3](CHANGELOG.md#v053---2026-08-02) | 2026-08-02 | Android cgo 编译修复、JNI 签名对齐（nativeBridgeReady void→int）、启动失败回滚（状态不再撒谎） |
 | [v0.5.2](CHANGELOG.md#v052---2026-08-01) | 2026-08-01 | Android 内核启动根治（反向 JNI 桥接 VpnService）、日志 init 路由、注册状态切页弹性、扫描无候选修复、状态栏不覆盖、手机底部导航 |
 | [v0.5.1](CHANGELOG.md#unreleased---v051-计划中) | 2026-08-01 | Android 运行时文件统一沙箱锚定（修复 /system/bin 只读崩溃）、日志时间戳去重、注销反馈、竖屏侧边栏自适应、跟随系统主题（全平台） |

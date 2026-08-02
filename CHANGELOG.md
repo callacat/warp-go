@@ -3,6 +3,25 @@
 本项目所有值得记录的变更。格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased] — v0.5.4 计划中
+
+### 新增
+
+- **构建产物版本号**：版本号单一来源 = release tag（`v0.5.3` → `0.5.3`），经
+  `-ldflags -X main.version` 注入：
+  - CLI `-version` 打印版本（`warp v0.5.3`）；`go version -m` buildinfo 可见
+  - Windows PE 版本资源（`goversioninfo` 生成 `.syso`，嵌入 FileVersion/
+    ProductName，资源管理器"详细信息"可见，**降低报毒误报**——有版本/描述
+    的可信二进制）
+  - GUI 设置页"关于"卡片显示版本
+  - Release 产物命名带版本（`warp-0.5.3-linux-amd64`、`warp-gui-0.5.3-*.exe`）
+  - Android APK/AAB versionCode/versionName 由 CI 注入（versionCode 语义
+    单调递增：0.5.3 → 503）
+- **检查更新**：`core/updater.go` 查询 GitHub Releases API 最新版本，与当前
+  版本比较（纯函数 `compareVersions` 可单测）。CLI `-check-update` flag +
+  GUI 设置页"关于"卡片"检查更新"按钮（发现新版本显示 tag + 下载链接）。网络
+  失败非致命（显示"检查失败"）。
+
 ## [v0.5.3] - 2026-08-02
 
 ### 修复
