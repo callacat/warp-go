@@ -66,6 +66,7 @@ import (
 	"errors"
 	"log"
 	"sync"
+	"unsafe"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 
@@ -230,13 +231,13 @@ func Java_com_wails_app_WarpVpnService_nativeStopVpn(env *C.JNIEnv, obj C.jobjec
 func Java_com_wails_app_MainActivity_nativeBridgeReady(env *C.JNIEnv, cls C.jclass) C.jint {
 	C.storeJvm(env)
 	clsRef := C.newGlobalRef(env, cls)
-	if clsRef == nil {
+	if unsafe.Pointer(clsRef) == nil {
 		log.Println("⚠ nativeBridgeReady：无法创建 MainActivity 全局引用")
 		return -1
 	}
 	startM := C.getRequestStartMethod(env, clsRef)
 	stopM := C.getRequestStopMethod(env, clsRef)
-	if startM == nil || stopM == nil {
+	if unsafe.Pointer(startM) == nil || unsafe.Pointer(stopM) == nil {
 		log.Println("⚠ nativeBridgeReady：找不到 requestStartVpn/requestStopVpn 静态方法")
 		return -1
 	}
@@ -255,10 +256,10 @@ func androidRequestVpnStart() error {
 	androidCtl.mu.Lock()
 	cls, startM, ready := androidCtl.cls, androidCtl.startM, androidCtl.ready
 	androidCtl.mu.Unlock()
-	if !ready || cls == nil || startM == nil {
+	if !ready || unsafe.Pointer(cls) == nil || unsafe.Pointer(startM) == nil {
 		return errors.New("Android VPN 桥未就绪（MainActivity 未初始化）")
 	}
-	needsDetach := 0
+	var needsDetach C.int
 	env := C.getEnv(&needsDetach)
 	if env == nil {
 		return errors.New("Android VPN 桥：无法获取 JNIEnv")
@@ -273,10 +274,10 @@ func androidRequestVpnStop() error {
 	androidCtl.mu.Lock()
 	cls, stopM, ready := androidCtl.cls, androidCtl.stopM, androidCtl.ready
 	androidCtl.mu.Unlock()
-	if !ready || cls == nil || stopM == nil {
+	if !ready || unsafe.Pointer(cls) == nil || unsafe.Pointer(stopM) == nil {
 		return nil // 桥未就绪 = 尚未启动，停止为幂等 no-op
 	}
-	needsDetach := 0
+	var needsDetach C.int
 	env := C.getEnv(&needsDetach)
 	if env == nil {
 		return errors.New("Android VPN 桥：无法获取 JNIEnv")
