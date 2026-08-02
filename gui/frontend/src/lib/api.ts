@@ -49,6 +49,8 @@ interface ServiceAPI {
   GetConfig(): Promise<unknown>;
   SaveConfig(config: Record<string, unknown>): Promise<unknown>;
   GetLogs(limit: number): Promise<unknown>;
+  GetVersion(): Promise<unknown>;
+  CheckUpdate(): Promise<unknown>;
 }
 
 // ---------- demo data (used while bindings are placeholders) ----------
@@ -403,6 +405,34 @@ export async function getLogs(limit = 200): Promise<LogEntry[]> {
     return [...mockState.logs].slice(-limit);
   }
   return fromLogs(await svc.GetLogs(limit));
+}
+
+export async function getVersion(): Promise<string> {
+  const svc = await loadService();
+  if (!svc) {
+    await sleep(jitter(60));
+    return "dev";
+  }
+  const raw = await svc.GetVersion();
+  return typeof raw === "string" ? raw : "dev";
+}
+
+export interface UpdateInfo {
+  current: string;
+  latest: string;
+  has_update: boolean;
+  url: string;
+  tag: string;
+}
+
+export async function checkUpdate(): Promise<UpdateInfo> {
+  const svc = await loadService();
+  if (!svc) {
+    await sleep(jitter(400));
+    return { current: "dev", latest: "dev", has_update: false, url: "", tag: "" };
+  }
+  const raw = await svc.CheckUpdate();
+  return (raw as UpdateInfo) ?? { current: "", latest: "", has_update: false, url: "", tag: "" };
 }
 
 function now(): string {

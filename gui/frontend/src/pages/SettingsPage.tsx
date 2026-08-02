@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
 import { Monitor, Moon, Palette, Rocket, RotateCcw, Save, Sun } from "lucide-react";
 import {
+  checkUpdate,
   getAutostartEnabled,
   getConfig,
+  getVersion,
   isDemoMode,
   saveConfig,
   setAutostart,
@@ -26,13 +28,39 @@ export default function SettingsPage() {
   const [notice, setNotice] = useState<string | null>(null);
   const [autostart, setAutostartState] = useState(false);
   const [autostartBusy, setAutostartBusy] = useState(false);
+  const [version, setVersion] = useState<string>("…");
+  const [updateInfo, setUpdateInfo] = useState<string | null>(null);
+  const [updateUrl, setUpdateUrl] = useState<string | null>(null);
+  const [checking, setChecking] = useState(false);
   const { mode, setMode } = useTheme();
 
   useEffect(() => {
     void isDemoMode().then(setDemo);
     void load();
     getAutostartEnabled().then(setAutostartState).catch(() => {});
+    getVersion().then(setVersion).catch(() => {});
   }, []);
+
+  const onCheckUpdate = async () => {
+    setChecking(true);
+    setUpdateInfo(null);
+    setUpdateUrl(null);
+    try {
+      const info = await checkUpdate();
+      if (info.has_update) {
+        setUpdateInfo(`发现新版本 ${info.tag}（当前 ${version}）`);
+        setUpdateUrl(info.url || null);
+      } else if (info.latest && info.latest !== "dev") {
+        setUpdateInfo(`已是最新版本 ${info.latest}`);
+      } else {
+        setUpdateInfo("当前为开发版，无法比较版本");
+      }
+    } catch (e) {
+      setUpdateInfo(`检查失败：${String(e)}`);
+    } finally {
+      setChecking(false);
+    }
+  };
 
   const load = async () => {
     try {
@@ -79,6 +107,38 @@ export default function SettingsPage() {
 
   return (
     <div className="space-y-4">
+      <Card title="关于">
+        <div className="flex items-center gap-3">
+          <Rocket className="h-5 w-5 text-orange-500" />
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-medium">warp-go {version}</p>
+            <p className="text-xs text-slate-500 dark:text-slate-400">
+              Cloudflare WARP 客户端（MASQUE over QUIC/HTTP-3）
+            </p>
+          </div>
+          <Button variant="secondary" onClick={onCheckUpdate} disabled={checking}>
+            {checking ? "检查中…" : "检查更新"}
+          </Button>
+        </div>
+        {updateInfo && (
+          <p className="mt-3 text-sm">
+            <span className={updateUrl ? "text-amber-600 dark:text-amber-400" : "text-emerald-600 dark:text-emerald-400"}>
+              {updateInfo}
+            </span>
+            {updateUrl && (
+              <a
+                href={updateUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="ml-2 text-orange-600 underline dark:text-orange-400"
+              >
+                前往下载
+              </a>
+            )}
+          </p>
+        )}
+      </Card>
+
       <Card title="外观">
         <div className="flex items-start gap-3">
           <Palette className="mt-0.5 h-5 w-5 text-orange-500" />
