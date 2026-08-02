@@ -19,7 +19,14 @@ android {
         // 保证单调递增（Play 要求每次上传 versionCode 必须增大）。
         def versionNameStr = System.getenv("VERSION_NAME") ?: "1.0"
         def parts = versionNameStr.split("\\.").collect { it.toInteger() }
-        versionCode (parts[0] * 10000 + parts[1] * 100 + parts[2])
+        // versionCode 用语义版本的主/次/补丁拼成整数（0.5.3 → 503）。
+        // 手动触发/本地构建时版本号可能是 2 段（如 "1.0"）或缺段——
+        // 缺段补 0，避免 parts[2] 为 null 触发 Integer.plus(null) 崩溃
+        // （CI workflow_dispatch 时 GITHUB_REF_NAME=main → VERSION=1.0）。
+        def major = parts.size() > 0 ? parts[0] : 0
+        def minor = parts.size() > 1 ? parts[1] : 0
+        def patch = parts.size() > 2 ? parts[2] : 0
+        versionCode (major * 10000 + minor * 100 + patch)
         versionName versionNameStr
 
         // Configure supported ABIs
