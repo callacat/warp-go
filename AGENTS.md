@@ -175,6 +175,10 @@ release 同名 tag 冲突），但期间 Agent 均提前报告"Android 版已成
   不要在 tag 发布时才第一次跑 Android 构建。
 - 本地能做的 Android 验证有限：`go vet`（只查非 cgo 部分）、C preamble 可用 gcc 单独编译
   （无 jni.h 时跳过）、CI 的 grep 断言（只查符号存在，抓不到类型/可见性错误）。
+- **平台 build tag 文件必须交叉编译验证**：`GOOS=windows/darwin CGO_ENABLED=0 go build ./<pkg>/`
+  能抓到 linux 编译不暴露的问题（如 windows-only 文件的未用 import、darwin-only 语法错误）。
+  v0.5.8 教训：`sysproxy/windows.go` 挪走 containsTarget 后残留未用的 `strings` import，
+  linux 编译正常，CI 的 windows job 才报错。
 
 ### 6.8.3 cgo/JNI 与 Java 的固定坑（v0.5.7 两连败直接原因）
 

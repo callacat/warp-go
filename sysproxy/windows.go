@@ -5,7 +5,6 @@ package sysproxy
 import (
 	"fmt"
 	"net"
-	"strings"
 
 	"golang.org/x/sys/windows/registry"
 )
