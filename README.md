@@ -60,6 +60,53 @@ curl --socks5-hostname 127.0.0.1:40000 https://www.cloudflare.com/cdn-cgi/trace
 ./warp-gui
 ```
 
+## Docker 部署
+
+镜像发布到 GHCR（`docker-ghcr` 工作流，linux/amd64 + arm64），容器内免
+root、无 TUN、无 NET_ADMIN，以 uid 1001 运行。
+
+### 快速开始
+
+```bash
+# 1) 拉取镜像
+docker pull ghcr.io/callacat/warp-go:latest
+
+# 2) 首次运行：注册（在宿主目录生成 reg.json）
+mkdir -p warp-data
+docker run --rm -v "$PWD/warp-data:/data" ghcr.io/callacat/warp-go:latest -reg
+
+# 3) 启动代理（mixed HTTP+SOCKS5，监听 0.0.0.0:40000）
+docker run -d --name warp --restart unless-stopped \
+  -v "$PWD/warp-data:/data" -p 40000:40000 \
+  ghcr.io/callacat/warp-go:latest -l 0.0.0.0:40000
+
+# 4) 验证走隧道
+curl --socks5-hostname 127.0.0.1:40000 https://www.cloudflare.com/cdn-cgi/trace
+# 期望输出含 warp=on
+```
+
+### docker compose（推荐）
+
+复制 `docker-compose.example.yml` 为 `docker-compose.yml`，按注释切换
+`command` 即可（注册 → 日常启动 → 配置文件进阶）。数据文件
+（`config.json` / `reg.json` / `rules.txt` / `geo/`）持久化在宿主
+`./warp-data`，容器重建不丢注册与配置。
+
+```bash
+docker compose up -d
+docker compose logs -f warp
+```
+
+### 注意事项
+
+- **`0.0.0.0` 监听无认证**：对局域网开放代理。不可信网络请绑定回环
+  （`-l 127.0.0.1:40000`）或启用 `-user` / `-pass` 认证。
+- **注册是一次性的**：`reg.json` 在 `./warp-data`，删除即需重新注册。
+- **GEO 分流**：首次以 `-l` 启动生成默认 `config.json` 后，可改用
+  `-config config.json` 启动，并编辑 `rules.txt` 实现分流（变更热重载）。
+- **镜像 tag**：`latest` 随 main 推送更新；`v*` tag 对应发布版本
+  （如 `ghcr.io/callacat/warp-go:v0.5.9`）。
+
 ## 命令行参数
 
 ```

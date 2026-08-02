@@ -1,20 +1,40 @@
+# warp-go Docker Compose 示例
+#
+# 用法：
+#   1. 首次运行先注册（下方"注册"命令），注册完成后删除 volumes 里
+#      ./warp-data/reg.json 会丢失注册 → 需重新注册。
+#   2. 日常启动：把 command 切换为运行命令（见下），`docker compose up -d`。
+#   3. 验证：curl --socks5-hostname 127.0.0.1:40000 https://www.cloudflare.com/cdn-cgi/trace
+#
+# 数据文件（config.json / reg.json / rules.txt / geo/）持久化在宿主 ./warp-data，
+# 容器删除重建不丢注册与配置。执行目录即 /data，所有相对路径锚定于此。
+
 services:
   warp:
     image: ghcr.io/callacat/warp-go:latest
     container_name: warp
     restart: unless-stopped
-    # 数据文件（reg.json / config.json / rules.txt / geo/）持久化在宿主目录
     volumes:
       - ./warp-data:/data
     ports:
       - "40000:40000"
-    # 首次运行先注册；注册完成后改为启动代理：
-    # command: ["-reg"]
-    # 注册后可用以下命令启动（默认监听 40000，mixed HTTP+SOCKS5）：
-    command: ["-l", "0.0.0.0:40000"]
-    # 若需开启 GEO 分流，用配置文件方式启动：
-    # command: ["-config", "config.json"]
     cap_drop:
       - ALL
     security_opt:
       - no-new-privileges:true
+
+    # ── 首次运行：注册（生成 reg.json 到 ./warp-data）──
+    # 注册完成（看到 "✓ 注册成功"）后按 Ctrl+C 停止，再切到下方"日常启动"。
+    # command: ["-reg"]
+
+    # ── 日常启动：mixed HTTP+SOCKS5 代理，默认监听 0.0.0.0:40000 ──
+    # 不指定 -ip 时按注册信息 IPv4 边缘展开端口列表；显式指定
+    # 4 / 6 / host:port 均可（如 -ip 162.159.198.2:443）。
+    # 注意：0.0.0.0 监听对局域网开放且无认证 → 请配合防火墙或改用
+    # -user/-pass（RFC 1929 / HTTP Basic 认证）。
+    command: ["-l", "0.0.0.0:40000"]
+
+    # ── 进阶：配置文件方式（GEO 分流/热重载）──
+    # 首次以 -l 启动会生成默认 config.json；之后可改用：
+    # command: ["-config", "config.json"]
+    # 并自行编辑 ./warp-data/config.json 与 ./warp-data/rules.txt（变更热重载）。
