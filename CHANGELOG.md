@@ -3,7 +3,28 @@
 本项目所有值得记录的变更。格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased] — v0.5.4 计划中
+## [Unreleased] — v0.5.6 计划中
+
+### 修复
+
+- **GUI 状态显示错误**（win/Android 真机，v0.5.5 起暴露）：`fromStatus` 读
+  `o.State`（大写）但后端 JSON 是 `state`（小写）→ `running` 恒 false →
+  启动后按钮不变"停止"、状态页显示"已停止"（端口实际在监听）。改为 `o.state`，
+  `types.test.ts` 用真实后端 JSON 验证映射。
+- **GEO 更新时间不显示**（win 真机）：`fromGeo` 读 `o.geositeUpdated`（camelCase）
+  但后端是 `geosite_updated`（snake_case）→ 恒 undefined → "更新于 —"。改为
+  snake_case 优先 + camelCase 兜底。
+- **注册信息只显示设备 ID 和隧道类型**（win 真机）：StatusPage 注册卡片未渲染
+  account/密钥类型/边缘端口字段。补全 9 字段；`types.test.ts` 断言全映射。
+- **Android 无法开启系统代理**（真机）：`SetSystemProxy` 无 android 分支，走
+  桌面逻辑等 SOCKS server running（Android 永不运行）→ 静默超时。现 Android
+  明确报错"VPN 接管全部流量，无需系统代理"，前端隐藏系统代理卡片
+  （`System.IsAndroid()`）。
+- **Android 注销失败**（真机）：`DeleteRegistration` API 注销失败只 log 警告
+  不返回错误 → 用户不知 API 侧注册仍在。现 API 失败返回错误（本地仍删除）；
+  GUI `Deregister` 用 `cachedDataDir()` 兜底，不依赖可能失败的 serverInstance。
+
+## [v0.5.5] - 2026-08-02
 
 ### 修复
 

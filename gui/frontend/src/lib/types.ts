@@ -96,7 +96,7 @@ export function fromCounters(v: unknown): ProxyCounters {
 export function fromStatus(v: unknown): AppStatus {
   const o = (v ?? {}) as Record<string, unknown>;
   return {
-    running: o.running === true || o.State === "running",
+    running: o.running === true || o.state === "running",
     listening: str(o.listen_addr ?? o.listening, "127.0.0.1:40000"),
     startedAt:
       typeof o.start_time === "string"
@@ -155,17 +155,32 @@ export function fromConfig(v: unknown): AppConfig {
 export function fromGeo(v: unknown): GeoInfo {
   const o = (v ?? {}) as Record<string, unknown>;
   return {
-    geositePath: str(o.geositePath, "geo/geosite.dat"),
-    geoipPath: str(o.geoipPath, "geo/geoip-lite.dat"),
-    geositeUpdated: typeof o.geositeUpdated === "string" ? o.geositeUpdated : undefined,
-    geoipUpdated: typeof o.geoipUpdated === "string" ? o.geoipUpdated : undefined,
+    geositePath: str(o.geosite_path ?? o.geositePath, "geo/geosite.dat"),
+    geoipPath: str(o.geoip_path ?? o.geoipPath, "geo/geoip-lite.dat"),
+    geositeUpdated:
+      typeof o.geosite_updated === "string"
+        ? o.geosite_updated
+        : typeof o.geositeUpdated === "string"
+          ? o.geositeUpdated
+          : undefined,
+    geoipUpdated:
+      typeof o.geoip_updated === "string"
+        ? o.geoip_updated
+        : typeof o.geoipUpdated === "string"
+          ? o.geoipUpdated
+          : undefined,
     repository: str(o.repository, "MetaCubeX/meta-rules-dat"),
     baseURL: str(
-      o.baseURL,
+      o.base_url ?? o.baseURL,
       "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest",
     ),
-    autoUpdateDays: num(o.autoUpdateDays, 7),
-    lastChecked: typeof o.lastChecked === "string" ? o.lastChecked : undefined,
+    autoUpdateDays: num(o.auto_update_days ?? o.autoUpdateDays, 7),
+    lastChecked:
+      typeof o.last_checked === "string"
+        ? o.last_checked
+        : typeof o.lastChecked === "string"
+          ? o.lastChecked
+          : undefined,
   };
 }
 

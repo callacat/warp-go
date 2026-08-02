@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { KeyRound, Play, Square, Globe, Trash2 } from "lucide-react";
+import { System } from "@wailsio/runtime";
 import {
   deregister,
   getStatus,
@@ -10,6 +11,9 @@ import {
 } from "../lib/api";
 import { fromStatus, fromConfig, AppStatus, AppConfig } from "../lib/types";
 import { Card, Button, Toggle, StatusPill } from "../components/ui";
+
+// Android 由 VpnService TUN 接管全部流量，无系统代理概念；桌面端才显示。
+const isAndroid = System.IsAndroid();
 
 function usePoll<T>(fn: () => Promise<T>, ms: number, deps: unknown[] = []) {
   const [data, setData] = useState<T | null>(null);
@@ -200,6 +204,18 @@ export default function StatusPage() {
               </p>
             </div>
             <div>
+              <p className="text-xs text-slate-500 dark:text-slate-400">账号</p>
+              <p className="mt-1 break-all font-mono text-xs text-slate-900 dark:text-slate-100">
+                {status.registration.account || "—"}
+              </p>
+            </div>
+            <div>
+              <p className="text-xs text-slate-500 dark:text-slate-400">密钥类型</p>
+              <p className="mt-1 font-mono text-sm text-slate-900 dark:text-slate-100">
+                {status.registration.keyType || "—"}
+              </p>
+            </div>
+            <div>
               <p className="text-xs text-slate-500 dark:text-slate-400">分配的 IPv4</p>
               <p className="mt-1 font-mono text-sm text-emerald-600 dark:text-emerald-400">
                 {status.registration.assignedIPv4 || "—"}
@@ -221,6 +237,14 @@ export default function StatusPage() {
               <p className="text-xs text-slate-500 dark:text-slate-400">边缘 IPv6</p>
               <p className="mt-1 font-mono text-sm text-slate-900 dark:text-slate-100">
                 {status.registration.endpointV6 || "—"}
+              </p>
+            </div>
+            <div>
+              <p className="text-xs text-slate-500 dark:text-slate-400">边缘端口</p>
+              <p className="mt-1 font-mono text-sm text-slate-900 dark:text-slate-100">
+                {status.registration.endpointPorts?.length
+                  ? status.registration.endpointPorts.join(", ")
+                  : "—"}
               </p>
             </div>
             <div>
@@ -262,22 +286,24 @@ export default function StatusPage() {
         </div>
       </Card>
 
-      <Card title="系统代理">
-        <div className="flex items-center justify-between gap-4">
-          <div className="flex items-center gap-3">
-            <Globe className="h-5 w-5 text-slate-400" />
-            <div>
-              <p className="text-sm font-medium text-slate-800 dark:text-slate-200">
-                Windows / macOS / Linux 系统代理
-              </p>
-              <p className="text-xs text-slate-500 dark:text-slate-400">
-                将系统 HTTP/SOCKS 代理指向 {status.listening}
-              </p>
+      {!isAndroid && (
+        <Card title="系统代理">
+          <div className="flex items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <Globe className="h-5 w-5 text-slate-400" />
+              <div>
+                <p className="text-sm font-medium text-slate-800 dark:text-slate-200">
+                  Windows / macOS / Linux 系统代理
+                </p>
+                <p className="text-xs text-slate-500 dark:text-slate-400">
+                  将系统 HTTP/SOCKS 代理指向 {status.listening}
+                </p>
+              </div>
             </div>
+            <Toggle checked={proxyEnabled} onChange={toggleProxy} label="系统代理" />
           </div>
-          <Toggle checked={proxyEnabled} onChange={toggleProxy} label="系统代理" />
-        </div>
-      </Card>
+        </Card>
+      )}
     </div>
   );
 }

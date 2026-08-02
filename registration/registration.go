@@ -524,13 +524,20 @@ func DeleteRegistration(stateFile string) error {
 	}
 
 	reg := &Registration{ID: ident.ID, Token: ident.Token}
+	var apiErr error
 	if err := reg.Delete(); err != nil {
+		apiErr = err
 		log.Printf("警告：API 注销失败（可能已被删除）：%v", err)
 	}
 	if err := os.Remove(stateFile); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("删除注册文件失败：%w", err)
 	}
 	log.Printf("✓ 已删除本地注册文件：%s", stateFile)
+	// API 注销失败但本地已删除：返回错误告知用户（API 侧注册仍存在，
+	// 需网络恢复后重试或手动处理），避免"以为已注销"。
+	if apiErr != nil {
+		return fmt.Errorf("本地注册已删除，但 API 注销失败：%w", apiErr)
+	}
 	return nil
 }
 

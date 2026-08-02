@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"warp/core"
+	"warp/registration"
 	"warp/route"
 )
 
@@ -240,6 +241,13 @@ func (s *Service) Register() (existing bool, id string, err error) {
 
 // Deregister 注销并删除本地注册。
 func (s *Service) Deregister() error {
+	// Android 上 serverInstance 可能因桥接抖动失败；注销不依赖内核，
+	// 用缓存的沙箱目录兜底直接调 DeleteRegistration（API 注销 + 删文件）。
+	if runtime.GOOS == "android" {
+		if dir := cachedDataDir(); dir != "" {
+			return registration.DeleteRegistration(filepath.Join(dir, "reg.json"))
+		}
+	}
 	srv, err := s.serverInstance()
 	if err != nil {
 		return err
@@ -383,6 +391,13 @@ func (s *Service) UpdateGeo() UpdateGeoResult {
 // 开启且内核未运行时自动启动代理内核（用户需求：开启系统代理即启动
 // warp-go）。未注册时 Start 会报错并记录到 startErr/日志，不会挂起。
 func (s *Service) SetSystemProxy(enabled bool) error {
+	if runtime.GOOS == "android" {
+		// Android 上系统代理无意义：VpnService 的 TUN 已接管全部流量，
+		// 没有 gsettings/networksetup/注册表可设。明确报错而非静默成功，
+		// 前端显示提示（此前静默成功但用户看到"系统代理未生效"）。
+		return errors.New("Android 由 VPN 接管全部流量，无需设置系统代理")
+	}
+
 	srv, err := s.serverInstance()
 	if err != nil {
 		return err
