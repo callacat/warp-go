@@ -1,3 +1,4 @@
+//go:generate goversioninfo -64
 package main
 
 // warp-go GUI 入口。Wails v3 桌面壳：

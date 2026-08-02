@@ -1,3 +1,4 @@
+//go:generate goversioninfo -64
 package main
 
 import (
@@ -7,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -59,6 +61,10 @@ func usage() {
 注册：
   -reg             尚未注册时执行注册，然后退出
   -del             向 API 注销并删除本地注册信息
+
+版本：
+  -version         打印版本号（如 warp v0.5.3）并退出
+  -check-update    检查 GitHub Releases 是否有新版本并退出
 
 注册信息保存在工作目录下的 reg.json。首次使用需先注册：启动本身从不注册，
 因为创建账号是一个需要明确表达的动作。-reg 是幂等的 —— 已有注册时只报告并
@@ -133,9 +139,39 @@ func main() {
 		scanTimeout  = flag.Duration("scan-timeout", 45*time.Second, "扫描总超时（硬上限）")
 		scanPerProbe = flag.Duration("scan-per-probe", 3*time.Second, "单探针超时")
 		scanTop      = flag.Int("scan-top", 4, "选用 RTT 最低的 N 个端点前置")
+
+		showVersion   = flag.Bool("version", false, "打印版本号并退出")
+		checkUpdateFL = flag.Bool("check-update", false, "检查是否有新版本并退出")
 	)
 	flag.Usage = usage
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println("warp " + VersionString())
+		return
+	}
+
+	if *checkUpdateFL {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		cur := strings.TrimPrefix(VersionString(), "v")
+		if cur == "dev" {
+			cur = ""
+		}
+		info, err := core.CheckUpdate(ctx, cur)
+		if err != nil {
+			log.Printf("检查更新失败：%v", err)
+			return
+		}
+		if info.HasUpdate {
+			fmt.Printf("有新版本：%s（当前 %s）→ %s\n", info.Tag, info.Current, info.URL)
+		} else if info.Latest != "" {
+			fmt.Printf("已是最新版本 %s\n", info.Latest)
+		} else {
+			fmt.Println("当前为开发版，无法检查更新")
+		}
+		return
+	}
 
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
 

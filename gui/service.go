@@ -503,6 +503,25 @@ func (s *Service) GetLogs(limit int) []LogEntry {
 	return ringLog.Snapshot(limit)
 }
 
+// GetVersion 返回构建版本（前端设置页展示）。版本号经 ldflags 注入，
+// 与 release tag 同源；本地构建返回 "dev"。
+func (s *Service) GetVersion() string {
+	return VersionString()
+}
+
+// CheckUpdate 查询 GitHub Releases 最新版本并返回更新信息。
+// 网络失败返回错误（前端显示"检查失败"，非致命）；dev 版本不参与比较
+// （永远提示可更新，引导用户装正式版）。
+func (s *Service) CheckUpdate() (*core.UpdateInfo, error) {
+	cur := strings.TrimPrefix(VersionString(), "v")
+	if cur == "dev" {
+		cur = ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	return core.CheckUpdate(ctx, cur)
+}
+
 // ---------------------------------------------------------------------------
 // 内部工具
 // ---------------------------------------------------------------------------

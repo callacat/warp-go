@@ -71,14 +71,32 @@ jobs:
           go-version: '1.26.x'
           check-latest: true
 
+      - name: 安装 goversioninfo（Windows PE 版本资源生成）
+        run: |
+          go install github.com/josephspurrier/goversioninfo/cmd/goversioninfo@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
       - name: 构建 CLI 二进制
         env:
           GOOS: ${{ matrix.os }}
           GOARCH: ${{ matrix.arch }}
         run: |
           EXE=""
-          if [ "$GOOS" = "windows" ]; then EXE=".exe"; fi
-          CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "dist/${BINARY_NAME}-${GOOS}-${GOARCH}${EXE}" .
+          VERSION="${GITHUB_REF_NAME#v}"   # tag v0.5.3 → 0.5.3；手动触发无 tag 时为空
+          if [ -z "$VERSION" ]; then VERSION="dev"; fi
+          if [ "$GOOS" = "windows" ]; then
+            EXE=".exe"
+            # Windows PE 版本资源：go:generate 用 goversioninfo 生成 resource_windows.syso
+            # （嵌入 FileVersion/ProductName，资源管理器"详细信息"可见，降低报毒误报）。
+            # 版本号先写进 versioninfo.json，再生成 syso。
+            if [ "$VERSION" != "dev" ]; then
+              sed -i "s/0\.0\.0\.0/${VERSION}/g" versioninfo.json
+            fi
+            go generate ./...
+          fi
+          CGO_ENABLED=0 go build -trimpath \
+            -ldflags="-s -w -X main.version=${VERSION}" \
+            -o "dist/${BINARY_NAME}-${VERSION}-${GOOS}-${GOARCH}${EXE}" .
 
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
@@ -131,6 +149,12 @@ jobs:
           go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-alpha2.119
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
+      - name: 安装 goversioninfo（Windows PE 版本资源生成）
+        if: matrix.os == 'windows'
+        run: |
+          go install github.com/josephspurrier/goversioninfo/cmd/goversioninfo@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
       # 先生成 bindings 再构建前端：前端 api.ts 静态 import bindings，
       # 若顺序颠倒，npm build 会打进占位文件（演示模式）。
       - name: 生成 Wails 绑定
@@ -151,13 +175,20 @@ jobs:
           GOOS: ${{ matrix.os }}
         run: |
           EXE=""
-          LDFLAGS="-s -w"
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [ -z "$VERSION" ]; then VERSION="dev"; fi
+          LDFLAGS="-s -w -X main.version=${VERSION}"
           if [ "$GOOS" = "windows" ]; then
             EXE=".exe"
             # -H windowsgui：Windows GUI 程序不弹 CMD 黑框（否则每次启动闪黑框）
             LDFLAGS="$LDFLAGS -H windowsgui"
+            # Windows PE 版本资源（同 CLI）：写版本进 versioninfo.json 再 go generate
+            if [ "$VERSION" != "dev" ]; then
+              sed -i "s/0\.0\.0\.0/${VERSION}/g" versioninfo.json
+            fi
+            go generate ./...
           fi
-          GOOS=$GOOS GOARCH=amd64 CGO_ENABLED=1 go build -trimpath -ldflags="$LDFLAGS" -o "../dist/warp-gui-${GOOS}-amd64${EXE}" .
+          GOOS=$GOOS GOARCH=amd64 CGO_ENABLED=1 go build -trimpath -ldflags="$LDFLAGS" -o "../dist/warp-gui-${VERSION}-${GOOS}-amd64${EXE}" .
 
       - name: 上传 GUI 产物
         uses: actions/upload-artifact@v4
@@ -256,9 +287,12 @@ jobs:
           GOOS: android
           GOARCH: arm64
         run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [ -z "$VERSION" ]; then VERSION="dev"; fi
           mkdir -p build/android/app/src/main/jniLibs/arm64-v8a
           go build -buildmode=c-shared -overlay build/android/overlay.json \
-            -tags production,android -trimpath -buildvcs=false -ldflags="-w -s" \
+            -tags production,android -trimpath -buildvcs=false \
+            -ldflags="-w -s -X main.version=${VERSION}" \
             -o build/android/app/src/main/jniLibs/arm64-v8a/libwails.so
 
       - name: 编译 c-shared 库（x86_64）
@@ -269,9 +303,12 @@ jobs:
           GOOS: android
           GOARCH: amd64
         run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [ -z "$VERSION" ]; then VERSION="dev"; fi
           mkdir -p build/android/app/src/main/jniLibs/x86_64
           go build -buildmode=c-shared -overlay build/android/overlay.json \
-            -tags production,android -trimpath -buildvcs=false -ldflags="-w -s" \
+            -tags production,android -trimpath -buildvcs=false \
+            -ldflags="-w -s -X main.version=${VERSION}" \
             -o build/android/app/src/main/jniLibs/x86_64/libwails.so
 
       # 反向 JNI 桥（androidbridge.go ↔ MainActivity.java）符号名与返回类型
@@ -298,7 +335,11 @@ jobs:
       # 无需仓库 secrets；产物可安装。AAB 同理（Play 上传需正式 keystore，此处仅作产物）。
       - name: 构建 Release APK 与 AAB
         working-directory: gui/build/android
+        shell: bash
         run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [ -z "$VERSION" ] || [ "$VERSION" = "$GITHUB_REF_NAME" ]; then VERSION="1.0"; fi
+          export VERSION_NAME="$VERSION"
           chmod +x ./gradlew
           ./gradlew assembleRelease bundleRelease --no-daemon
 

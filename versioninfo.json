@@ -1,0 +1,43 @@
+{
+    "FixedFileInfo": {
+        "FileVersion": {
+            "Major": 0,
+            "Minor": 0,
+            "Patch": 0,
+            "Build": 0
+        },
+        "ProductVersion": {
+            "Major": 0,
+            "Minor": 0,
+            "Patch": 0,
+            "Build": 0
+        },
+        "FileFlagsMask": "3f",
+        "FileFlags ": "00",
+        "FileOS": "040004",
+        "FileType": "01",
+        "FileSubType": "00"
+    },
+    "StringFileInfo": {
+        "Comments": "Cloudflare WARP client (MASQUE over QUIC/HTTP-3)",
+        "CompanyName": "warp-go",
+        "FileDescription": "warp-go - Cloudflare WARP client",
+        "FileVersion": "0.5.3",
+        "InternalName": "warp",
+        "LegalCopyright": "",
+        "LegalTrademarks": "",
+        "OriginalFilename": "warp.exe",
+        "PrivateBuild": "",
+        "ProductName": "warp-go",
+        "ProductVersion": "0.5.3",
+        "SpecialBuild": ""
+    },
+    "VarFileInfo": {
+        "Translation": {
+            "LangID": "0409",
+            "CharsetID": "04B0"
+        }
+    },
+    "IconPath": "",
+    "ManifestPath": ""
+}

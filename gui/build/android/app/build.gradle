@@ -14,8 +14,13 @@ android {
         applicationId "com.wails.app"
         minSdk 21
         targetSdk 35
-        versionCode 1
-        versionName "1.0"
+        // 版本号由 CI 注入（VERSION_NAME 如 0.5.3）；本地构建回退 1.0。
+        // versionCode 用语义版本的主/次/补丁拼成整数（0.5.3 → 503），
+        // 保证单调递增（Play 要求每次上传 versionCode 必须增大）。
+        def versionNameStr = System.getenv("VERSION_NAME") ?: "1.0"
+        def parts = versionNameStr.split("\\.").collect { it.toInteger() }
+        versionCode (parts[0] * 10000 + parts[1] * 100 + parts[2])
+        versionName versionNameStr
 
         // Configure supported ABIs
         ndk {
