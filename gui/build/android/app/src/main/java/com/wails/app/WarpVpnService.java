@@ -82,6 +82,15 @@ public class WarpVpnService extends VpnService {
 
         String ipv4 = intent != null ? intent.getStringExtra(EXTRA_ASSIGNED_IPV4) : null;
         String ipv6 = intent != null ? intent.getStringExtra(EXTRA_ASSIGNED_IPV6) : null;
+        // startVpnService 不传 extras（MainActivity 不解析 reg.json），从
+        // 应用沙箱 reg.json 读取分配的隧道地址兜底——否则 VpnService.Builder
+        // 无地址，establish() 抛 "At least one address must be specified"
+        // （v0.5.8 真机反馈"VPN 建立失败"）。
+        if (ipv4 == null || ipv6 == null) {
+            String[] assigned = readAssignedAddrs();
+            if (ipv4 == null) ipv4 = assigned[0];
+            if (ipv6 == null) ipv6 = assigned[1];
+        }
 
         VpnService.Builder builder = new VpnService.Builder();
         builder.setSession("warp-go");
@@ -157,6 +166,40 @@ public class WarpVpnService extends VpnService {
         } catch (Exception e) {
             Log.w(TAG, "invalid assigned IP: " + ip, e);
         }
+    }
+
+    /**
+     * Read assigned_ipv4 / assigned_ipv6 from the sandbox reg.json
+     * ({@code getFilesDir()/reg.json}) as a fallback when the start intent
+     * carries no extras. Returns a 2-element array [ipv4, ipv6]; missing or
+     * unparseable values are empty strings.
+     */
+    private String[] readAssignedAddrs() {
+        String[] out = { "", "" };
+        try {
+            java.io.File reg = new java.io.File(getFilesDir(), "reg.json");
+            if (!reg.exists()) {
+                return out;
+            }
+            java.io.InputStream in = new java.io.FileInputStream(reg);
+            try {
+                byte[] buf = new byte[(int) reg.length()];
+                int off = 0;
+                while (off < buf.length) {
+                    int n = in.read(buf, off, buf.length - off);
+                    if (n < 0) break;
+                    off += n;
+                }
+                org.json.JSONObject o = new org.json.JSONObject(new String(buf, 0, off, "UTF-8"));
+                out[0] = o.optString("assigned_ipv4", "");
+                out[1] = o.optString("assigned_ipv6", "");
+            } finally {
+                in.close();
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "readAssignedAddrs failed", e);
+        }
+        return out;
     }
 
     @Override

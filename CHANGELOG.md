@@ -3,7 +3,21 @@
 本项目所有值得记录的变更。格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased] — v0.5.8 计划中
+## [Unreleased] — v0.5.9 计划中
+
+### 修复
+
+- **Android 启动报错"VPN 建立失败：At least one address must be specified"**
+  （真机，v0.5.8）：`WarpVpnService.onStartCommand` 从 intent extras 读
+  `assigned_ipv4/6`，但 `MainActivity.startVpnService()` 从未传 extras →
+  `VpnService.Builder` 无地址 → `establish()` 抛异常。现 WarpVpnService 在
+  extras 缺失时从沙箱 `reg.json` 读 `assigned_ipv4/6` 兜底（`getFilesDir()`）。
+- **Android 点击注销无确认框、无动作**（真机，v0.5.8）：`window.confirm` 在
+  Android WebView 静默返回 false → `onDeregister` 直接 return。现改为自绘
+  两段确认：首次点击"注销"进入确认态（按钮变"确认注销？再次点击执行" +
+  提示文案），5 秒无操作自动取消；全平台一致，不依赖 WebView 原生 dialog。
+
+## [v0.5.8] - 2026-08-02
 
 ### 修复
 

@@ -60,6 +60,8 @@ export default function StatusPage() {
   };
 
   const [busy, setBusy] = useState<string | null>(null);
+  const [confirmDeregister, setConfirmDeregister] = useState(false);
+  const [confirmTimer, setConfirmTimer] = useState<ReturnType<typeof setTimeout> | null>(null);
   // proxyEnabled 跟随轮询的 status.sysProxyOn（后端每 2s 读真实系统状态）：
   // 外部软件关闭系统代理时开关自动变关（v0.5.7 反馈"其它软件关闭时 GUI
   // 应跟随"）。初始化时读一次兜底（首帧 bridge 未就绪时 status 为 null）。
@@ -72,6 +74,12 @@ export default function StatusPage() {
     else getSystemProxyOnce().then(setProxyEnabled);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [statusRaw]);
+
+  // 卸载时清理注销确认定时器，避免泄漏。
+  useEffect(() => () => {
+    if (confirmTimer) clearTimeout(confirmTimer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const toggleRunning = async () => {
     setBusy(status.running ? "stop" : "start");
@@ -111,7 +119,16 @@ export default function StatusPage() {
   };
 
   const onDeregister = async () => {
-    if (!window.confirm("确定注销？注销后需重新注册才能使用代理。")) return;
+    // Android WebView 不支持 window.confirm（静默返回 false → 无动作）。
+    // 用自绘两段确认：第一次点"注销"进入确认态，再点一次才真正执行；
+    // 5 秒无操作或点其它按钮自动取消。
+    if (!confirmDeregister) {
+      setConfirmDeregister(true);
+      setConfirmTimer(setTimeout(() => setConfirmDeregister(false), 5000));
+      return;
+    }
+    clearTimeout(confirmTimer ?? undefined);
+    setConfirmDeregister(false);
     setBusy("deregister");
     setActionError(null);
     try {
@@ -205,8 +222,14 @@ export default function StatusPage() {
             </span>
           )}
           <Button onClick={onDeregister} loading={busy === "deregister"} variant="danger">
-            <Trash2 className="h-4 w-4" /> 注销（-del）
+            <Trash2 className="h-4 w-4" />
+            {confirmDeregister ? "确认注销？（再次点击执行）" : "注销（-del）"}
           </Button>
+          {confirmDeregister && (
+            <span className="text-xs text-red-600 dark:text-red-400">
+              注销将删除本地注册信息并通知服务器，5 秒无操作自动取消
+            </span>
+          )}
           {actionError && (
             <span className="text-sm text-red-600 dark:text-red-400">{actionError}</span>
           )}
