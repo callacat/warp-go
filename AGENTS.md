@@ -147,6 +147,57 @@ go test ./androidvpn/... ./gui/...                       # 决策逻辑 + androi
   - tag v* / dispatch → build-android（JDK21+SDK+NDK → APK/AAB artifact）
   - 下载产物到本机验证（`gh release download`）
 
+## 6.8 发布流程纪律（v0.5.7 两次"未构建 Android"血泪教训）
+
+**背景**：v0.5.7 发布时连续两轮 CI 失败（build-android cgo 编译、build-gui windows 图标、
+release 同名 tag 冲突），但期间 Agent 均提前报告"Android 版已成功构建并发布"。以下纪律
+防再犯。
+
+### 6.8.1 判定"发布完成"的唯一标准：所有 CI job 全绿 + 产物可验证
+
+- **"已触发/运行中" ≠ "成功"**。`gh run list` 显示 in_progress 时禁止报告完成。
+- 完整检查链（报告完成前必须全部通过）：
+  1. `gh run list --limit 3` → 找到本次发布的 run ID
+  2. `gh run view <run_id>` → 所有 job 结论为 ✓，尤其 **build-android**（最慢、最易挂）、
+     **build-gui (windows)**（icons 步骤）、**release**（同名 tag 冲突）
+  3. `gh release view <tag>` → assets 齐全：`app-release.apk`（~18MB 非平凡）+ `app-release.aab`
+     + 5 平台 CLI + 3 平台 GUI（含 windows .exe）
+- `gh run watch` 的 exit code 不可靠（部分 job 失败仍可能返回 0）——**必须看 `gh run view` 的
+  job 级结论**。
+
+### 6.8.2 Android 代码改动后必须先过 CI，再谈发布
+
+- **本地验证门是假的**：`GOOS=android CGO_ENABLED=0 go build ./...` **不编译**
+  `androidbridge.go`（`//go:build android && cgo`）——JNI/cgo 错误只在 CI 的 NDK 构建暴露。
+- 任何改动 `gui/androidbridge.go` / `*.java` / Android manifest / gradle / CI Android 步骤后：
+  **先提交 + push 触发一次 CI（可 workflow_dispatch），确认 build-android job 全绿**，再打 tag 发布。
+  不要在 tag 发布时才第一次跑 Android 构建。
+- 本地能做的 Android 验证有限：`go vet`（只查非 cgo 部分）、C preamble 可用 gcc 单独编译
+  （无 jni.h 时跳过）、CI 的 grep 断言（只查符号存在，抓不到类型/可见性错误）。
+
+### 6.8.3 cgo/JNI 与 Java 的固定坑（v0.5.7 两连败直接原因）
+
+1. **Go 侧禁止直接调 JNIEnv 方法**（`(*env)->GetStringUTFChars` 等）——cgo 不支持 `->`
+   运算符，`*[0]byte` 不是函数。必须把 JNIEnv 调用封装进 **C preamble helper**
+   （如 `jstringToChars`/`releaseChars`），Go 侧只调 `C.xxx`。新增 JNI 导出时先看
+   `androidbridge.go` 现有 helper 模式。
+2. **Java native 方法被跨类调用时不能 private**（v0.5.7：`WarpVpnService` 调
+   `MainActivity.nativeLogMessage` 需 package 可见）。native 方法与可见性无关（JNI 按导出名
+   解析），跨类调用就放宽为 `static native`。
+3. **新增 `//export Java_*` 后**：Java 侧同步声明 native 方法、CI grep 断言同步加签名级
+   （含返回类型）检查——否则下一个会话会在同样位置翻车。
+
+### 6.8.4 tag / Release 操作纪律
+
+- **force-push 同 commit 的 tag 不触发 CI**（GitHub 认为无变化，报 "Everything up-to-date"）。
+  要让 tag 触发新 CI：删旧 tag → 重建（指向新 commit）→ force-push；或直接 workflow_dispatch。
+- **`gh release create` 遇 "tag already exists"**：Release 可能已被 CI 创建成功——先
+  `gh release view <tag>` 确认产物，不要盲目删除重建。产物完整则直接验证，不折腾。
+- **移动 tag 会留旧 Release**：tag 指向新 commit 后旧 Release 仍挂在旧产物上；要么删除重建
+  （会再触发 CI），要么手动上传新产物。推荐：修完所有问题再一次性打 tag。
+- 正确发布顺序：修 bug → push main → 确认 build-android 绿（§6.8.2）→ 打 tag →
+  **等 CI 全绿** → 验证 Release 产物 → 报告完成。
+
 ## 7. 关键决策记录（ADR 摘要）
 
 1. **GUI 框架 = Wails v3**（钉 alpha 版本）+ React 19 + Vite + Tailwind v4；备选 Fyne v2.8（仅当 Wails 交叉编译 1 天无果）。理由：同类 VPN 客户端 NetBird 2026 用 Wails v3 重构；原生托盘；6 目标交叉编译官方支持
@@ -175,4 +226,9 @@ go test ./androidvpn/... ./gui/...                       # 决策逻辑 + androi
 - **v0.5.1 修复（2026-08-01）**：`core.Options.DataDir`（`resolveWithDir` 分派，空值=默认执行目录锚定，桌面零回归）；`gui/datadir_{android,other}.go`；`gui` module 已 `go mod tidy`（补 sing-tun 等间接依赖）；前端引入 vitest（theme/useTheme 18 单测）；主题事件名 5 平台（`common:/windows:/linux:/android:/ios:ThemeChanged`），Android 由 MainActivity `emitTheme()` 发 `android:ThemeChanged`；`@wailsio/runtime` 的 `Events.On` 回调收到的是 `WailsEvent{name,data}` 对象（payload 在 `.data`，Android 为 JSON 字符串 `{"isDarkMode":bool}`）
 - `go.mod` 依赖：sing-tun v0.8.11 为 direct require（T1 已提升）；无 gomobile
 - `androidvpn/` 已接线（不再是孤儿包）：`decision.go` 宿主可测（`//go:build android || linux`），TUN 栈 `androidvpn.go` 仅 `//go:build android`
-- JNI 导出面：`gui/androidbridge.go`（`Java_com_wails_app_WarpVpnService_nativeStartVpn/nativeStopVpn`）+ Java 侧 `WarpVpnService.java`（`gui/build/android/app/src/main/java/com/wails/app/`）；CI 双侧 grep 断言保障符号名一致
+- JNI 导出面（v0.5.7 起 4 个）：`gui/androidbridge.go` 的
+  `Java_com_wails_app_WarpVpnService_nativeStartVpn/nativeStopVpn` +
+  `Java_com_wails_app_MainActivity_nativeLogMessage/nativeSetTimeZone`；Java 侧
+  `WarpVpnService.java`（前两者）+ `MainActivity.java`（后两者，`nativeLogMessage`
+  为 package 可见——WarpVpnService 也调用）；CI 双侧 grep 断言保障符号一致。
+  **改 JNI 前必读 §6.8.3**（Go 侧不能直接调 JNIEnv 方法，必须走 C preamble helper）
