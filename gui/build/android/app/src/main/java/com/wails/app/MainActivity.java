@@ -64,7 +64,8 @@ public class MainActivity extends AppCompatActivity {
     private static native int nativeBridgeReady();
     // Java→Go 日志转发：把本类失败路径（sInstance 为 null、consent 拒绝等）
     // 写入 GUI 日志环形缓冲（androidbridge.go 的 nativeLogMessage 导出）。
-    private static native int nativeLogMessage(String level, String msg);
+    // 非 private：WarpVpnService 也调用（其 establish/内核失败路径要进 GUI 日志）。
+    static native int nativeLogMessage(String level, String msg);
     // Java→Go 时区同步：把设备系统时区传给 Go（time.Local），使 GUI 日志
     // 时间戳与状态栏系统时间一致（Go 默认 UTC，不设会显示错误时间）。
     private static native int nativeSetTimeZone(String tz);
