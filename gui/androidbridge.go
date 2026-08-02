@@ -91,10 +91,13 @@ import (
 
 // androidRuntime 是 Android 桥的包级单例：同一时刻只运行一个 VPN 实例。
 // mu 保护全部字段；nativeStopVpn 与 nativeStartVpn 可能从不同线程调用。
+// ctx 是当前实例的装配/生命周期取消上下文（startVpnKernel 用它判断实例
+// 是否已被 nativeStopVpn 停止/替换——身份比较，非值比较）。
 var androidRuntime struct {
 	mu      sync.Mutex
 	kernel  *core.Kernel
 	vpn     *androidvpn.Vpn
+	ctx     context.Context
 	cancel  context.CancelFunc
 	started bool
 	lastErr string
@@ -170,6 +173,7 @@ func Java_com_wails_app_WarpVpnService_nativeStartVpn(env *C.JNIEnv, obj C.jobje
 	// 停止"会得到装配照常完成、VPN 仍运行的反直觉结果）。
 	ctx, cancel := context.WithCancel(context.Background())
 	androidRuntime.mu.Lock()
+	androidRuntime.ctx = ctx
 	androidRuntime.cancel = cancel
 	androidRuntime.started = true
 	androidRuntime.lastErr = ""
@@ -267,6 +271,7 @@ func startVpnKernel(ctx context.Context, cancel context.CancelFunc, sandboxDir s
 		if androidRuntime.kernel == kernel {
 			androidRuntime.kernel = nil
 			androidRuntime.vpn = nil
+			androidRuntime.ctx = nil
 			androidRuntime.cancel = nil
 			androidRuntime.started = false
 		}
@@ -285,8 +290,8 @@ func startVpnKernel(ctx context.Context, cancel context.CancelFunc, sandboxDir s
 	}
 
 	androidRuntime.mu.Lock()
-	if androidRuntime.cancel != ctx {
-		// nativeStopVpn 已更换/清空 cancel（新实例启动或已停止）：本实例
+	if androidRuntime.ctx != ctx {
+		// nativeStopVpn 已更换/清空 ctx（新实例启动或已停止）：本实例
 		// 是过期的，不写入运行状态，拆除本地资源。
 		androidRuntime.mu.Unlock()
 		_ = kernel.Close()
@@ -336,6 +341,7 @@ func Java_com_wails_app_WarpVpnService_nativeStopVpn(env *C.JNIEnv, obj C.jobjec
 	cancel := androidRuntime.cancel
 	androidRuntime.kernel = nil
 	androidRuntime.vpn = nil
+	androidRuntime.ctx = nil
 	androidRuntime.cancel = nil
 	androidRuntime.started = false
 	androidRuntime.mu.Unlock()
