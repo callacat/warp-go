@@ -12,6 +12,15 @@
   sync.Mutex 不可重入 → 自死锁），GUI 服务线程永久阻塞，所有服务调用
   （GetStatus/GetRules/GetGeo…）卡在锁上。修复：锁内先读状态，锁外调用
   `serverInstance()`；`service_test.go` 加 goroutine+超时回归测试。
+- **Android 通知栏透明看不到**（真机）：Android 15+ 强制 edge-to-edge 下
+  `setDecorFitsSystemWindows(true)` 只让内容不绘制到状态栏下，但
+  statusBarColor 默认透明。显式 `setStatusBarColor` + 亮色图标，通知栏
+  深底浅字始终可见。
+- **Android 点击启动无反应且无日志**（真机）：`requestStartVpn` 在
+  `sInstance==null`（Activity 销毁重建后）时静默 return；Go 侧桥未就绪
+  只返回 error（前端按钮旁小字，手机易忽略）。两者改为明确 log（进
+  GUI 日志页 + logcat）。
+- **全平台侧边栏/底部导航更换主题按钮移除**：主题切换只在设置页保留。
 
 ### 新增
 
