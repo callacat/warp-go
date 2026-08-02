@@ -157,11 +157,15 @@ jobs:
 
       # Windows GUI 应用图标：从 appicon.png（仓库唯一图标源）生成 .ico，
       # 供 go generate（goversioninfo，gui/versioninfo.json IconPath）嵌入 PE 资源。
+      # 注意：wails3 generate icons 同时生成 mac icns（默认 build/darwin/icon.icns），
+      # 目录必须先建；用 -macassetdir/-macfilename 指向已存在目录避免失败。
       - name: 生成 Windows 应用图标
         if: matrix.os == 'windows'
         working-directory: gui/build
+        shell: bash
         run: |
-          wails3 generate icons -input appicon.png -windowsfilename windows/icon.ico
+          mkdir -p darwin
+          wails3 generate icons -input appicon.png -windowsfilename windows/icon.ico -macfilename darwin/icon.icns
 
       # 先生成 bindings 再构建前端：前端 api.ts 静态 import bindings，
       # 若顺序颠倒，npm build 会打进占位文件（演示模式）。

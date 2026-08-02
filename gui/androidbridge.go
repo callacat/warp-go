@@ -58,6 +58,19 @@ static jmethodID getRequestStopMethod(JNIEnv* env, jclass cls) {
 static void callStaticVoidMethod(JNIEnv* env, jclass cls, jmethodID mid) {
     (*env)->CallStaticVoidMethod(env, cls, mid);
 }
+
+// jstring → Go string 的 C 侧转换原语。JNIEnv 调用必须留在 C preamble
+// （cgo 不支持 Go 代码里 -> 运算符），与上方 getRequestStartMethod 等一致。
+static const char* jstringToChars(JNIEnv* env, jstring j, jboolean* isCopy) {
+    if (j == NULL) return NULL;
+    return (*env)->GetStringUTFChars(env, j, isCopy);
+}
+
+static void releaseChars(JNIEnv* env, jstring j, const char* chars) {
+    if (j != NULL && chars != NULL) {
+        (*env)->ReleaseStringUTFChars(env, j, chars);
+    }
+}
 */
 import "C"
 
@@ -324,22 +337,22 @@ func androidRequestVpnStop() error {
 //
 //export Java_com_wails_app_MainActivity_nativeLogMessage
 func Java_com_wails_app_MainActivity_nativeLogMessage(env *C.JNIEnv, obj C.jobject, level C.jstring, msg C.jstring) C.jint {
+	C.storeJvm(env)
 	toGo := func(j C.jstring) string {
 		if unsafe.Pointer(j) == nil {
 			return ""
 		}
-		C.storeJvm(env)
 		var needsDetach C.int
 		e := C.getEnv(&needsDetach)
 		if e == nil {
 			return ""
 		}
 		defer C.releaseEnv(needsDetach)
-		chars := (*e).GetStringUTFChars(e, j, nil)
-		if unsafe.Pointer(chars) == nil {
+		chars := C.jstringToChars(e, j, nil)
+		if chars == nil {
 			return ""
 		}
-		defer (*e).ReleaseStringUTFChars(e, j, chars)
+		defer C.releaseChars(e, j, chars)
 		return C.GoString(chars)
 	}
 	lvl := toGo(level)
@@ -376,11 +389,11 @@ func Java_com_wails_app_MainActivity_nativeSetTimeZone(env *C.JNIEnv, obj C.jobj
 		return -1
 	}
 	defer C.releaseEnv(needsDetach)
-	chars := (*e).GetStringUTFChars(e, tz, nil)
-	if unsafe.Pointer(chars) == nil {
+	chars := C.jstringToChars(e, tz, nil)
+	if chars == nil {
 		return 0
 	}
-	defer (*e).ReleaseStringUTFChars(e, tz, chars)
+	defer C.releaseChars(e, tz, chars)
 	id := C.GoString(chars)
 	if loc, err := time.LoadLocation(id); err == nil {
 		time.Local = loc
