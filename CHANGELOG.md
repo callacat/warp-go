@@ -25,6 +25,16 @@
 - **状态栏被 UI 覆盖**：`MainActivity.onCreate` 显式
   `WindowCompat.setDecorFitsSystemWindows(getWindow(), true)`（Android 15+
   默认强制 edge-to-edge，此前 WebView 绘制到状态栏下方）。
+- **Android cgo 构建失败**：`C.jclass`/`C.jmethodID` 不能与 untyped nil 直接
+  比较、`*int` 不能传给 `*C.int` 参数——改用 `unsafe.Pointer` 比较 +
+  `var needsDetach C.int`（CI 的 grep 断言只查符号存在，抓不到类型错误）。
+- **JNI 签名不一致**：`MainActivity.nativeBridgeReady` Java 声明 `void` 而 Go
+  返回 `C.jint`（未定义行为，错误码丢失）——改为 `int` 对齐，CI 断言升级为
+  签名级检查。
+- **Android 启动失败状态撒谎**：kernel/vpn 异步启动失败只写 `lastErr`，
+  `started` 保持 true → GUI 显示"运行中"但隧道是死的，且无法再次启动。现
+  失败即回滚（cancel + 拆除双方 + 置 started=false，校验仍是本实例防覆盖
+  新状态）；启动成功清空 `lastErr`（旧错误不残留）。
 
 ### 新增
 

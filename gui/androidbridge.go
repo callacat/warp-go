@@ -163,29 +163,50 @@ func Java_com_wails_app_WarpVpnService_nativeStartVpn(env *C.JNIEnv, obj C.jobje
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		if err := kernel.Start(ctx); err != nil {
-			log.Printf("⚠ nativeStartVpn：kernel 启动失败：%v", err)
-			androidRuntime.mu.Lock()
-			androidRuntime.lastErr = err.Error()
-			androidRuntime.mu.Unlock()
-		}
-	}()
-	go func() {
-		if err := vpn.Start(ctx); err != nil {
-			log.Printf("⚠ nativeStartVpn：TUN 栈启动失败：%v", err)
-			androidRuntime.mu.Lock()
-			androidRuntime.lastErr = err.Error()
-			androidRuntime.mu.Unlock()
-		}
-	}()
 
+	// rollback 在 kernel/vpn 任一异步启动失败时拆除本实例并回滚状态。
+	// 闭包捕获本地变量而非 androidRuntime 字段：若回滚前已有新实例
+	// （started 被再次置 true），旧实例的拆除不碰新实例状态。
+	rollback := func(name string, err error) {
+		log.Printf("⚠ nativeStartVpn：%s 启动失败，回滚：%v", name, err)
+		cancel()
+		if vpn != nil {
+			_ = vpn.Stop()
+		}
+		if kernel != nil {
+			_ = kernel.Close()
+		}
+		androidRuntime.mu.Lock()
+		if androidRuntime.kernel == kernel {
+			androidRuntime.kernel = nil
+			androidRuntime.vpn = nil
+			androidRuntime.cancel = nil
+			androidRuntime.started = false
+		}
+		androidRuntime.lastErr = err.Error()
+		androidRuntime.mu.Unlock()
+	}
+
+	// 先赋值再启动：started 在 goroutine 可能完成前即为 true，防并发
+	// 重复启动（Java 侧 nativeStartVpn 串行，但 Go 侧可能被并发调用）。
 	androidRuntime.mu.Lock()
 	androidRuntime.kernel = kernel
 	androidRuntime.vpn = vpn
 	androidRuntime.cancel = cancel
+	androidRuntime.lastErr = ""
 	androidRuntime.started = true
 	androidRuntime.mu.Unlock()
+
+	go func() {
+		if err := kernel.Start(ctx); err != nil {
+			rollback("kernel", err)
+		}
+	}()
+	go func() {
+		if err := vpn.Start(ctx); err != nil {
+			rollback("TUN 栈", err)
+		}
+	}()
 
 	log.Printf("✓ VPN 已启动（fd=%d）", int(fd))
 	return 0

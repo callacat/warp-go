@@ -58,7 +58,7 @@ public class MainActivity extends AppCompatActivity {
     // onCreate; nativeBridgeReady caches the MainActivity global ref + method
     // IDs on the Go side so calls from any Go goroutine are safe.
     private static MainActivity sInstance;
-    private static native void nativeBridgeReady();
+    private static native int nativeBridgeReady();
 
     public static void requestStartVpn() {
         MainActivity a = sInstance;

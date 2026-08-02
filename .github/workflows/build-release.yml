@@ -274,21 +274,24 @@ jobs:
             -tags production,android -trimpath -buildvcs=false -ldflags="-w -s" \
             -o build/android/app/src/main/jniLibs/x86_64/libwails.so
 
-      # 反向 JNI 桥（androidbridge.go ↔ MainActivity.java）符号名必须严格一致，
-      # 否则运行期 UnsatisfiedLinkError / NoSuchMethodError。双侧 grep 断言。
+      # 反向 JNI 桥（androidbridge.go ↔ MainActivity.java）符号名与返回类型
+      # 必须严格一致，否则运行期 UnsatisfiedLinkError / NoSuchMethodError。
+      # 双侧 grep 断言：符号存在 + 返回类型签名对齐（JNI 要求 Java native
+      # 声明与 Go 导出函数的返回类型精确匹配；曾发生 Java 声明 void 而 Go
+      # 返回 C.jint 的不一致，grep 查不到、只能靠签名级断言拦截）。
       - name: 校验 JNI 符号 Java↔Go 一致
         working-directory: gui
         run: |
-          grep -q 'nativeBridgeReady' build/android/app/src/main/java/com/wails/app/MainActivity.java
-          grep -q 'Java_com_wails_app_MainActivity_nativeBridgeReady' androidbridge.go
+          grep -qE 'int +nativeBridgeReady *\(\)' build/android/app/src/main/java/com/wails/app/MainActivity.java
+          grep -qE 'Java_com_wails_app_MainActivity_nativeBridgeReady.*C\.jint' androidbridge.go
           grep -q 'requestStartVpn' build/android/app/src/main/java/com/wails/app/MainActivity.java
           grep -q 'requestStartVpn' androidbridge.go
           grep -q 'requestStopVpn' build/android/app/src/main/java/com/wails/app/MainActivity.java
           grep -q 'requestStopVpn' androidbridge.go
-          grep -q 'nativeStartVpn' build/android/app/src/main/java/com/wails/app/WarpVpnService.java
-          grep -q 'Java_com_wails_app_WarpVpnService_nativeStartVpn' androidbridge.go
-          grep -q 'nativeStopVpn' build/android/app/src/main/java/com/wails/app/WarpVpnService.java
-          grep -q 'Java_com_wails_app_WarpVpnService_nativeStopVpn' androidbridge.go
+          grep -qE 'int +nativeStartVpn *\(int fd\)' build/android/app/src/main/java/com/wails/app/WarpVpnService.java
+          grep -qE 'Java_com_wails_app_WarpVpnService_nativeStartVpn.*C\.jint' androidbridge.go
+          grep -qE 'int +nativeStopVpn *\(\)' build/android/app/src/main/java/com/wails/app/WarpVpnService.java
+          grep -qE 'Java_com_wails_app_WarpVpnService_nativeStopVpn.*C\.jint' androidbridge.go
 
       # assembleRelease 用 debug keystore 兜底签名（app/build.gradle：
       # signingConfig hasKeystore ? signingConfigs.release : signingConfigs.debug），
