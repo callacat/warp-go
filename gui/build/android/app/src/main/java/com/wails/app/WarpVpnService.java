@@ -57,9 +57,10 @@ public class WarpVpnService extends VpnService {
 
     // Native methods implemented in Go (gui/androidbridge.go). JNI resolves
     // them as Java_com_wails_app_WarpVpnService_nativeStartVpn /
-    // Java_com_wails_app_WarpVpnService_nativeStopVpn.
+    // Java_com_wails_app_WarpVpnService_nativeStopVpn / nativeVpnRunning.
     private static native int nativeStartVpn(int fd);
     private static native int nativeStopVpn();
+    private static native int nativeVpnRunning();
 
     static {
         // Same .so as WailsBridge: it carries both Wails' exports and ours.
@@ -73,9 +74,16 @@ public class WarpVpnService extends VpnService {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        if (vpnPfd != null) {
-            // Already running (START_STICKY may redeliver); nothing to do.
-            return START_STICKY;
+        if (vpnPfd != null || nativeRunning) {
+            // 内核真在运行 → 幂等跳过（START_STICKY 重投/并发 start）。
+            // 仅 Java 本地标志非空但 Go 侧已失败（异步装配 failed，
+            // started=false）→ 释放旧 TUN fd 重新建立，否则用户重试
+            // 会被"已运行"守卫拦截，表现为点了没反应（v0.5.9）。
+            if (nativeVpnRunning() != 0) {
+                return START_STICKY;
+            }
+            Log.w(TAG, "native kernel not running but state held - releasing stale TUN and re-establishing");
+            closeNative();
         }
 
         startForeground();
@@ -120,6 +128,12 @@ public class WarpVpnService extends VpnService {
             return START_NOT_STICKY;
         }
 
+        // 置位必须在 nativeStartVpn 之前：Start 现在异步受理（返回 0 即已
+        // 受理，内核在 goroutine 内装配），若置位在 return 后，onStartCommand
+        // 重入/START_STICKY 复活会以为未启动而再 establish + 再 nativeStartVpn。
+        vpnPfd = pfd;
+        nativeRunning = true;
+
         int fd = pfd.getFd();
         Log.i(TAG, "TUN established, handing fd=" + fd + " to nativeStartVpn");
         MainActivity.nativeLogMessage("info", "VPN 隧道已建立（fd=" + fd + "），正在启动内核...");
@@ -133,16 +147,28 @@ public class WarpVpnService extends VpnService {
         if (result != 0) {
             Log.e(TAG, "nativeStartVpn returned " + result + ", tearing down");
             MainActivity.nativeLogMessage("error", "内核启动失败（错误码 " + result + "），请查看日志页");
-            closePfd(pfd);
+            closeNative();
             stopSelf();
             return START_NOT_STICKY;
         }
 
-        vpnPfd = pfd;
-        nativeRunning = true;
-        Log.i(TAG, "VPN running (fd=" + fd + ")");
-        MainActivity.nativeLogMessage("info", "✓ VPN 已运行（fd=" + fd + "）");
+        Log.i(TAG, "VPN accepted async start (fd=" + fd + ")");
+        MainActivity.nativeLogMessage("info", "✓ VPN 已受理启动（fd=" + fd + "）");
         return START_STICKY;
+    }
+
+    /**
+     * Close the TUN descriptor and reset the run-state flags. Used when
+     * nativeStartVpn rejects synchronously (result != 0) or on teardown.
+     * Idempotent: safe to call more than once.
+     */
+    private void closeNative() {
+        ParcelFileDescriptor pfd = vpnPfd;
+        vpnPfd = null;
+        nativeRunning = false;
+        if (pfd != null) {
+            closePfd(pfd);
+        }
     }
 
     /**
@@ -235,11 +261,7 @@ public class WarpVpnService extends VpnService {
                 nativeRunning = false;
             }
         }
-        ParcelFileDescriptor pfd = vpnPfd;
-        vpnPfd = null;
-        if (pfd != null) {
-            closePfd(pfd);
-        }
+        closeNative();
     }
 
     private void closePfd(ParcelFileDescriptor pfd) {

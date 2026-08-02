@@ -42,8 +42,14 @@ func BuildTLSConfig(regData *registration.Registration) (*tls.Config, error) {
 
 // ResolveEdgeAddrs 展开边缘候选地址列表，镜像 Server.Start 原内联逻辑：
 //   - cfg.EdgeAddr 非空且 optsEdgeIP 为空 → 应用扫描结果（resolveEdge(cfg.EdgeAddr)）
-//   - optsEdgeIP 为 "4"/"6" → 按注册信息对应地址族展开端口列表（无端口时默认 443）
+//   - optsEdgeIP 为 "4"/"6"（或 cfg.EdgeAddr 与 optsEdgeIP 均为空 → 等价 "4"）→
+//     按注册信息对应地址族展开端口列表（无端口时默认 443）
 //   - 其余 → 视为显式 host:port（走系统解析器 resolveEdge）
+//
+// cfg.EdgeAddr 与 optsEdgeIP 均空是 Android 桥的常态（无 -ip 旗标、无扫描
+// 结果）：此前会落入 default 分支把空串当显式端点，报 "-ip \"\" 既不是 4 或
+// 6，也不是可用地址：missing port in address"（v0.5.9 真机反馈）。此处回落
+// 到 IPv4 注册端点，与 CLI 默认 -ip 4 语义一致。
 //
 // listenAddr 仅用于日志展示（原 Server.Start 用 Options.ListenAddr 旗标值）；
 // Android 桥无 mixed 监听，传空串。错误消息与 Server.Start 保持逐字一致。
@@ -58,6 +64,10 @@ func ResolveEdgeAddrs(cfg *Config, optsEdgeIP, listenAddr string, regData *regis
 		log.Printf("WARP 代理启动中（边缘=已应用扫描结果 %s，mixed=%s）",
 			cfg.EdgeAddr, listenAddr)
 	} else {
+		// 双空 → 等价 "4"（Android 桥无旗标、未应用扫描结果时的默认地址族）。
+		if optsEdgeIP == "" {
+			optsEdgeIP = "4"
+		}
 		switch optsEdgeIP {
 		case "4", "6":
 			endpointHost, other := regData.EndpointV4, "6"

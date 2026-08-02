@@ -144,3 +144,39 @@ func TestResolveEdgeAddrsExplicitSpec(t *testing.T) {
 		t.Errorf("结果 = %v，期望 [162.159.198.2:443]", got)
 	}
 }
+
+// TestResolveEdgeAddrsBothEmptyFallsBackToIPv4 验证 cfg.EdgeAddr 与 optsEdgeIP
+// 均为空时回落注册信息 IPv4 端点（Android 桥的常态；v0.5.9 修复前落入
+// default 分支把空串当显式端点，报 "-ip \"\" 既不是 4 或 6 ..."）。
+func TestResolveEdgeAddrsBothEmptyFallsBackToIPv4(t *testing.T) {
+	reg := &registration.Registration{
+		EndpointV4:    "162.159.198.2",
+		EndpointPorts: []int{443, 500},
+	}
+	got, err := ResolveEdgeAddrs(DefaultConfig(), "", "", reg)
+	if err != nil {
+		t.Fatalf("双空回落失败：%v", err)
+	}
+	want := []string{"162.159.198.2:443", "162.159.198.2:500"}
+	if len(got) != len(want) {
+		t.Fatalf("结果 = %v，期望 %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("结果[%d] = %q，期望 %q", i, got[i], want[i])
+		}
+	}
+}
+
+// TestResolveEdgeAddrsBothEmptyMissingV4 验证双空回落但注册信息无 IPv4 端点
+// 时报清晰错误（提示重新注册），而不是把空串当显式端点解析。
+func TestResolveEdgeAddrsBothEmptyMissingV4(t *testing.T) {
+	reg := &registration.Registration{EndpointV6: "2606:4700:103::2"}
+	_, err := ResolveEdgeAddrs(DefaultConfig(), "", "", reg)
+	if err == nil {
+		t.Fatal("双空且无 IPv4 端点时应报错")
+	}
+	if !strings.Contains(err.Error(), "IPv4") {
+		t.Errorf("错误信息应提及 IPv4，得到：%v", err)
+	}
+}

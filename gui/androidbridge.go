@@ -115,7 +115,16 @@ var androidCtl struct {
 // WarpVpnService 的 JNI 入口：VpnService.Builder.establish() 拿到 TUN fd 后
 // 传入，Go 侧装配 core.Kernel（MASQUE 隧道 + 分流引擎）与 androidvpn 栈并启动。
 //
-// 返回 0 表示成功；-1 表示失败（配置缺失、Kernel 建立失败等）或已在运行。
+// 必须在 Java 主线程（onStartCommand）内尽快返回：Kernel 装配里的边缘地址
+// 解析（resolveEdge 的 DNS 查找最长 10s）与 MASQUE 拨号（指数退避重试）若
+// 阻塞该线程，系统会在 5s 后 ANR"卡死"（v0.5.9 真机反馈：日志停留在
+// "TUN established" 后 10s 才有 SIGQUIT dump，nativeStartVpn 处于 RUNNABLE）。
+// 因此本函数只做轻量前置校验 + 记录状态，真正的装配与启动全部移入
+// goroutine；返回 0 表示"已受理"（Java 侧据此保持 vpnPfd 与前台服务），
+// 后续失败经 androidRuntime.lastErr 与 log 上报，由 GetStatus 展示。
+//
+// 返回 -1 表示前置校验失败（已在运行 / 无效 fd / 无沙箱目录 / 无注册信息）——
+// 这些是确定性的快速失败，不涉及网络，可安全同步返回。
 //
 //export Java_com_wails_app_WarpVpnService_nativeStartVpn
 func Java_com_wails_app_WarpVpnService_nativeStartVpn(env *C.JNIEnv, obj C.jobject, fd C.jint) C.jint {
@@ -140,27 +149,85 @@ func Java_com_wails_app_WarpVpnService_nativeStartVpn(env *C.JNIEnv, obj C.jobje
 		return -1
 	}
 
+	// 快速前置校验：注册信息缺失是确定性失败（buildAndroidConfig 返回
+	// fs.ErrNotExist 包裹错误），不必启动 goroutine。config.json 与 rules 等
+	// 由 goroutine 内完整装配（BuildTLSConfig 的 PeerPublicKeyVerifier 有
+	// PEM 解码等少量 CPU 工作，不该阻塞主线程）。
 	built, err := buildAndroidConfig(sandboxDir, int(fd))
 	if err != nil {
 		log.Printf("⚠ nativeStartVpn：配置装配失败：%v", err)
+		androidRuntime.mu.Lock()
+		androidRuntime.lastErr = err.Error()
+		androidRuntime.mu.Unlock()
 		return -1
 	}
 
+	// 先置 started + 创建装配取消信号：装配在 goroutine 异步进行，此标记
+	// 表示"已受理"，闭合竞态——否则装配期间 androidVpnRunning() 返回 false，
+	// 用户再点启动会再次触发（Service.Start 的幂等判断失效，产生双 Kernel）。
+	// cancel 同时是装配取消信号：nativeStopVpn 在装配完成前到达时取消它，
+	// startVpnKernel 每次装配前检查 ctx 已取消则中止（否则用户"启动后立刻
+	// 停止"会得到装配照常完成、VPN 仍运行的反直觉结果）。
+	ctx, cancel := context.WithCancel(context.Background())
+	androidRuntime.mu.Lock()
+	androidRuntime.cancel = cancel
+	androidRuntime.started = true
+	androidRuntime.lastErr = ""
+	androidRuntime.mu.Unlock()
+
+	go startVpnKernel(ctx, cancel, sandboxDir, built, int(fd))
+	log.Printf("✓ 已受理 VPN 启动（fd=%d，内核装配异步进行）", int(fd))
+	return 0
+}
+
+// startVpnKernel 在后台 goroutine 装配并启动 Kernel 与 TUN 栈：
+//   - 边缘地址解析（可能走 10s DNS，见 resolveEdge）不阻塞 Java 主线程
+//   - NewKernel 内部 MASQUE 拨号重试到连通，可能耗时数秒
+//
+// ctx 是 nativeStartVpn 前置创建的装配/生命周期取消信号：装配各阶段前
+// 检查 ctx.Err()，nativeStopVpn 在装配完成前到达（cancel 已调用）则中止。
+// cancel 由 rollback（kernel/vpn 异步启动失败时）调用以停止另一组件。
+// 失败时经 androidRuntime.lastErr 上报（GetStatus 展示），并回滚已分配资源。
+func startVpnKernel(ctx context.Context, cancel context.CancelFunc, sandboxDir string, built *builtAndroid, fd int) {
+	if ctx.Err() != nil {
+		failStart("已取消", ctx.Err())
+		return
+	}
 	edgeAddrs, err := core.ResolveEdgeAddrs(built.cfg, "", "", built.regData)
 	if err != nil {
 		log.Printf("⚠ nativeStartVpn：边缘地址解析失败：%v", err)
-		return -1
+		failStart("边缘地址解析失败", err)
+		return
+	}
+	if ctx.Err() != nil {
+		failStart("已取消", ctx.Err())
+		return
 	}
 	tlsConfig, err := core.BuildTLSConfig(built.regData)
 	if err != nil {
 		log.Printf("⚠ nativeStartVpn：TLS 配置失败：%v", err)
-		return -1
+		failStart("TLS 配置失败", err)
+		return
+	}
+	if ctx.Err() != nil {
+		failStart("已取消", ctx.Err())
+		return
 	}
 
+	// NewKernel 内部 MASQUE 拨号重试到连通（每候选 2s 超时 + 指数退避），
+	// 边缘不可达时可能持续数分钟。记录"拨号中"供用户从日志/状态判断，
+	// 而非界面毫无反馈地"卡在启动"。
+	log.Printf("正在连接 WARP 边缘 %v ...", edgeAddrs)
 	kernel, err := core.NewKernel(built.cfg, built.regData, edgeAddrs, tlsConfig)
 	if err != nil {
 		log.Printf("⚠ nativeStartVpn：Kernel 建立失败：%v", err)
-		return -1
+		failStart("Kernel 建立失败", err)
+		return
+	}
+	if ctx.Err() != nil {
+		_ = kernel.Close()
+		failStart("已取消", ctx.Err())
+		return
 	}
 
 	// 接线分流与拨号：proxy → 隧道；direct → 本地直连（DirectDial 留 nil，
@@ -174,10 +241,15 @@ func Java_com_wails_app_WarpVpnService_nativeStartVpn(env *C.JNIEnv, obj C.jobje
 	if err != nil {
 		log.Printf("⚠ nativeStartVpn：androidvpn 初始化失败：%v", err)
 		_ = kernel.Close()
-		return -1
+		failStart("androidvpn 初始化失败", err)
+		return
 	}
-
-	ctx, cancel := context.WithCancel(context.Background())
+	if ctx.Err() != nil {
+		_ = kernel.Close()
+		_ = vpn.Stop()
+		failStart("已取消", ctx.Err())
+		return
+	}
 
 	// rollback 在 kernel/vpn 任一异步启动失败时拆除本实例并回滚状态。
 	// 闭包捕获本地变量而非 androidRuntime 字段：若回滚前已有新实例
@@ -202,14 +274,28 @@ func Java_com_wails_app_WarpVpnService_nativeStartVpn(env *C.JNIEnv, obj C.jobje
 		androidRuntime.mu.Unlock()
 	}
 
-	// 先赋值再启动：started 在 goroutine 可能完成前即为 true，防并发
-	// 重复启动（Java 侧 nativeStartVpn 串行，但 Go 侧可能被并发调用）。
+	// 装配完成前的最后一次取消检查：nativeStopVpn 可能已拆除了本实例
+	// （cancel 被调用）。此时不得再写入 androidRuntime（会复活已停止的
+	// VPN 且泄漏 kernel/vpn），直接拆除本地资源。
+	if ctx.Err() != nil {
+		_ = kernel.Close()
+		_ = vpn.Stop()
+		failStart("已取消", ctx.Err())
+		return
+	}
+
 	androidRuntime.mu.Lock()
+	if androidRuntime.cancel != ctx {
+		// nativeStopVpn 已更换/清空 cancel（新实例启动或已停止）：本实例
+		// 是过期的，不写入运行状态，拆除本地资源。
+		androidRuntime.mu.Unlock()
+		_ = kernel.Close()
+		_ = vpn.Stop()
+		log.Println("⚠ nativeStartVpn：实例已过期（期间被停止/重启），丢弃装配结果")
+		return
+	}
 	androidRuntime.kernel = kernel
 	androidRuntime.vpn = vpn
-	androidRuntime.cancel = cancel
-	androidRuntime.lastErr = ""
-	androidRuntime.started = true
 	androidRuntime.mu.Unlock()
 
 	go func() {
@@ -223,8 +309,20 @@ func Java_com_wails_app_WarpVpnService_nativeStartVpn(env *C.JNIEnv, obj C.jobje
 		}
 	}()
 
-	log.Printf("✓ VPN 已启动（fd=%d）", int(fd))
-	return 0
+	log.Printf("✓ VPN 已启动（fd=%d）", fd)
+}
+
+// failStart 记录异步装配失败并回滚状态：清 started（允许用户重试）、写
+// lastErr（GetStatus 展示）。TUN fd 由 Java 侧持有（ParcelFileDescriptor，
+// Go 侧无法关闭）；Java 的 WarpVpnService 以 nativeStartVpn 返回值判断是否
+// 持有 fd，异步失败只能靠日志 + lastErr 提示用户，fd 在服务 onDestroy /
+// 下次启动替换时由 Java 侧统一关闭。
+func failStart(stage string, err error) {
+	androidRuntime.mu.Lock()
+	androidRuntime.started = false
+	androidRuntime.lastErr = err.Error()
+	androidRuntime.mu.Unlock()
+	log.Printf("⚠ VPN 启动失败（%s）：%v", stage, err)
 }
 
 // Java_com_wails_app_WarpVpnService_nativeStopVpn 停止运行中的 VPN 并拆除
@@ -409,6 +507,20 @@ func androidVpnRunning() bool {
 	androidRuntime.mu.Lock()
 	defer androidRuntime.mu.Unlock()
 	return androidRuntime.started
+}
+
+// Java_com_wails_app_WarpVpnService_nativeVpnRunning 是 Java 侧查询 Go 内核
+// 运行态的 JNI 入口。WarpVpnService.onStartCommand 的重入守卫需要区分
+// "内核真在运行"（START_STICKY 重投/并发 start → 幂等跳过）与"已受理但异步
+// 装配失败"（started=false → 释放旧 TUN fd 重新建立）——仅靠 Java 本地
+// vpnPfd 标志无法区分这两者（v0.5.9 异步化后新增）。
+//
+//export Java_com_wails_app_WarpVpnService_nativeVpnRunning
+func Java_com_wails_app_WarpVpnService_nativeVpnRunning(env *C.JNIEnv, obj C.jobject) C.jint {
+	if androidVpnRunning() {
+		return 1
+	}
+	return 0
 }
 
 // androidVpnLastError 返回最近一次 VPN/内核错误。
