@@ -267,6 +267,7 @@ warp-go/
 
 | 版本 | 日期 | 摘要 |
 |---|---|---|
+| [v0.5.3](CHANGELOG.md#v053---2026-08-02) | 2026-08-02 | Android cgo 编译修复、JNI 签名对齐（nativeBridgeReady void→int）、启动失败回滚（状态不再撒谎） |
 | [v0.5.2](CHANGELOG.md#v052---2026-08-01) | 2026-08-01 | Android 内核启动根治（反向 JNI 桥接 VpnService）、日志 init 路由、注册状态切页弹性、扫描无候选修复、状态栏不覆盖、手机底部导航 |
 | [v0.5.1](CHANGELOG.md#unreleased---v051-计划中) | 2026-08-01 | Android 运行时文件统一沙箱锚定（修复 /system/bin 只读崩溃）、日志时间戳去重、注销反馈、竖屏侧边栏自适应、跟随系统主题（全平台） |
 | [v0.5.0](CHANGELOG.md#v050---2026-08-01) | 2026-08-01 | Android 版（Wails VpnService + JNI）、core.Kernel 三端复用、CI build-android、geoip/reject 修复 |
