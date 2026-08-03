@@ -46,10 +46,10 @@ go build -o warp-gui .
 ## 快速开始
 
 ```bash
-# 1) 首次使用：注册（注册信息保存在执行目录 reg.json）
+# 1) 首次使用：注册（注册信息保存在运行目录下的 config/reg.json，config/ 目录自动创建）
 ./warp -reg
 
-# 2) 启动代理（默认监听 127.0.0.1:40000，首次自动生成 config.json 与 rules.txt）
+# 2) 启动代理（默认监听 127.0.0.1:40000，首次自动生成 config/config.json 与 config/rules.txt）
 ./warp
 
 # 3) 用 curl 验证（走隧道）
@@ -72,12 +72,12 @@ root、无 TUN、无 NET_ADMIN，以 uid 1001 运行。
 docker pull ghcr.io/callacat/warp-go:latest
 
 # 2) 首次运行：注册（在宿主目录生成 reg.json）
-mkdir -p warp-data
-docker run --rm -v "$PWD/warp-data:/data" ghcr.io/callacat/warp-go:latest -reg
+mkdir -p warp-config && chown 1001:1001 warp-config  # 容器内以 uid 1001 运行，需可写
+docker run --rm -v "$PWD/warp-config:/data/config" ghcr.io/callacat/warp-go:latest -reg
 
 # 3) 启动代理（mixed HTTP+SOCKS5，监听 0.0.0.0:40000）
 docker run -d --name warp --restart unless-stopped \
-  -v "$PWD/warp-data:/data" -p 40000:40000 \
+  -v "$PWD/warp-config:/data/config" -p 40000:40000 \
   ghcr.io/callacat/warp-go:latest -l 0.0.0.0:40000
 
 # 4) 验证走隧道
@@ -89,10 +89,12 @@ curl --socks5-hostname 127.0.0.1:40000 https://www.cloudflare.com/cdn-cgi/trace
 
 复制 `docker-compose.example.yml` 为 `docker-compose.yml`，按注释切换
 `command` 即可（注册 → 日常启动 → 配置文件进阶）。数据文件
-（`config.json` / `reg.json` / `rules.txt` / `geo/`）持久化在宿主
-`./warp-data`，容器重建不丢注册与配置。
+（`config.json` / `reg.json` / `rules.txt` / `geo/`）全部集中在容器内
+`/data/config`（应用自动创建该目录），持久化在宿主 `./warp-config`——
+只需映射这一个目录，容器重建不丢注册与配置。
 
 ```bash
+mkdir -p warp-config && chown 1001:1001 warp-config   # 首次使用前
 docker compose up -d
 docker compose logs -f warp
 ```
@@ -101,7 +103,7 @@ docker compose logs -f warp
 
 - **`0.0.0.0` 监听无认证**：对局域网开放代理。不可信网络请绑定回环
   （`-l 127.0.0.1:40000`）或启用 `-user` / `-pass` 认证。
-- **注册是一次性的**：`reg.json` 在 `./warp-data`，删除即需重新注册。
+- **注册是一次性的**：`reg.json` 在 `./warp-config`，删除即需重新注册。
 - **GEO 分流**：首次以 `-l` 启动生成默认 `config.json` 后，可改用
   `-config config.json` 启动，并编辑 `rules.txt` 实现分流（变更热重载）。
 - **镜像 tag**：`latest` 随 main 推送更新；`v*` tag 对应发布版本
@@ -118,8 +120,8 @@ warp —— Cloudflare WARP 客户端（MASQUE over QUIC/HTTP-3，mixed HTTP+SOC
   -pass <密码>     认证密码
   -ip <取值>       连接哪个边缘（默认 4）：4 / 6 / <host:port>
 
-配置（config.json，位于执行目录；优先级：旗标 > config.json > 默认值）：
-  -config <路径>   配置文件路径（默认 config.json；缺失时自动生成默认模板）
+配置（config/config.json，位于运行目录下的 config/ 子目录，自动创建；优先级：旗标 > config.json > 默认值）：
+  -config <路径>   配置文件路径（默认 config/config.json；缺失时自动生成默认模板）
   -route <路径>    路由规则文件路径，覆盖 config.json 的 rules_path
   -sysproxy        启用系统代理，覆盖 config.json 的 enable_system_proxy
   -geo-update      立即更新 GEO 数据（geosite/geoip）后退出
@@ -171,9 +173,10 @@ direct,geoip:cn
 - 未匹配 → 隐式 `direct` 兜底
 - `geosite:geolocation-!cn` 是**字面类别名**（非中国站点），`!` 烘焙在数据库中
 
-## 配置（config.json）
+## 配置（config/config.json）
 
-位于程序执行目录，首次启动自动生成默认模板，**文件变更热重载**。
+位于运行目录下的 `config/` 子目录（自动创建；Docker 中即 `/data/config`），
+首次启动自动生成默认模板，**文件变更热重载**。
 
 ```json
 {
@@ -203,7 +206,10 @@ direct,geoip:cn
 
 ## 注册信息（reg.json）
 
-保存在**执行目录**（无路径参数），权限 `0600`。含设备 ID/token、ECDSA P-256 私钥、边缘公钥（证书固定）、端点地址与端口列表等。**不含**可导入 GUI 的密钥明文视图——`core.Status` 只暴露无密钥材料的安全快照。
+保存在运行目录下的 `config/reg.json`（`config/` 目录自动创建；无路径参数），
+权限 `0600`。含设备 ID/token、ECDSA P-256 私钥、边缘公钥（证书固定）、端点
+地址与端口列表等。**不含**可导入 GUI 的密钥明文视图——`core.Status` 只暴露
+无密钥材料的安全快照。
 
 > [!NOTE]
 > 端点分配若变化，本项目不会自动刷新——需 `warp -del` 后重新 `warp -reg`。

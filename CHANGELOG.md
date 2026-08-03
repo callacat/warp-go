@@ -5,6 +5,23 @@
 
 ## [Unreleased] — v0.5.12 计划中
 
+### 变更
+
+- **运行时文件统一收拢到运行目录下的 `config/` 子目录**（修复 Docker 版
+  "自动生成注册文件无法保存"）：config.json / reg.json / rules.txt / geo 全部
+  落到 `<运行目录>/config/`（自动创建），Docker 只需映射
+  `./warp-config:/data/config` 一个目录即可持久化全部配置。
+  - **根因**：旧逻辑把运行时文件锚定到"可执行文件目录"，Docker 中 exe 位于
+    只读 `/usr/local/bin` → 回退到容器层 `~/.config/warp-go`，从不落到
+    挂载卷 `/data`。现 `core.baseExecRoot` 改为：可执行目录（可写）→
+    **当前工作目录**（可写；Docker WORKDIR `/data` 挂载卷）→ 用户配置目录。
+  - **Android 不变**：`DataDir` 非空时仍锚定沙箱根 `getFilesDir()`，不套
+    `config/` 子目录（真机路径约定未变）。
+  - **一次性旧布局迁移**：`config/config.json` 不存在但旧执行根有散落文件时
+    自动复制进 `config/`；幂等、非破坏（不删原文件）。
+  - Docker compose 挂载从 `./warp-data:/data` 改为 `./warp-config:/data/config`；
+    README/AGENTS 运行时文件约定同步更新（v3 → v4）。
+
 ### 修复
 
 - **Telegram 无法连接（默认规则未覆盖 TG 流量）**：默认规则模板与

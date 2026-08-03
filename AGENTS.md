@@ -37,17 +37,27 @@ warp-go/
 └── AGENTS.md                # 本文件
 ```
 
-## 3. 运行时文件约定（v3，用户指定：程序执行目录）
+## 3. 运行时文件约定（v4，用户指定：运行目录下的 config/ 子目录）
 
 | 文件 | 位置 | 说明 |
 |---|---|---|
-| `config.json` | **执行目录** | 主配置（监听端口/规则路径/GEO 仓库与 URL/自动更新时间/代理开关/下载加速前缀）；**文件变更热重载** |
-| `rules.txt` | 执行目录（config 可改） | 路由规则文本；GUI 增删改 + 热重载 |
-| `reg.json` | 执行目录 | WARP 注册信息（上游原约定） |
-| `geo/` | 执行目录/geo/ | geosite.dat + geoip-lite.dat |
-| `logs/` | 执行目录/logs/ | 日志（可选） |
+| `config.json` | **运行目录/config/**（自动创建） | 主配置（监听端口/规则路径/GEO 仓库与 URL/自动更新时间/代理开关/下载加速前缀）；**文件变更热重载** |
+| `rules.txt` | config/（config 可改） | 路由规则文本；GUI 增删改 + 热重载 |
+| `reg.json` | config/ | WARP 注册信息（上游原约定） |
+| `geo/` | config/geo/ | geosite.dat + geoip-lite.dat |
+| `logs/` | config/logs/ | 日志（可选） |
 
-优先级：**旗标 > config.json > 默认值**。热重载基于 mtime + 内容 hash 检测。
+- **根目录选定**（`core.baseExecRoot`，桌面/Docker）：可执行目录（可写）→
+  **当前工作目录**（可写；Docker 的 WORKDIR `/data` 挂载卷——核心修复）→
+  用户配置目录（`~/.config/warp-go` 等）→ 可执行目录兜底。
+- **所有运行时路径**（config.json/reg.json/rules.txt/geo）经
+  `resolveExecPath` 统一收拢进 `<根>/config/`；Docker 只需映射
+  `./warp-config:/data/config` 一个目录。
+- **Android 例外**：`DataDir` 非空（`gui/datadir_android.go`）时保持沙箱根
+  锚定（`getFilesDir()` 根，不套 `config/` 子目录）——真机路径约定未变。
+- **一次性旧布局迁移**（`core.migrateLegacyConfig`）：`config/config.json`
+  不存在但旧执行根有散落文件时复制进 `config/`；幂等、非破坏（不删原文件）。
+- 优先级：**旗标 > config.json > 默认值**。热重载基于 mtime + 内容 hash 检测。
 
 ## 4. GEO 分流（关键设计，已调研定论）
 
