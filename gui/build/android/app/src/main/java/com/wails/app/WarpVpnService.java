@@ -4,6 +4,7 @@ import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
+import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
 import android.net.VpnService;
@@ -71,6 +72,29 @@ public class WarpVpnService extends VpnService {
 
     private volatile ParcelFileDescriptor vpnPfd;
     private volatile boolean nativeRunning = false;
+    private static volatile WarpVpnService sInstance;
+
+    @Override
+    public void onCreate() {
+        super.onCreate();
+        sInstance = this;
+    }
+
+    /**
+     * Stop the VPN service from the UI thread. Plain {@code stopService}
+     * does not stop a foreground service (Android 8+): the service stays
+     * foreground and {@code onDestroy} never fires — the reported v0.5.10
+     * "停止按钮无效" root cause. Must remove the foreground state first.
+     */
+    public static void stop(Context ctx) {
+        WarpVpnService svc = sInstance;
+        if (svc != null) {
+            svc.stopForeground(STOP_FOREGROUND_REMOVE);
+            svc.stopSelf();
+        } else {
+            ctx.stopService(new Intent(ctx, WarpVpnService.class));
+        }
+    }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
@@ -233,6 +257,7 @@ public class WarpVpnService extends VpnService {
         Log.i(TAG, "onDestroy - stopping VPN");
         MainActivity.nativeLogMessage("info", "正在停止 VPN...");
         stopNativeAndClose();
+        sInstance = null;
         super.onDestroy();
     }
 

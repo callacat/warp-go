@@ -89,7 +89,7 @@ public class MainActivity extends AppCompatActivity {
             nativeLogMessage("error", "停止失败：Activity 未初始化");
             return;
         }
-        a.runOnUiThread(() -> a.stopService(new Intent(a, WarpVpnService.class)));
+        a.runOnUiThread(() -> WarpVpnService.stop(a));
     }
 
     private static final String TAG = "WailsActivity";

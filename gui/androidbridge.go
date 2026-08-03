@@ -89,6 +89,11 @@ import (
 	"warp/core"
 )
 
+// androidDialTimeout 是 Android 内核装配的拨号总超时。移动网络下 QUIC/UDP
+// 可能被运营商封锁，无限重试只会无限刷错误并让状态停在"连接中"；超时后
+// 报明确错误，用户可检查网络后重试。
+const androidDialTimeout = 30 * time.Second
+
 // androidRuntime 是 Android 桥的包级单例：同一时刻只运行一个 VPN 实例。
 // mu 保护全部字段；nativeStopVpn 与 nativeStartVpn 可能从不同线程调用。
 // ctx 是当前实例的装配/生命周期取消上下文（startVpnKernel 用它判断实例
@@ -171,7 +176,10 @@ func Java_com_wails_app_WarpVpnService_nativeStartVpn(env *C.JNIEnv, obj C.jobje
 	// cancel 同时是装配取消信号：nativeStopVpn 在装配完成前到达时取消它，
 	// startVpnKernel 每次装配前检查 ctx 已取消则中止（否则用户"启动后立刻
 	// 停止"会得到装配照常完成、VPN 仍运行的反直觉结果）。
-	ctx, cancel := context.WithCancel(context.Background())
+	// 拨号总超时：移动网络下 QUIC/UDP 可能被运营商封锁，无限指数退避重试
+	// 只会无限刷"边缘不可达"并让状态永远停在"连接中"（v0.5.10 反馈）。
+	// 30s 后 NewKernelContext 返回 DeadlineExceeded，报明确错误供用户重试。
+	ctx, cancel := context.WithTimeout(context.Background(), androidDialTimeout)
 	androidRuntime.mu.Lock()
 	androidRuntime.ctx = ctx
 	androidRuntime.cancel = cancel
@@ -194,7 +202,7 @@ func Java_com_wails_app_WarpVpnService_nativeStartVpn(env *C.JNIEnv, obj C.jobje
 // 失败时经 androidRuntime.lastErr 上报（GetStatus 展示），并回滚已分配资源。
 func startVpnKernel(ctx context.Context, cancel context.CancelFunc, sandboxDir string, built *builtAndroid, fd int) {
 	if ctx.Err() != nil {
-		failStart("已取消", ctx.Err())
+		failStartCtx(ctx, ctx.Err())
 		return
 	}
 	edgeAddrs, err := core.ResolveEdgeAddrs(built.cfg, "", "", built.regData)
@@ -204,7 +212,7 @@ func startVpnKernel(ctx context.Context, cancel context.CancelFunc, sandboxDir s
 		return
 	}
 	if ctx.Err() != nil {
-		failStart("已取消", ctx.Err())
+		failStartCtx(ctx, ctx.Err())
 		return
 	}
 	tlsConfig, err := core.BuildTLSConfig(built.regData)
@@ -214,7 +222,7 @@ func startVpnKernel(ctx context.Context, cancel context.CancelFunc, sandboxDir s
 		return
 	}
 	if ctx.Err() != nil {
-		failStart("已取消", ctx.Err())
+		failStartCtx(ctx, ctx.Err())
 		return
 	}
 
@@ -222,15 +230,21 @@ func startVpnKernel(ctx context.Context, cancel context.CancelFunc, sandboxDir s
 	// 边缘不可达时可能持续数分钟。记录"拨号中"供用户从日志/状态判断，
 	// 而非界面毫无反馈地"卡在启动"。
 	log.Printf("正在连接 WARP 边缘 %v ...", edgeAddrs)
-	kernel, err := core.NewKernel(built.cfg, built.regData, edgeAddrs, tlsConfig)
+	kernel, err := core.NewKernelContext(ctx, built.cfg, built.regData, edgeAddrs, tlsConfig)
 	if err != nil {
+		// ctx 已取消 = 用户装配中点了停止：NewKernelContext 的拨号被中止，
+		// 报"已取消"而非误导性的"建立失败"。
+		if ctx.Err() != nil {
+			failStartCtx(ctx, ctx.Err())
+			return
+		}
 		log.Printf("⚠ nativeStartVpn：Kernel 建立失败：%v", err)
 		failStart("Kernel 建立失败", err)
 		return
 	}
 	if ctx.Err() != nil {
 		_ = kernel.Close()
-		failStart("已取消", ctx.Err())
+		failStartCtx(ctx, ctx.Err())
 		return
 	}
 
@@ -251,7 +265,7 @@ func startVpnKernel(ctx context.Context, cancel context.CancelFunc, sandboxDir s
 	if ctx.Err() != nil {
 		_ = kernel.Close()
 		_ = vpn.Stop()
-		failStart("已取消", ctx.Err())
+		failStartCtx(ctx, ctx.Err())
 		return
 	}
 
@@ -285,7 +299,7 @@ func startVpnKernel(ctx context.Context, cancel context.CancelFunc, sandboxDir s
 	if ctx.Err() != nil {
 		_ = kernel.Close()
 		_ = vpn.Stop()
-		failStart("已取消", ctx.Err())
+		failStartCtx(ctx, ctx.Err())
 		return
 	}
 
@@ -328,6 +342,19 @@ func failStart(stage string, err error) {
 	androidRuntime.lastErr = err.Error()
 	androidRuntime.mu.Unlock()
 	log.Printf("⚠ VPN 启动失败（%s）：%v", stage, err)
+}
+
+// failStartCtx 区分装配 ctx 的两种中止原因并上报：
+//   - DeadlineExceeded → 拨号总超时（30s，见 androidDialTimeout）——边缘
+//     不可达被运营商封锁/弱网，报明确错误供用户检查网络后重试，而非
+//     无限重试（v0.5.10 反馈"一直边缘不可达 3.2s 后重试"）；
+//   - 其余（Canceled）→ 用户装配中点了停止，正常中止。
+func failStartCtx(ctx context.Context, err error) {
+	if ctx.Err() != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		failStart("连接边缘超时", errors.New("30 秒内未能连接 WARP 边缘，请检查网络后重试"))
+		return
+	}
+	failStart("已取消", err)
 }
 
 // Java_com_wails_app_WarpVpnService_nativeStopVpn 停止运行中的 VPN 并拆除
