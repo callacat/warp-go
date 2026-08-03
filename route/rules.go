@@ -65,6 +65,7 @@ direct,geosite:private
 direct,geoip:private
 proxy,geosite:google
 proxy,geosite:geolocation-!cn
+proxy,geoip:telegram
 direct,geosite:cn
 direct,geoip:cn
 `

@@ -115,6 +115,29 @@ func TestMatchGeoIP(t *testing.T) {
 	}
 }
 
+// TestMatchGeoIPTelegram 验证默认模板的 proxy,geoip:telegram 规则：Telegram
+// IP 段走 WARP 隧道（在封锁 TG 的网络下可经隧道连通），非 TG IP 不受影响。
+func TestMatchGeoIPTelegram(t *testing.T) {
+	// 规则文本含 telegram 行（与默认模板一致），依赖合成 GEO 库的 telegram 类别。
+	e := newTestEngine(t, "proxy,geoip:telegram\n")
+
+	// Telegram 段内 IP → proxy
+	if act, rule, matched := e.Match("telegram-host", netip.MustParseAddr("149.154.175.100")); !matched || act != "proxy" || rule.Value != "telegram" {
+		t.Errorf("149.154.175.100 应命中 proxy,geoip:telegram，得到 (%s, %+v, %v)", act, rule, matched)
+	}
+	if act, _, matched := e.Match("tg2", netip.MustParseAddr("91.108.5.7")); !matched || act != "proxy" {
+		t.Errorf("91.108.5.7 应命中 telegram，得到 (%s, %v)", act, matched)
+	}
+	// 段外 IP → 不命中（兜底）
+	if _, _, matched := e.Match("non-tg", netip.MustParseAddr("8.8.8.8")); matched {
+		t.Error("8.8.8.8 不应命中 geoip:telegram")
+	}
+	// IP 字面量（Telegram IP 无域名解析）也应命中
+	if act, _, matched := e.Match("149.154.175.100", netip.Addr{}); !matched || act != "proxy" {
+		t.Errorf("IP 字面量 149.154.175.100 应命中 telegram，得到 (%s, %v)", act, matched)
+	}
+}
+
 func TestMatchGeoIPLiteral(t *testing.T) {
 	e := newTestEngine(t, testRulesText)
 

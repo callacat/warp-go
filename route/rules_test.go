@@ -154,8 +154,8 @@ func TestDefaultRulesParses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("默认模板必须可解析：%v", err)
 	}
-	if len(rules) != 7 {
-		t.Fatalf("默认模板应有 7 条规则，得到 %d：%+v", len(rules), rules)
+	if len(rules) != 8 {
+		t.Fatalf("默认模板应有 8 条规则，得到 %d：%+v", len(rules), rules)
 	}
 	want := []Rule{
 		{Action: "reject", Kind: "geosite", Value: "category-ads-all"},
@@ -163,6 +163,7 @@ func TestDefaultRulesParses(t *testing.T) {
 		{Action: "direct", Kind: "geoip", Value: "private"},
 		{Action: "proxy", Kind: "geosite", Value: "google"},
 		{Action: "proxy", Kind: "geosite", Value: "geolocation-!cn"},
+		{Action: "proxy", Kind: "geoip", Value: "telegram"},
 		{Action: "direct", Kind: "geosite", Value: "cn"},
 		{Action: "direct", Kind: "geoip", Value: "cn"},
 	}

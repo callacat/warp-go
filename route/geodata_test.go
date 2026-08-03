@@ -72,6 +72,13 @@ func testGeoIPData() []byte {
 					{Ip: net.ParseIP("172.16.0.0").To4(), Prefix: 12},
 				},
 			},
+			{
+				CountryCode: "telegram",
+				Cidr: []*routercommon.CIDR{
+					{Ip: net.ParseIP("91.108.4.0").To4(), Prefix: 22},
+					{Ip: net.ParseIP("149.154.160.0").To4(), Prefix: 20},
+				},
+			},
 		},
 	}
 	data, err := proto.Marshal(list)
@@ -125,11 +132,11 @@ func TestLoadGeoIP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadGeoIP 失败：%v", err)
 	}
-	if got := db.CategoryCount(); got != 2 {
-		t.Fatalf("类别数 = %d，期望 2", got)
+	if got := db.CategoryCount(); got != 3 {
+		t.Fatalf("类别数 = %d，期望 3（CN/private/telegram）", got)
 	}
-	if got := db.PrefixCount(); got != 6 {
-		t.Fatalf("前缀总数 = %d，期望 6", got)
+	if got := db.PrefixCount(); got != 8 {
+		t.Fatalf("前缀总数 = %d，期望 8", got)
 	}
 
 	cases := []struct {
@@ -148,6 +155,9 @@ func TestLoadGeoIP(t *testing.T) {
 		{"private", "192.168.0.1", true},
 		{"private", "172.20.0.1", true},
 		{"private", "8.8.8.8", false},
+		{"telegram", "149.154.175.100", true}, // 149.154.160.0/20
+		{"telegram", "91.108.5.7", true},      // 91.108.4.0/22
+		{"telegram", "8.8.8.8", false},
 		{"missing", "1.0.1.5", false},
 	}
 	for _, tc := range cases {
