@@ -3,7 +3,7 @@
 本项目所有值得记录的变更。格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased] — v0.5.12 计划中
+## [v0.5.13] - 2026-08-03
 
 ### 变更
 
@@ -24,6 +24,18 @@
 
 ### 修复
 
+- **Android 规则页"重新加载"报"分流引擎未初始化"**：Android 上分流引擎挂在
+  `androidRuntime.kernel`（VpnService 驱动的 `core.Kernel`），`core.Server.kernel`
+  （SOCKS 内核）在 Android 永不初始化——原 `Service.ReloadRules` 走
+  `Server.ReloadRules` → `s.kernel==nil` 报错且规则不生效（可能影响 VPN 网络）。
+  现新增 `core.Kernel.ReloadRules()`，`Service.ReloadRules` 在 Android 路由到
+  `androidRuntime.kernel.ReloadRules()`（VPN 未运行时报"请先启动 VPN"）；补
+  `TestKernelReloadRules` 单测（改规则文件后 ReloadRules 生效）。
+
+## [v0.5.12] - 2026-08-03
+
+### 修复
+
 - **Telegram 无法连接（默认规则未覆盖 TG 流量）**：默认规则模板与
   `rules/default-rules.txt` 新增 `proxy,geoip:telegram`——TG 流量（如
   `149.154.175.100`）此前落入隐式 direct 兜底，在封锁 TG 的网络下直连
@@ -32,13 +44,6 @@
   `TestDefaultRulesParses`（7→8 条）+ `TestLoadGeoIP`（telegram 段）测试。
   > **注意**：已有 `rules.txt` 不会自动更新——需手动加一行或删除后重启
   > 让默认模板重新生成。
-- **Android 规则页"重新加载"报"分流引擎未初始化"**：Android 上分流引擎挂在
-  `androidRuntime.kernel`（VpnService 驱动的 `core.Kernel`），`core.Server.kernel`
-  （SOCKS 内核）在 Android 永不初始化——原 `Service.ReloadRules` 走
-  `Server.ReloadRules` → `s.kernel==nil` 报错且规则不生效（可能影响 VPN 网络）。
-  现新增 `core.Kernel.ReloadRules()`，`Service.ReloadRules` 在 Android 路由到
-  `androidRuntime.kernel.ReloadRules()`（VPN 未运行时报"请先启动 VPN"）；补
-  `TestKernelReloadRules` 单测（改规则文件后 ReloadRules 生效）。
 - **Android 检查更新"前往下载"在应用内 WebView 打开**：`<a target="_blank">`
   在 Android WebView 被应用内捕获，GitHub 下载页体验差/登录墙。新增
   `Service.OpenExternalBrowser`（桌面走 Wails `BrowserManager`，Android 走

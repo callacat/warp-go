@@ -324,7 +324,8 @@ warp-go/
 
 | 版本 | 日期 | 摘要 |
 |---|---|---|
-| [v0.5.12](CHANGELOG.md#unreleased) | 计划中 | Telegram 默认走 WARP（`proxy,geoip:telegram`）、检查更新外部浏览器打开、运行时文件统一收拢 `config/` 子目录（Docker 修复） |
+| [v0.5.13](CHANGELOG.md#v0513---2026-08-03) | 2026-08-03 | 运行时文件统一 `config/` 子目录（Docker 修复 + 旧布局迁移）、Android 规则页"分流引擎未初始化"修复（ReloadRules 路由到 androidRuntime.kernel） |
+| [v0.5.12](CHANGELOG.md#v0512---2026-08-03) | 2026-08-03 | Telegram 默认走 WARP（`proxy,geoip:telegram`）、检查更新外部浏览器打开 |
 | [v0.5.11](CHANGELOG.md#v0511---2026-08-02) | 2026-08-02 | Android 边缘不可达无限重试修复（可取消拨号 + 30s 超时）、点停止无效修复（stopForeground） |
 | [v0.5.10](CHANGELOG.md#v0510---2026-08-02) | 2026-08-02 | Android 扫描 IP 后重启 ANR + 无网修复（异步装配 + 取消信号 + stale TUN 重建） |
 | [v0.5.9](CHANGELOG.md#v059---2026-08-02) | 2026-08-02 | Android VPN 建立失败修复（沙箱 reg.json 读地址兜底）、自绘注销确认框、注册信息完整显示 |
