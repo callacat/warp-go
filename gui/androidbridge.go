@@ -600,3 +600,19 @@ func androidVpnLastError() string {
 	defer androidRuntime.mu.Unlock()
 	return androidRuntime.lastErr
 }
+
+// androidReloadRules 从磁盘重新加载路由规则（规则页"重新加载"按钮）。
+// Android 上分流引擎挂在 androidRuntime.kernel（VpnService 驱动的
+// core.Kernel），而非 core.Server.kernel（SOCKS 内核在 Android 永不启动）。
+// VPN 未运行 / 引擎未就绪时返回明确错误（此前 Service.ReloadRules 走
+// Server.ReloadRules → s.kernel==nil → "分流引擎未初始化"，规则页点击报错
+// 且无法生效——v0.5.12 真机反馈）。
+func androidReloadRules() error {
+	androidRuntime.mu.Lock()
+	k := androidRuntime.kernel
+	androidRuntime.mu.Unlock()
+	if k == nil {
+		return errors.New("分流引擎未初始化（请先启动 VPN）")
+	}
+	return k.ReloadRules()
+}

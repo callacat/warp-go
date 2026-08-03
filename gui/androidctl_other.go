@@ -10,6 +10,10 @@ func androidRequestVpnStop() error  { return nil }
 func androidVpnRunning() bool       { return false }
 func androidVpnLastError() string   { return "" }
 
+// androidReloadRules 桌面桩：桌面端规则重载走 core.Server.ReloadRules
+// （service.go 的 ReloadRules 在 !android 分支直接调用 Server，不走这里）。
+func androidReloadRules() error { return nil }
+
 // androidOpenExternalBrowser 桌面桩：桌面端用 Wails BrowserManager（service.go
 // 的 OpenExternalBrowser 在 !android 分支直接调用，不会走到这里）。
 func androidOpenExternalBrowser(url string) error { return nil }

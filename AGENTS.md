@@ -244,6 +244,7 @@ release 同名 tag 冲突），但期间 Agent 均提前报告"Android 版已成
 - 本地 Android 环境：**无 SDK/NDK/JDK/设备** → android 构建仅 CI（`build-android` job）；本地只跑 `GOOS=android go build ./...` + `go test ./androidvpn/... ./gui/...`
 - **v0.5.1 修复（2026-08-01）**：`core.Options.DataDir`（`resolveWithDir` 分派，空值=默认执行目录锚定，桌面零回归）；`gui/datadir_{android,other}.go`；`gui` module 已 `go mod tidy`（补 sing-tun 等间接依赖）；前端引入 vitest（theme/useTheme 18 单测）；主题事件名 5 平台（`common:/windows:/linux:/android:/ios:ThemeChanged`），Android 由 MainActivity `emitTheme()` 发 `android:ThemeChanged`；`@wailsio/runtime` 的 `Events.On` 回调收到的是 `WailsEvent{name,data}` 对象（payload 在 `.data`，Android 为 JSON 字符串 `{"isDarkMode":bool}`）
 - **v0.5.12 config/ 布局（2026-08-03）**：`baseExecRoot()` 根目录选定链（exe 可写 → cwd 可写 → UserConfigDir → 兜底）；`resolveExecPath` 统一 `<根>/config/`；`configDirWritable` 探测"能否在候选根下建 config/ 子目录"（适配 Docker 挂载父目录 root 属主）；Docker 冒烟验证 reg.json/config.json/rules.txt/geo 全落挂载
+- **v0.5.12 Android 规则重载（2026-08-03）**：Android 分流引擎在 `androidRuntime.kernel`（非 `Server.kernel`），`Service.ReloadRules` 需 Android 分支路由到 `androidRuntime.kernel.ReloadRules()`（`core.Kernel` 新增该方法）；VPN 未运行时报"请先启动 VPN"。改 JNI 导出面时注意：`androidReloadRules` 是纯 Go 函数（非 `//export Java_*`），仅 `androidbridge.go` 内部使用
 - `go.mod` 依赖：sing-tun v0.8.11 为 direct require（T1 已提升）；无 gomobile
 - `androidvpn/` 已接线（不再是孤儿包）：`decision.go` 宿主可测（`//go:build android || linux`），TUN 栈 `androidvpn.go` 仅 `//go:build android`
 - JNI 导出面（v0.5.9 起 5 个）：`gui/androidbridge.go` 的

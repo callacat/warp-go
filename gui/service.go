@@ -329,6 +329,13 @@ func (s *Service) SaveRules(rulesText string) error {
 
 // ReloadRules 从磁盘重新加载规则。
 func (s *Service) ReloadRules() error {
+	// Android 上分流引擎挂在 androidRuntime.kernel（VpnService 驱动的
+	// core.Kernel），core.Server.kernel 在 Android 永不初始化（SOCKS 内核
+	// 不跑）——若走 Server.ReloadRules 必然报"分流引擎未初始化"且规则不
+	// 生效（v0.5.12 真机反馈）。路由到 androidRuntime.kernel.ReloadRules。
+	if runtime.GOOS == "android" {
+		return androidReloadRules()
+	}
 	srv, err := s.serverInstance()
 	if err != nil {
 		return err

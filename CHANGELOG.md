@@ -32,6 +32,13 @@
   `TestDefaultRulesParses`（7→8 条）+ `TestLoadGeoIP`（telegram 段）测试。
   > **注意**：已有 `rules.txt` 不会自动更新——需手动加一行或删除后重启
   > 让默认模板重新生成。
+- **Android 规则页"重新加载"报"分流引擎未初始化"**：Android 上分流引擎挂在
+  `androidRuntime.kernel`（VpnService 驱动的 `core.Kernel`），`core.Server.kernel`
+  （SOCKS 内核）在 Android 永不初始化——原 `Service.ReloadRules` 走
+  `Server.ReloadRules` → `s.kernel==nil` 报错且规则不生效（可能影响 VPN 网络）。
+  现新增 `core.Kernel.ReloadRules()`，`Service.ReloadRules` 在 Android 路由到
+  `androidRuntime.kernel.ReloadRules()`（VPN 未运行时报"请先启动 VPN"）；补
+  `TestKernelReloadRules` 单测（改规则文件后 ReloadRules 生效）。
 - **Android 检查更新"前往下载"在应用内 WebView 打开**：`<a target="_blank">`
   在 Android WebView 被应用内捕获，GitHub 下载页体验差/登录墙。新增
   `Service.OpenExternalBrowser`（桌面走 Wails `BrowserManager`，Android 走

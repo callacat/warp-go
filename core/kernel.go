@@ -225,6 +225,17 @@ func (k *Kernel) Route(host string, ip netip.Addr) (string, bool) {
 	return action, true
 }
 
+// ReloadRules 从磁盘重新加载路由规则（GUI "重新加载"按钮 / 外部编辑后手动
+// 触发；与文件热重载同一 applyRules 路径）。分流引擎未就绪（未装配 / 已
+// 关闭）时返回明确错误。
+func (k *Kernel) ReloadRules() error {
+	e := k.engine.get()
+	if e == nil {
+		return errors.New("分流引擎未初始化")
+	}
+	return e.Reload()
+}
+
 // AssignedIPv4 返回 WARP 分配的 IPv4 地址；未分配 / 非法时返回零值 netip.Addr。
 func (k *Kernel) AssignedIPv4() netip.Addr {
 	if k.regData == nil {

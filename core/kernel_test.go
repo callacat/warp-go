@@ -152,9 +152,47 @@ func TestKernelRouteReject(t *testing.T) {
 	}
 }
 
+// T3c：ReloadRules 从磁盘重新加载规则（GUI 规则页"重新加载"按钮；Android
+// 规则页报"分流引擎未初始化"的修复依赖此方法在 Kernel 上可用）。修改规则
+// 文件后 ReloadRules 应让新规则生效；引擎未初始化（构造失败路径）报明确错误。
+func TestKernelReloadRules(t *testing.T) {
+	tmp := t.TempDir()
+	rulesPath := filepath.Join(tmp, "rules.txt")
+	if err := os.WriteFile(rulesPath, []byte("proxy,domain:proxy.example\n"), 0o644); err != nil {
+		t.Fatalf("写规则文件失败：%v", err)
+	}
+	cfg := &Config{RulesPath: rulesPath, GeoDir: filepath.Join(tmp, "geo")}
+	reg := &registration.Registration{
+		AssignedIPv4: "172.16.0.2",
+		AssignedIPv6: "2606:4700:110:8a2e:fb70:7a34:2f7e:1",
+	}
+	k, err := newKernel(context.Background(), cfg, reg, []string{"162.159.192.1:443"}, &tls.Config{}, func() (dialer, error) {
+		return &fakeDialer{}, nil
+	})
+	if err != nil {
+		t.Fatalf("newKernel 失败：%v", err)
+	}
+	defer k.Close()
+
+	// 初始规则命中 proxy.example → proxy。
+	if action, matched := k.Route("proxy.example", netip.Addr{}); action != "proxy" || !matched {
+		t.Fatalf("初始 Route(proxy.example) = (%q, %v)，期望 (\"proxy\", true)", action, matched)
+	}
+
+	// 修改规则文件（direct 化）并 ReloadRules → 新规则应生效。
+	if err := os.WriteFile(rulesPath, []byte("direct,domain:proxy.example\n"), 0o644); err != nil {
+		t.Fatalf("改写规则文件失败：%v", err)
+	}
+	if err := k.ReloadRules(); err != nil {
+		t.Fatalf("ReloadRules 失败：%v", err)
+	}
+	if action, matched := k.Route("proxy.example", netip.Addr{}); action != "direct" || !matched {
+		t.Errorf("ReloadRules 后 Route(proxy.example) = (%q, %v)，期望 (\"direct\", true)", action, matched)
+	}
+}
+
 // T4：未命中 → ("", false)（隐式 direct 兜底）；引擎已关闭（Close 后）也返回 ("", false)。
-func TestKernelRouteUnmatched(t *testing.T) {
-	k, _ := newTestKernel(t)
+func TestKernelRouteUnmatched(t *testing.T) {	k, _ := newTestKernel(t)
 	if action, matched := k.Route("other.example", netip.Addr{}); action != "" || matched {
 		t.Errorf("Route(未命中) = (%q, %v)，期望 (\"\", false)", action, matched)
 	}
