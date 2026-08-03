@@ -48,10 +48,6 @@ static jclass newGlobalRef(JNIEnv* env, jclass cls) {
     return (*env)->NewGlobalRef(env, cls);
 }
 
-static jclass getObjectClass(JNIEnv* env, jobject obj) {
-    return (*env)->GetObjectClass(env, obj);
-}
-
 static jmethodID getRequestStartMethod(JNIEnv* env, jclass cls) {
     return (*env)->GetStaticMethodID(env, cls, "requestStartVpn", "()V");
 }
@@ -191,11 +187,16 @@ func Java_com_wails_app_WarpVpnService_nativeStartVpn(env *C.JNIEnv, obj C.jobje
 	C.storeJvm(env)
 
 	// 缓存 WarpVpnService 类引用 + protectSocket/kernelFailed 方法 ID。
-	// 本函数在 Java 主线程（onStartCommand）执行，GetObjectClass(obj) 拿到
-	// 应用 classloader 下的正确类——若延迟到 startVpnKernel goroutine 里
-	// FindClass 会错失应用 classloader（§6.8.3 教训）。缓存失败不致命：
-	// 拨号 socket 无法 protect（连接失败路径变长）或装配失败无法通知 Java。
-	clsRef := C.newGlobalRef(env, C.getObjectClass(env, obj))
+	// 本函数在 Java 主线程（onStartCommand）执行——nativeStartVpn 是
+	// static native，JNI 传入的第二参数 obj 就是 WarpVpnService 的
+	// jclass（类对象），直接用它找静态方法即可。若延迟到 startVpnKernel
+	// goroutine 里 FindClass 会错失应用 classloader（§6.8.3 教训）。
+	// 注意：绝不能对 obj 再调 GetObjectClass——对 static native 方法
+	// obj 已是类对象，再取类会得到 java.lang.Class，在其上找
+	// protectSocket/kernelFailed 必然 NoSuchMethodError → 主线程抛异常
+	// SIGABRT 闪退（v0.5.14 真机崩溃根因）。缓存失败不致命：拨号 socket
+	// 无法 protect（连接失败路径变长）或装配失败无法通知 Java。
+	clsRef := C.newGlobalRef(env, (C.jclass)(obj))
 	if unsafe.Pointer(clsRef) != nil {
 		protectM := C.getProtectSocketMethod(env, clsRef)
 		kernelFailM := C.getKernelFailedMethod(env, clsRef)
