@@ -47,9 +47,9 @@ func usage() {
                    时只使用该端口。域名由系统解析器解析（此时隧道尚未建立），
                    解析出的每个地址都会作为候选。
 
-配置（config.json，位于执行目录；优先级：旗标 > config.json > 默认值）：
-  -config <路径>   配置文件路径（默认 config.json；缺失时自动生成默认配置模板）
-  -route <路径>    路由规则文件路径，覆盖 config.json 的 rules_path
+配置（config/config.json，位于运行目录下的 config/ 子目录，自动创建；优先级：旗标 > config.json > 默认值）：
+  -config <路径>   配置文件路径（默认 config/config.json；缺失时自动生成默认配置模板）
+  -route <路径>    规则文件路径，覆盖 config.json 的 rules_path
   -sysproxy        启用系统代理，覆盖 config.json 的 enable_system_proxy
   -geo-update      立即更新 GEO 数据（geosite/geoip）后退出
 
@@ -66,7 +66,7 @@ func usage() {
   -version         打印版本号（如 warp v0.5.3）并退出
   -check-update    检查 GitHub Releases 是否有新版本并退出
 
-注册信息保存在工作目录下的 reg.json。首次使用需先注册：启动本身从不注册，
+注册信息保存在运行目录下的 config/reg.json（config/ 目录自动创建）。首次使用需先注册：启动本身从不注册，
 因为创建账号是一个需要明确表达的动作。-reg 是幂等的 —— 已有注册时只报告并
 退出，而不是替换掉它；替换会让旧注册在 Cloudflare 侧失去本地凭据，再也无法
 注销。要更换注册，请先用 -del。
@@ -224,11 +224,11 @@ func main() {
 			log.Fatalf("注册失败：%v", err)
 		}
 		if existing {
-			log.Printf("已注册：id=%s（reg.json）", id)
+			log.Printf("已注册：id=%s（config/reg.json）", id)
 			log.Println("无需操作。要换一个注册，请先用 -del 注销。")
 			return
 		}
-		log.Printf("✓ 注册信息已保存到 reg.json（id=%s）", id)
+		log.Printf("✓ 注册信息已保存到 config/reg.json（id=%s）", id)
 		log.Println("不带 -reg 运行即可启动代理。")
 		return
 	}
