@@ -128,8 +128,8 @@ type Server struct {
 // EdgeIP 为 "4"；扫描参数沿用 CLI 默认（45s 总超时、3s 单探针、top-4）。
 //
 // 所有运行时文件路径（config.json / reg.json / rules.txt / geo）锚定到
-// 可执行文件所在目录：GUI 双击启动时工作目录可能是用户主目录，相对路径
-// 会让文件散落各处。绝对路径保持不变。
+// 执行根目录下的 config/ 子目录（见 resolveExecPath）。Android（DataDir 非空）
+// 保持沙箱根锚定（不套 config/）。绝对路径保持不变。
 func New(opts Options) *Server {
 	if opts.ConfigPath == "" {
 		opts.ConfigPath = "config.json"
@@ -151,14 +151,137 @@ func New(opts Options) *Server {
 	}
 	opts.ConfigPath = resolveWithDir(opts.DataDir, opts.ConfigPath)
 	opts.StateFile = resolveWithDir(opts.DataDir, opts.StateFile)
+
+	// 桌面/Docker（DataDir 空）：自动创建 config/ 运行时目录，保证
+	// -reg / -geo-update / Start 等无需 Start 的写盘路径（registration.Save /
+	// WriteConfig / EnsureRulesFile / UpdateGeoData）都有父目录可写；
+	// 再执行一次性旧布局迁移（见 migrateLegacyConfig）。失败不致命，仅记日志
+	// —— 文件可正常读取/写入时目录已由 MkdirAll 保证。
+	if opts.DataDir == "" {
+		configDir := filepath.Dir(opts.ConfigPath)
+		if err := os.MkdirAll(configDir, 0o755); err != nil {
+			log.Printf("⚠ 创建运行时目录 %s 失败：%v", configDir, err)
+		}
+		// 迁移源是执行根（旧文件散落处），与 configDir 无直接关系 ——
+		// baseExecRoot 返回执行根，migrateLegacyConfig 自行在其下找 config/。
+		if err := migrateLegacyConfig(baseExecRoot()); err != nil {
+			log.Printf("⚠ 迁移旧配置失败（可忽略，新布局已就绪）：%v", err)
+		}
+	}
 	return &Server{opts: opts}
 }
 
+// migrateLegacyConfig 把旧布局（config/ 子目录出现前散落在执行根 base 下的
+// config.json / reg.json / rules.txt / geo/）一次性复制进 <base>/config/。
+// 幂等：目标 config/config.json 已存在时跳过（绝不覆盖用户新布局）。
+// 非破坏式：只复制、永不删除源文件。逐文件容错，单个失败不中断整体。
+func migrateLegacyConfig(base string) error {
+	if base == "" {
+		return nil
+	}
+	configDir := filepath.Join(base, runtimeConfigDirName)
+	// 目标 config.json 已存在 → 新布局已就绪，迁移无需进行。
+	if _, err := os.Stat(filepath.Join(configDir, "config.json")); err == nil {
+		return nil
+	}
+
+	// 待迁移的源：执行根下旧散落文件 + geo/ 目录。
+	type srcPair struct{ src, dst string }
+	files := []srcPair{
+		{src: filepath.Join(base, "config.json"), dst: filepath.Join(configDir, "config.json")},
+		{src: filepath.Join(base, "reg.json"), dst: filepath.Join(configDir, "reg.json")},
+		{src: filepath.Join(base, "rules.txt"), dst: filepath.Join(configDir, "rules.txt")},
+	}
+
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		return fmt.Errorf("创建迁移目标目录 %s 失败：%w", configDir, err)
+	}
+
+	var migrateErr error
+	for _, f := range files {
+		if err := copyFileIfExists(f.src, f.dst); err != nil {
+			log.Printf("⚠ 迁移旧 %s 到 %s 失败：%v", f.src, f.dst, err)
+			migrateErr = err
+		}
+	}
+	// 迁移 geo/：执行根/geo/*.dat → config/geo/*.dat。
+	if err := copyGeoDir(base, configDir); err != nil {
+		log.Printf("⚠ 迁移旧 geo/ 失败：%v", err)
+		migrateErr = err
+	}
+	return migrateErr
+}
+
+// copyFileIfExists 把 src 文件复制到 dst（若存在）。目标已存在则覆盖
+// （迁移场景目标 config.h 不存在，此处仅 geo 可能已部分存在）。父目录由
+// 调用方保证存在（configDir 已 MkdirAll）。源缺失时静默跳过（no-op）。
+func copyFileIfExists(src, dst string) error {
+	data, err := os.ReadFile(src)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil // 旧布局可能没有该文件，静默跳过
+		}
+		return fmt.Errorf("读取 %s 失败：%w", src, err)
+	}
+	if err := os.WriteFile(dst, data, 0o600); err != nil {
+		return fmt.Errorf("写入 %s 失败：%w", dst, err)
+	}
+	return nil
+}
+
+// copyGeoDir 递归复制旧执行根下的 geo/ 到 config/geo/（若源存在）。
+func copyGeoDir(base, configDir string) error {
+	srcGeo := filepath.Join(base, "geo")
+	if _, err := os.Stat(srcGeo); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil // 源 geo/ 不存在，no-op
+		}
+		return err
+	}
+	dstGeo := filepath.Join(configDir, "geo")
+	return filepath.WalkDir(srcGeo, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, relErr := filepath.Rel(srcGeo, path)
+		if relErr != nil {
+			return relErr
+		}
+		target := filepath.Join(dstGeo, rel)
+		if d.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		data, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return rerr
+		}
+		if werr := os.WriteFile(target, data, 0o644); werr != nil {
+			return werr
+		}
+		return nil
+	})
+}
+
+// runtimeConfigDirName 是所有非 Android 运行时文件所在的子目录名。桌面
+// （可执行目录为基础）与 Docker（工作目录为基础）的配置统一收拢进
+// <base>/config/，用户只需映射这一个目录（docker -v ./warp-config:/data/config）。
+const runtimeConfigDirName = "config"
+
+// 测试缝：把 os.Executable / os.Getwd 抽出，便于测试注入只读 exe 目录 /
+// 回退 cwd 等场景。configDirWritable 探测保持真实（创建 config/ 子目录 +
+// 临时文件探测），测试用真实 TempDir 验证回退优先级。
+var (
+	executableDirFn = os.Executable
+	getwdFn         = os.Getwd
+)
+
 // resolveWithDir 把相对路径解析为运行时文件绝对路径：
-//   - dir 非空（Android 沙箱）→ 锚定到 dir
-//   - 否则走默认 resolveExecPath（可执行文件目录 / 用户配置目录）
+//   - dir 非空（Android 沙箱）→ 锚定到 dir（保持沙箱根，不套 config/ 子目录
+//     —— 真机路径约定未变，避免未真机验证的回归风险）
+//   - 否则走默认 resolveExecPath（可执行目录 / 工作目录，两者下都套 config/）
 //
-// 已是绝对路径或空串时原样返回。
+// rules_path / geo_dir 位于 config.json 内，经 ensureConfig 同一函数解析，
+// 保证与 config.json / reg.json 落在同一 config/ 子目录（所有配置集中一处映射）。
 func resolveWithDir(dir, p string) string {
 	if p == "" || filepath.IsAbs(p) {
 		return p
@@ -169,30 +292,62 @@ func resolveWithDir(dir, p string) string {
 	return resolveExecPath(p)
 }
 
-// resolveExecPath 把相对路径解析为数据目录下的绝对路径：
+// baseExecRoot 返回桌面/Docker 形态的运行时根目录（执行目录）：
 //   - 优先可执行文件所在目录（便携部署：exe 放哪数据就在哪）
-//   - 可执行目录不可写（如 Windows Program Files）时回退用户配置目录
-//     （Windows %APPDATA%/warp-go、macOS ~/Library/Application Support/warp-go、
-//     Linux ~/.config/warp-go）
+//   - 可执行目录不可写（系统安装 / Docker 中 exe 位于只读 /usr/local/bin）时，
+//     回退到当前工作目录（Docker 的 WORKDIR 即挂载点 /data，正是用户想要
+//     映射的目录 —— 这是 Docker"文件无法保存"的核心修复）
+//   - 再回退用户配置目录（Windows %APPDATA%/warp-go、macOS
+//     ~/Library/Application Support/warp-go、Linux ~/.config/warp-go）
+//   - 兜底可执行目录（此时写入大概率失败，由调用方报错）
 //
-// 已是绝对路径或空串时原样返回。os.Executable 失败（罕见）时回退到
-// 当前工作目录，保证程序仍能启动。
+// 每个候选根都通过"能否在其中创建 config/ 子目录"来探测可写性（而非根目录
+// 本身）：Docker 挂载 ./warp-config:/data/config 时 /data 属主是 root、不可写，
+// 但 /data/config（挂载点）可写 —— 判断的是实际要用的目录。
+func baseExecRoot() string {
+	candidates := []string{}
+	exe, err := executableDirFn()
+	if err == nil && exe != "" {
+		exeDir := filepath.Dir(exe)
+		candidates = append(candidates, exeDir)
+	}
+	if cwd, err := getwdFn(); err == nil && cwd != "" {
+		candidates = append(candidates, cwd)
+	}
+	if cfgDir, err := os.UserConfigDir(); err == nil {
+		candidates = append(candidates, filepath.Join(cfgDir, "warp-go"))
+	}
+	for _, c := range candidates {
+		if c != "" && configDirWritable(c) {
+			return c
+		}
+	}
+	// 全部探测失败（理论上不可达）：兜底返回可执行目录，写入由调用方报错。
+	if len(candidates) > 0 {
+		return candidates[0]
+	}
+	return ""
+}
+
+// configDirWritable 探测能否在 base 下创建并写入 config/ 子目录。这是实际
+// 运行时文件要落的位置（resolveExecPath 把相对路径拼到 base/config/ 下）。
+// 创建失败或探测写入失败都视为不可写。
+func configDirWritable(base string) bool {
+	dir := filepath.Join(base, runtimeConfigDirName)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return false
+	}
+	return dirWritable(dir)
+}
+
+// resolveExecPath 把相对路径（config.json / reg.json / rules.txt / geo）解析
+// 为执行根目录下 config/ 子目录的绝对路径。根目录选定见 baseExecRoot。
+// 已是绝对路径或空串时原样返回。
 func resolveExecPath(p string) string {
 	if p == "" || filepath.IsAbs(p) {
 		return p
 	}
-	exe, err := os.Executable()
-	if err != nil {
-		return p
-	}
-	exeDir := filepath.Dir(exe)
-	if dirWritable(exeDir) {
-		return filepath.Join(exeDir, p)
-	}
-	if cfgDir, err := os.UserConfigDir(); err == nil {
-		return filepath.Join(cfgDir, "warp-go", p)
-	}
-	return filepath.Join(exeDir, p)
+	return filepath.Join(baseExecRoot(), runtimeConfigDirName, p)
 }
 
 // dirWritable 检查目录是否可写（用临时文件探测；失败按不可写处理）。
