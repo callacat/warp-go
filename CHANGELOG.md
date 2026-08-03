@@ -3,6 +3,31 @@
 本项目所有值得记录的变更。格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v0.5.14] - 2026-08-03
+
+### 修复
+
+- **Android 连接所有边缘地址失败（根因修复）**：`WarpVpnService.establish()`
+  装了全量路由（`addRoute("0.0.0.0", 0)` + `addRoute("::", 0)`）后，**应用
+  自身新创建的 socket 也走 TUN**——而 TUN 要等拨号成功后才被 sing-tun 读取，
+  于是 QUIC ClientHello 滞留未处理的 tun 里，所有边缘握手 2s 超时 →
+  "所有边缘地址均失败" → 30s 装配超时。桌面 CLI 无此问题（无 TUN 自路由），
+  故真机"依然连接失败"而桌面正常。
+  - **修复**：新增 `tunnel.socketProtector` 钩子（`dialAddr` 创建 UDP 拨号
+    socket 后、发任何包前调用）；Android 桥注册
+    `WarpVpnService.protectSocket(fd)`（`VpnService.protect()` 把拨号 socket
+    豁免出 VPN 路由走物理网络）。DoH 复用同一 QUIC 连接，无需单独保护。
+  - 补 `TestKernelNewContextCanceledSkipsDial` 相关路径不受影响；CI 新增
+    `protectSocket`/`kernelFailed` 双侧 JNI 签名 grep 断言。
+- **Android 启动失败后"无法停止内核"（通知残留）**：异步装配失败只改 Go
+  状态，Java 的 `vpnPfd`/`nativeRunning` 保持 true、前台通知残留——用户点
+  停止看似无响应。现 `failStart` 额外经新 JNI 桥 `kernelFailed(msg)` 通知
+  Java 侧自拆除（`stopForeground` + `stopSelf` + 关 TUN fd），停止按钮随后
+  总是幂等生效。
+- **Android 拨号总超时不可配置**：`androidDialTimeout` 从固定 30s 改为
+  **可配置**（`config.json` 的 `dial_timeout_seconds`，默认 60s；0/缺失 =
+  默认）。弱网/慢速运营商下可调大，不必改代码。
+
 ## [v0.5.13] - 2026-08-03
 
 ### 变更

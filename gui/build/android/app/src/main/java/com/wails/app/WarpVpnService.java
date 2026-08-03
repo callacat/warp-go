@@ -74,6 +74,44 @@ public class WarpVpnService extends VpnService {
     private volatile boolean nativeRunning = false;
     private static volatile WarpVpnService sInstance;
 
+    /**
+     * Exempt a socket from VPN routing by protecting it, so its traffic uses
+     * the physical network instead of the TUN. Once establish() installs
+     * catch-all routes, the app's OWN new sockets also route through the TUN —
+     * and the TUN isn't read until after the Go dial succeeds, so the QUIC
+     * ClientHello would sit unprocessed in the tun and every edge handshake
+     * times out ("所有边缘地址均失败"). Go calls this (via JNI) on the edge
+     * dial socket. Returns false when the service instance isn't live yet.
+     */
+    public static boolean protectSocket(int fd) {
+        WarpVpnService s = sInstance;
+        if (s == null) return false;
+        try {
+            return s.protect(fd);
+        } catch (Exception e) {
+            Log.e(TAG, "protect(" + fd + ") failed", e);
+            return false;
+        }
+    }
+
+    /**
+     * Asynchronous kernel-assembly failure notification from Go: the Go side
+     * accepted the start (returned 0) but the dial/assembly later failed, so
+     * this service must tear itself down (release the TUN fd, remove the
+     * foreground state, stop). Without this the notification and the native
+     * state linger after a failed start — the "无法停止内核" symptom. Safe to
+     * call from any thread: stopForeground/stopSelf are thread-safe.
+     */
+    public static void kernelFailed(String msg) {
+        MainActivity.nativeLogMessage("error", "内核启动失败：" + msg);
+        WarpVpnService s = sInstance;
+        if (s == null) return;
+        Log.e(TAG, "kernel assembly failed, tearing down: " + msg);
+        s.stopForeground(STOP_FOREGROUND_REMOVE);
+        s.stopSelf();
+        s.closeNative();
+    }
+
     @Override
     public void onCreate() {
         super.onCreate();

@@ -48,6 +48,10 @@ static jclass newGlobalRef(JNIEnv* env, jclass cls) {
     return (*env)->NewGlobalRef(env, cls);
 }
 
+static jclass getObjectClass(JNIEnv* env, jobject obj) {
+    return (*env)->GetObjectClass(env, obj);
+}
+
 static jmethodID getRequestStartMethod(JNIEnv* env, jclass cls) {
     return (*env)->GetStaticMethodID(env, cls, "requestStartVpn", "()V");
 }
@@ -71,6 +75,24 @@ static void callStaticVoidMethodStr(JNIEnv* env, jclass cls, jmethodID mid, cons
     if (js == NULL) return;
     (*env)->CallStaticVoidMethod(env, cls, mid, js);
     (*env)->DeleteLocalRef(env, js);
+}
+
+// protectSocket(int fd) → boolean：WarpVpnService 静态方法，对 TUN fd 之外的
+// 关键 socket 调用 VpnService.protect()，豁免其 VPN 路由（Android 上应用自身
+// 新 socket 也走 TUN，见 socketProtector）。返回 false = 服务未就绪/失败。
+static jmethodID getProtectSocketMethod(JNIEnv* env, jclass cls) {
+    return (*env)->GetStaticMethodID(env, cls, "protectSocket", "(I)Z");
+}
+
+// kernelFailed(String msg) → void：异步内核装配失败时通知 Java 自拆除
+// （stopForeground + stopSelf + 关 TUN fd），避免"启动失败但通知栏残留 /
+// 停止无响应"（v0.5.13 反馈"无法停止内核"）。
+static jmethodID getKernelFailedMethod(JNIEnv* env, jclass cls) {
+    return (*env)->GetStaticMethodID(env, cls, "kernelFailed", "(Ljava/lang/String;)V");
+}
+
+static jboolean callStaticBooleanMethod(JNIEnv* env, jclass cls, jmethodID mid, int arg) {
+    return (*env)->CallStaticBooleanMethod(env, cls, mid, (jint)arg);
 }
 
 // jstring → Go string 的 C 侧转换原语。JNIEnv 调用必须留在 C preamble
@@ -101,12 +123,15 @@ import (
 
 	"warp/androidvpn"
 	"warp/core"
+	"warp/tunnel"
 )
 
-// androidDialTimeout 是 Android 内核装配的拨号总超时。移动网络下 QUIC/UDP
-// 可能被运营商封锁，无限重试只会无限刷错误并让状态停在"连接中"；超时后
-// 报明确错误，用户可检查网络后重试。
-const androidDialTimeout = 30 * time.Second
+// androidDialTimeoutDefault 是 Android 内核装配的拨号总超时默认值。移动网络
+// 下 QUIC/UDP 可能被运营商封锁，无限重试只会无限刷错误并让状态停在"连接中"；
+// 超时后报明确错误，用户可检查网络后重试。可由 config.json 的
+// dial_timeout_seconds（core.Config.DialTimeoutSeconds）覆盖：0 或缺失 = 默认
+// 60s；正值 = 该秒数。
+const androidDialTimeoutDefault = 60 * time.Second
 
 // androidRuntime 是 Android 桥的包级单例：同一时刻只运行一个 VPN 实例。
 // mu 保护全部字段；nativeStopVpn 与 nativeStartVpn 可能从不同线程调用。
@@ -134,6 +159,18 @@ var androidCtl struct {
 	ready        bool
 }
 
+// warpCtl 持有 WarpVpnService 的类引用与静态方法 ID（protectSocket /
+// kernelFailed）。与 androidCtl 分开（那是 MainActivity）；在 nativeStartVpn
+// 内于 Java 主线程缓存（GetObjectClass(obj)，具备正确 classloader），供
+// startVpnKernel goroutine 里保护拨号 socket 与上报装配失败时调用。
+var warpCtl struct {
+	mu          sync.Mutex
+	cls         C.jclass // WarpVpnService 全局引用
+	protectM    C.jmethodID
+	kernelFailM C.jmethodID
+	ready       bool
+}
+
 // Java_com_wails_app_WarpVpnService_nativeStartVpn 是 Java 侧
 // WarpVpnService 的 JNI 入口：VpnService.Builder.establish() 拿到 TUN fd 后
 // 传入，Go 侧装配 core.Kernel（MASQUE 隧道 + 分流引擎）与 androidvpn 栈并启动。
@@ -152,6 +189,23 @@ var androidCtl struct {
 //export Java_com_wails_app_WarpVpnService_nativeStartVpn
 func Java_com_wails_app_WarpVpnService_nativeStartVpn(env *C.JNIEnv, obj C.jobject, fd C.jint) C.jint {
 	C.storeJvm(env)
+
+	// 缓存 WarpVpnService 类引用 + protectSocket/kernelFailed 方法 ID。
+	// 本函数在 Java 主线程（onStartCommand）执行，GetObjectClass(obj) 拿到
+	// 应用 classloader 下的正确类——若延迟到 startVpnKernel goroutine 里
+	// FindClass 会错失应用 classloader（§6.8.3 教训）。缓存失败不致命：
+	// 拨号 socket 无法 protect（连接失败路径变长）或装配失败无法通知 Java。
+	clsRef := C.newGlobalRef(env, C.getObjectClass(env, obj))
+	if unsafe.Pointer(clsRef) != nil {
+		protectM := C.getProtectSocketMethod(env, clsRef)
+		kernelFailM := C.getKernelFailedMethod(env, clsRef)
+		warpCtl.mu.Lock()
+		warpCtl.cls = clsRef
+		warpCtl.protectM = protectM
+		warpCtl.kernelFailM = kernelFailM
+		warpCtl.ready = unsafe.Pointer(protectM) != nil && unsafe.Pointer(kernelFailM) != nil
+		warpCtl.mu.Unlock()
+	}
 
 	androidRuntime.mu.Lock()
 	if androidRuntime.started {
@@ -193,14 +247,25 @@ func Java_com_wails_app_WarpVpnService_nativeStartVpn(env *C.JNIEnv, obj C.jobje
 	// 停止"会得到装配照常完成、VPN 仍运行的反直觉结果）。
 	// 拨号总超时：移动网络下 QUIC/UDP 可能被运营商封锁，无限指数退避重试
 	// 只会无限刷"边缘不可达"并让状态永远停在"连接中"（v0.5.10 反馈）。
-	// 30s 后 NewKernelContext 返回 DeadlineExceeded，报明确错误供用户重试。
-	ctx, cancel := context.WithTimeout(context.Background(), androidDialTimeout)
+	// 默认 60s（androidDialTimeoutDefault），可由 config.json 的
+	// dial_timeout_seconds 覆盖；0/缺失 = 默认 60s。
+	dialTimeout := time.Duration(built.cfg.DialTimeoutSeconds) * time.Second
+	if dialTimeout <= 0 {
+		dialTimeout = androidDialTimeoutDefault
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), dialTimeout)
 	androidRuntime.mu.Lock()
 	androidRuntime.ctx = ctx
 	androidRuntime.cancel = cancel
 	androidRuntime.started = true
 	androidRuntime.lastErr = ""
 	androidRuntime.mu.Unlock()
+
+	// 注册拨号 socket 保护器：Android 上 VpnService.establish() 后应用自身
+	// 新 socket 也走 TUN，拨号 QUIC 的 ClientHello 会滞留未读取的 tun 里导致
+	// 所有边缘超时（v0.5.13 反馈"连接所有边缘地址失败"）。protect() 豁免该
+	// socket 走物理网络（根因修复，见 tunnel.socketProtector）。
+	tunnel.SetSocketProtector(androidProtectSocket)
 
 	go startVpnKernel(ctx, cancel, sandboxDir, built, int(fd))
 	log.Printf("✓ 已受理 VPN 启动（fd=%d，内核装配异步进行）", int(fd))
@@ -306,6 +371,7 @@ func startVpnKernel(ctx context.Context, cancel context.CancelFunc, sandboxDir s
 		}
 		androidRuntime.lastErr = err.Error()
 		androidRuntime.mu.Unlock()
+		androidNotifyKernelFailed(name + "：" + err.Error())
 	}
 
 	// 装配完成前的最后一次取消检查：nativeStopVpn 可能已拆除了本实例
@@ -347,29 +413,79 @@ func startVpnKernel(ctx context.Context, cancel context.CancelFunc, sandboxDir s
 }
 
 // failStart 记录异步装配失败并回滚状态：清 started（允许用户重试）、写
-// lastErr（GetStatus 展示）。TUN fd 由 Java 侧持有（ParcelFileDescriptor，
-// Go 侧无法关闭）；Java 的 WarpVpnService 以 nativeStartVpn 返回值判断是否
-// 持有 fd，异步失败只能靠日志 + lastErr 提示用户，fd 在服务 onDestroy /
-// 下次启动替换时由 Java 侧统一关闭。
+// lastErr（GetStatus 展示），并通知 Java 侧自拆除（release TUN + 停前台
+// 服务）。此前异步失败只改 Go 状态，Java 的 vpnPfd/nativeRunning 保持 true、
+// 前台通知残留——用户点停止看似无响应、通知栏一直挂着（v0.5.13 反馈
+// "无法停止内核"）。Java 收到 kernelFailed 后自停，停止按钮随后总是幂等生效。
 func failStart(stage string, err error) {
 	androidRuntime.mu.Lock()
 	androidRuntime.started = false
 	androidRuntime.lastErr = err.Error()
 	androidRuntime.mu.Unlock()
 	log.Printf("⚠ VPN 启动失败（%s）：%v", stage, err)
+	androidNotifyKernelFailed(stage + "：" + err.Error())
 }
 
 // failStartCtx 区分装配 ctx 的两种中止原因并上报：
-//   - DeadlineExceeded → 拨号总超时（30s，见 androidDialTimeout）——边缘
-//     不可达被运营商封锁/弱网，报明确错误供用户检查网络后重试，而非
+//   - DeadlineExceeded → 拨号总超时（默认 60s，见 androidDialTimeoutDefault）
+//     ——边缘不可达被运营商封锁/弱网，报明确错误供用户检查网络后重试，而非
 //     无限重试（v0.5.10 反馈"一直边缘不可达 3.2s 后重试"）；
 //   - 其余（Canceled）→ 用户装配中点了停止，正常中止。
 func failStartCtx(ctx context.Context, err error) {
 	if ctx.Err() != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		failStart("连接边缘超时", errors.New("30 秒内未能连接 WARP 边缘，请检查网络后重试"))
+		failStart("连接边缘超时", errors.New("连接 WARP 边缘超时，请检查网络后重试"))
 		return
 	}
 	failStart("已取消", err)
+}
+
+// androidNotifyKernelFailed 通知 Java 侧内核装配失败：经 warpCtl 缓存的
+// kernelFailed 静态方法触发 WarpVpnService 自拆除（release TUN + 停前台 +
+// stopSelf），使启动失败后通知栏立即消失、停止按钮幂等可用。桥未就绪（类/
+// 方法 ID 未缓存）时仅记日志——此时 Java 侧仍持有 TUN，靠 onStartCommand
+// 的 stale-TUN 重入守卫在下次启动时释放。
+func androidNotifyKernelFailed(msg string) {
+	warpCtl.mu.Lock()
+	cls, mid, ready := warpCtl.cls, warpCtl.kernelFailM, warpCtl.ready
+	warpCtl.mu.Unlock()
+	if !ready || unsafe.Pointer(cls) == nil || unsafe.Pointer(mid) == nil {
+		log.Println("⚠ kernelFailed 桥未就绪，无法通知 Java 自拆除")
+		return
+	}
+	var needsDetach C.int
+	env := C.getEnv(&needsDetach)
+	if env == nil {
+		log.Println("⚠ kernelFailed：无法获取 JNIEnv")
+		return
+	}
+	defer C.releaseEnv(needsDetach)
+	cstr := C.CString(msg)
+	C.callStaticVoidMethodStr(env, cls, mid, cstr)
+	C.free(unsafe.Pointer(cstr))
+}
+
+// androidProtectSocket 是 tunnel.socketProtector 的 Android 实现：调用
+// WarpVpnService.protectSocket(fd)（Java 侧 sInstance.protect(fd)），把拨号
+// socket 豁免出 VPN 路由走物理网络。桥未就绪时返回错误（dialAddr 记日志后
+// 继续，连接仍会失败但原因可排查）。
+func androidProtectSocket(fd int) error {
+	warpCtl.mu.Lock()
+	cls, mid, ready := warpCtl.cls, warpCtl.protectM, warpCtl.ready
+	warpCtl.mu.Unlock()
+	if !ready || unsafe.Pointer(cls) == nil || unsafe.Pointer(mid) == nil {
+		return errors.New("WarpVpnService protectSocket 桥未就绪")
+	}
+	var needsDetach C.int
+	env := C.getEnv(&needsDetach)
+	if env == nil {
+		return errors.New("无法获取 JNIEnv")
+	}
+	defer C.releaseEnv(needsDetach)
+	ok := C.callStaticBooleanMethod(env, cls, mid, C.jint(fd)) != 0
+	if !ok {
+		return errors.New("protectSocket 返回 false（服务未就绪）")
+	}
+	return nil
 }
 
 // Java_com_wails_app_WarpVpnService_nativeStopVpn 停止运行中的 VPN 并拆除

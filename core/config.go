@@ -45,6 +45,9 @@ type Config struct {
 	// 仅对 GitHub 官方域名（github.com / raw.githubusercontent.com）的下载
 	// URL 生效；置空关闭加速。GEO 数据库与默认规则下载共用。
 	DownloadProxy string `json:"download_proxy"`
+	// DialTimeoutSeconds 是边缘拨号总超时（秒）。仅 Android 使用：装配
+	// ctx 的 WithTimeout 值；0 或缺失 = 默认 60s（见 androidDialTimeoutDefault）。
+	DialTimeoutSeconds int `json:"dial_timeout_seconds,omitempty"`
 }
 
 // DefaultConfig 返回内置默认值。LoadConfig 以它为基底，JSON 反序列化只覆盖

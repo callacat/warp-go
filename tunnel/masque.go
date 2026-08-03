@@ -76,6 +76,22 @@ func (s *streamConn) RemoteAddr() net.Addr { return s.remoteAddr }
 // edge intermittently answers with PROTOCOL_VIOLATION and drops the connection.
 const connectionIDLength = 20
 
+// socketProtector, when non-nil, is invoked with the raw fd of every UDP socket
+// the tunnel dials with, right after creation and before any packet is sent.
+// Android uses it to call VpnService.protect(fd): once VpnService.establish()
+// installs catch-all routes, the VPN app's OWN new sockets also route through
+// the TUN — and the TUN isn't read until after the dial succeeds, so the QUIC
+// ClientHello would sit unprocessed in the tun and every edge handshake times
+// out ("所有边缘地址均失败"). protect() exempts the dial socket and sends it
+// over the physical network instead. Desktop/CLI leave this nil (no-op).
+var socketProtector func(fd int) error
+
+// SetSocketProtector 注册包级 socket 保护器，供 Android 桥（gui/androidbridge
+// 包）注入 VpnService.protect 实现。桌面/CLI 不调用，保持 nil。
+func SetSocketProtector(fn func(fd int) error) {
+	socketProtector = fn
+}
+
 // perAddrDialTimeout bounds a single edge address attempt so an unreachable
 // port falls through to the next candidate quickly.
 const perAddrDialTimeout = 2 * time.Second
@@ -358,6 +374,23 @@ func (c *MasqueClient) dialAddr(ctx context.Context, edgeAddr string) (*connBund
 	udpConn, err := net.ListenUDP("udp", listenAddr)
 	if err != nil {
 		return nil, fmt.Errorf("监听 UDP 失败：%w", err)
+	}
+
+	// Android：VpnService.establish() 后应用自身的新 socket 也走 TUN（未
+	// protect 时），而 TUN 在拨号成功后才被读取——ClientHello 会滞留 tun 里
+	// 导致所有边缘握手超时。protect() 把拨号 socket 豁免出 VPN 路由，走物理
+	// 网络。桌面/CLI 无此问题（socketProtector 为 nil）。
+	if socketProtector != nil {
+		rawConn, cerr := udpConn.SyscallConn()
+		if cerr == nil {
+			_ = rawConn.Control(func(fd uintptr) {
+				if perr := socketProtector(int(fd)); perr != nil {
+					log.Printf("⚠ 保护拨号 socket（fd=%d）失败：%v", int(fd), perr)
+				}
+			})
+		} else {
+			log.Printf("⚠ 获取拨号 socket 原始 fd 失败：%v", cerr)
+		}
 	}
 
 	// Dial through an explicit Transport so the source connection ID length can

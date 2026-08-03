@@ -343,6 +343,13 @@ jobs:
           grep -qE 'Java_com_wails_app_WarpVpnService_nativeStopVpn.*C\.jint' androidbridge.go
           grep -qE 'int +nativeVpnRunning *\(\)' build/android/app/src/main/java/com/wails/app/WarpVpnService.java
           grep -qE 'Java_com_wails_app_WarpVpnService_nativeVpnRunning.*C\.jint' androidbridge.go
+          # 拨号 socket 保护（VpnService.protect）+ 内核装配失败自拆除：Go 侧
+          # 经 warpCtl 调用的 Java 静态方法，签名必须与 C preamble 的
+          # GetStaticMethodID 描述严格一致（§6.8.3）。
+          grep -qE 'static +boolean +protectSocket *\(int fd\)' build/android/app/src/main/java/com/wails/app/WarpVpnService.java
+          grep -qE 'GetStaticMethodID\(env, cls, "protectSocket", "\(I\)Z"\)' androidbridge.go
+          grep -qE 'static +void +kernelFailed *\(String msg\)' build/android/app/src/main/java/com/wails/app/WarpVpnService.java
+          grep -qE 'GetStaticMethodID\(env, cls, "kernelFailed", "\(Ljava/lang/String;\)V"\)' androidbridge.go
           grep -qE 'int +nativeLogMessage *\(String level, String msg\)' build/android/app/src/main/java/com/wails/app/MainActivity.java
           grep -qE 'Java_com_wails_app_MainActivity_nativeLogMessage.*C\.jint' androidbridge.go
           grep -qE 'int +nativeSetTimeZone *\(String tz\)' build/android/app/src/main/java/com/wails/app/MainActivity.java

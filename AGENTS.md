@@ -138,6 +138,7 @@ go test ./androidvpn/... ./gui/...                       # 决策逻辑 + androi
 | M8.8 v0.5.11 反馈修复（Android 真机） | ✅ | **边缘不可达无限重试**：`NewMasqueClient` 初始拨号无限指数退避，移动网络 QUIC 被封锁时永久重连 + 无限刷日志 + 状态停"连接中"。新增 `tunnel.NewMasqueClientContext(ctx,...)` / `core.NewKernelContext(ctx,...)`（拨号循环 select 监听外部 ctx，可取消；`NewKernel` 委托 background，桌面零回归）；Android 装配 ctx 改 `context.WithTimeout(30s)`（`androidDialTimeout`），超时报"连接边缘超时，请检查网络"。**点停止无效（双重根因）**：① Go 侧装配中 nativeStopVpn 只 cancel() 但拨号不响应 ctx → NewKernelContext 取消后立即中止；② Java 侧前台服务（startForegroundService）用 `stopService` 无法停止（Android 8+ 需先 stopForeground，否则 onDestroy 从不触发）→ 新增 `WarpVpnService.stop(Context)`（`stopForeground(STOP_FOREGROUND_REMOVE)`+`stopSelf()`），`requestStopVpn` 改调它；补 `TestKernelNewContextCanceledSkipsDial` 单测 |
 | M8.9 v0.5.12 反馈修复（win/Android 真机） | ✅ | **Telegram 无法连接**：默认规则未覆盖 TG——`149.154.175.100` 等 TG IP 落隐式 direct，网络封锁直连失败。默认模板 + `rules/default-rules.txt` 新增 `proxy,geoip:telegram`（geoip 类别大小写不敏感，`Lookup` ToUpper→`TELEGRAM`）；补 telegram 匹配/解析/加载单测。**Android 检查更新在应用内 WebView 打开**：`<a target=_blank>` 被 WebView 捕获 → 新增 `Service.OpenExternalBrowser`（桌面 Wails `application.Get().Browser.OpenURL`，Android 反向 JNI `MainActivity.openExternalBrowser` 用 `Intent.ACTION_VIEW` 跳第三方浏览器），前端"前往下载"改调它 |
 | M9 运行时文件统一 config/ 子目录（v0.5.12） | ✅ | **Docker 版"自动生成注册文件无法保存"根因修复**：旧 `resolveExecPath` 锚定可执行目录，Docker exe 在只读 `/usr/local/bin` → 回退容器层 `~/.config/warp-go`，从不落挂载卷 `/data`。现 `core.baseExecRoot`：可执行目录（可写）→ **当前工作目录**（可写；Docker WORKDIR `/data` 挂载卷——核心修复）→ 用户配置目录 → 兜底；`resolveExecPath` 统一收拢进 `<根>/config/`（config.json/reg.json/rules.txt/geo），自动 `MkdirAll` + 一次性旧布局迁移（`migrateLegacyConfig`，幂等非破坏）。**Android 例外**：`DataDir` 非空仍锚定沙箱根（不套 config/ 子目录）。**Docker compose 挂载改 `./warp-config:/data/config`**（只需映射 config 一个目录）；`configDirWritable` 以"能否在候选根下创建 config/ 子目录"探测（适配挂载点父目录 root 属主场景）。测试：6 新增 + 3 更新路径契约测试；Docker 真实冒烟（reg/config/rules/geo 全落挂载） |
+| M9.5 Android 自路由修复（v0.5.14） | ✅ | **连接所有边缘地址失败根因**：`VpnService.establish()` 全量路由后应用自身新 socket 也走 TUN（未 protect 时），而 TUN 在拨号成功后才被 sing-tun 读取 → QUIC ClientHello 滞留 tun 里、所有边缘握手超时。修复：`tunnel.socketProtector` 钩子（`dialAddr` 建 UDP 拨号 socket 后、发包前调用）+ Android 桥 `WarpVpnService.protectSocket(fd)`（`VpnService.protect()` 豁免拨号 socket 走物理网络；DoH 复用同一 QUIC 连接无需单独保护）。**启动失败"无法停止"修复**：`failStart`/`rollback` 额外经 `kernelFailed(msg)` JNI 通知 Java 自拆除（stopForeground+stopSelf+关 TUN fd），停止按钮幂等生效。`warpCtl` 缓存 WarpVpnService 类/方法 ID（nativeStartVpn 主线程 GetObjectClass 缓存，避免 goroutine FindClass 错失 classloader）。拨号总超时改可配置 `config.json` `dial_timeout_seconds`（默认 60s）；补 T6 androidconfig 测试 + CI `protectSocket`/`kernelFailed` 双侧签名 grep 断言；tag v0.5.14 |
 
 ## 6.6 上游冲突处理（重要）
 
@@ -247,12 +248,21 @@ release 同名 tag 冲突），但期间 Agent 均提前报告"Android 版已成
 - **v0.5.12 Android 规则重载（2026-08-03）**：Android 分流引擎在 `androidRuntime.kernel`（非 `Server.kernel`），`Service.ReloadRules` 需 Android 分支路由到 `androidRuntime.kernel.ReloadRules()`（`core.Kernel` 新增该方法）；VPN 未运行时报"请先启动 VPN"。改 JNI 导出面时注意：`androidReloadRules` 是纯 Go 函数（非 `//export Java_*`），仅 `androidbridge.go` 内部使用
 - `go.mod` 依赖：sing-tun v0.8.11 为 direct require（T1 已提升）；无 gomobile
 - `androidvpn/` 已接线（不再是孤儿包）：`decision.go` 宿主可测（`//go:build android || linux`），TUN 栈 `androidvpn.go` 仅 `//go:build android`
-- JNI 导出面（v0.5.9 起 5 个）：`gui/androidbridge.go` 的
+- **v0.5.14 Android 自路由修复（2026-08-03）**：`VpnService.establish()` 全量路由后
+  应用自身新 socket 也走 TUN（未 protect 时），而 TUN 在拨号成功后才被 sing-tun 读取
+  → QUIC ClientHello 滞留 tun 里、所有边缘握手超时。修复：`tunnel.socketProtector`
+  钩子（`dialAddr` 建 UDP socket 后调用）+ Android 桥注册 `WarpVpnService.protectSocket(fd)`
+  （`VpnService.protect()`）。异步装配失败经 `kernelFailed(msg)` 通知 Java 自拆除
+  （stopForeground+stopSelf+关 TUN）。`warpCtl` 缓存 WarpVpnService 类/方法 ID（在
+  nativeStartVpn 主线程 GetObjectClass 缓存，避免 goroutine FindClass 错失 classloader）。
+  拨号总超时改为可配置 `config.json` `dial_timeout_seconds`（默认 60s）。**改 JNI 前必读
+  §6.8.3**（Go 侧不能直接调 JNIEnv 方法，必须走 C preamble helper）。
+- JNI 导出面（v0.5.9 起 5 个，v0.5.14 静态方法桥 2 个）：`gui/androidbridge.go` 的
   `Java_com_wails_app_WarpVpnService_nativeStartVpn/nativeStopVpn/nativeVpnRunning` +
   `Java_com_wails_app_MainActivity_nativeLogMessage/nativeSetTimeZone`；Java 侧
-  `WarpVpnService.java`（前三个）+ `MainActivity.java`（后两个，`nativeLogMessage`
+  `WarpVpnService.java`（前三个 + 静态方法 `protectSocket(int)`/`kernelFailed(String)`，
+  经 `warpCtl` 从 Go 调用）+ `MainActivity.java`（后两个，`nativeLogMessage`
   为 package 可见——WarpVpnService 也调用）；CI 双侧 grep 断言保障符号一致。
-  **改 JNI 前必读 §6.8.3**（Go 侧不能直接调 JNIEnv 方法，必须走 C preamble helper）。
   **nativeStartVpn 必须保持异步**（v0.5.9 ANR 教训）：Java 主线程同步装配 Kernel
   （拨号无限重试）会 5s ANR；只做轻量前置校验 + 返回 0"已受理"，装配进 goroutine，
   失败经 androidRuntime.lastErr 上报

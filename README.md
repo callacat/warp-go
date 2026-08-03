@@ -187,7 +187,8 @@ direct,geoip:cn
   "geo_auto_update_days": 7,
   "enable_system_proxy": false,
   "allow_udp": false,
-  "download_proxy": "https://gh-proxy.org/"
+  "download_proxy": "https://gh-proxy.org/",
+  "dial_timeout_seconds": 60
 }
 ```
 
@@ -201,6 +202,7 @@ direct,geoip:cn
 | `enable_system_proxy` | 启动时是否把系统代理指向本地端口 |
 | `allow_udp` | 是否响应 SOCKS5 UDP ASSOCIATE（数据报直连，不经隧道） |
 | `download_proxy` | GitHub 下载加速前缀（GUI 可编辑），仅对 github.com / raw.githubusercontent.com 的下载 URL 生效；置空关闭 |
+| `dial_timeout_seconds` | （仅 Android）边缘拨号总超时（秒），默认 60；0/缺失 = 默认 |
 
 优先级：**命令行旗标 > config.json > 默认值**。热重载基于 mtime + 内容 hash 检测。
 
@@ -324,6 +326,7 @@ warp-go/
 
 | 版本 | 日期 | 摘要 |
 |---|---|---|
+| [v0.5.14](CHANGELOG.md#v0514---2026-08-03) | 2026-08-03 | **Android 连接失败根因修复**（自路由 → `VpnService.protect` 拨号 socket）、启动失败通知残留修复（kernelFailed 自拆除）、拨号超时可配置（`dial_timeout_seconds`，默认 60s） |
 | [v0.5.13](CHANGELOG.md#v0513---2026-08-03) | 2026-08-03 | 运行时文件统一 `config/` 子目录（Docker 修复 + 旧布局迁移）、Android 规则页"分流引擎未初始化"修复（ReloadRules 路由到 androidRuntime.kernel） |
 | [v0.5.12](CHANGELOG.md#v0512---2026-08-03) | 2026-08-03 | Telegram 默认走 WARP（`proxy,geoip:telegram`）、检查更新外部浏览器打开 |
 | [v0.5.11](CHANGELOG.md#v0511---2026-08-02) | 2026-08-02 | Android 边缘不可达无限重试修复（可取消拨号 + 30s 超时）、点停止无效修复（stopForeground） |

@@ -158,3 +158,21 @@ func TestBuildAndroidConfigRelativeRulesPath(t *testing.T) {
 		t.Errorf("RulesPath = %q，期望 %q", built.cfg.RulesPath, want)
 	}
 }
+
+// T6：config.json 的 dial_timeout_seconds → 透传到 core.Config（nativeStartVpn
+// 用它作为装配 ctx 的 WithTimeout 值；0/缺失 = 走 androidDialTimeoutDefault）。
+func TestBuildAndroidConfigDialTimeout(t *testing.T) {
+	sandbox := t.TempDir()
+	if err := os.WriteFile(filepath.Join(sandbox, "config.json"), []byte(`{"dial_timeout_seconds":90}`), 0o644); err != nil {
+		t.Fatalf("写 config.json 失败：%v", err)
+	}
+	writeRegJSON(t, sandbox, "172.16.0.2", "")
+
+	built, err := buildAndroidConfig(sandbox, 9)
+	if err != nil {
+		t.Fatalf("buildAndroidConfig 失败：%v", err)
+	}
+	if built.cfg.DialTimeoutSeconds != 90 {
+		t.Errorf("DialTimeoutSeconds = %d，期望 90", built.cfg.DialTimeoutSeconds)
+	}
+}
