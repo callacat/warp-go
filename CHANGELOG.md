@@ -3,7 +3,25 @@
 本项目所有值得记录的变更。格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased] — v0.5.11 计划中
+## [Unreleased] — v0.5.12 计划中
+
+### 修复
+
+- **Telegram 无法连接（默认规则未覆盖 TG 流量）**：默认规则模板与
+  `rules/default-rules.txt` 新增 `proxy,geoip:telegram`——TG 流量（如
+  `149.154.175.100`）此前落入隐式 direct 兜底，在封锁 TG 的网络下直连
+  失败；现命中后走 WARP 隧道。geoip 类别大小写不敏感（`TELEGRAM` 库内
+  大写，`Lookup` 用 `ToUpper` 归一化）。补 `TestMatchGeoIPTelegram` +
+  `TestDefaultRulesParses`（7→8 条）+ `TestLoadGeoIP`（telegram 段）测试。
+  > **注意**：已有 `rules.txt` 不会自动更新——需手动加一行或删除后重启
+  > 让默认模板重新生成。
+- **Android 检查更新"前往下载"在应用内 WebView 打开**：`<a target="_blank">`
+  在 Android WebView 被应用内捕获，GitHub 下载页体验差/登录墙。新增
+  `Service.OpenExternalBrowser`（桌面走 Wails `BrowserManager`，Android 走
+  反向 JNI 桥 `MainActivity.openExternalBrowser` 用 `Intent.ACTION_VIEW`
+  跳第三方浏览器）；前端"前往下载"改调它。
+
+## [v0.5.11] - 2026-08-02
 
 ### 修复
 
