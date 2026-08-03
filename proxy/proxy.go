@@ -449,8 +449,14 @@ func (s *Server) handleHTTPConnect(conn net.Conn, req *http.Request) {
 }
 
 // handleHTTPForward 转发非 CONNECT 请求：从 absolute-URI 改写为 origin-form
-// 后原样发给目标。请求以 Connection: close 发出（逐跳头已剥离），响应结束
-// 目标即关闭，中继随之拆除——不做 keep-alive 的多请求转发。
+// 后原样发给目标。普通请求以 Connection: close 发出（逐跳头已剥离），响应
+// 结束目标即关闭，中继随之拆除——不做 keep-alive 的多请求转发。
+//
+// WebSocket（及 H2C 等）升级请求特殊处理：请求带 Connection: Upgrade 与
+// Upgrade 头，剥逐跳头时若把它们也删掉，上游就会收到一个普通 GET，
+// 无法完成 101 升级握手（netbirdio/netbird #6190 同款坑）。此时保留
+// Connection/Upgrade 原样透传，不强制 Connection: close，握手成功后
+// relay 直接双向转发帧（WS 升级后即长连接字节流）。
 func (s *Server) handleHTTPForward(conn net.Conn, br *bufio.Reader, req *http.Request) {
 	if req.URL == nil || req.URL.Host == "" {
 		_, _ = io.WriteString(conn, "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
@@ -474,11 +480,13 @@ func (s *Server) handleHTTPForward(conn net.Conn, br *bufio.Reader, req *http.Re
 		return
 	}
 
-	stripHopByHop(req)
+	upgrade := isUpgradeRequest(req)
+	stripHopByHop(req, upgrade)
 	req.RequestURI = ""
 	req.URL.Scheme = ""
 	req.URL.Host = ""
-	req.Close = true
+	// 升级请求必须保持长连接（101 之后是双向帧流）；普通请求以 close 发出。
+	req.Close = !upgrade
 
 	if err := req.Write(target); err != nil {
 		_ = target.Close()
@@ -489,19 +497,42 @@ func (s *Server) handleHTTPForward(conn net.Conn, br *bufio.Reader, req *http.Re
 	relay(s.ctx, conn, target)
 }
 
+// isUpgradeRequest 判断请求是否为协议升级（WebSocket / H2C / 其它 Upgrade）：
+// 必须同时出现非空的 Upgrade 头，且 Connection 头里点名了 upgrade token。
+// 这类请求需要把升级头原样透传上游，并在握手后保持长连接。
+func isUpgradeRequest(req *http.Request) bool {
+	if req.Header.Get("Upgrade") == "" {
+		return false
+	}
+	for _, token := range req.Header.Values("Connection") {
+		for _, name := range strings.Split(token, ",") {
+			if name = strings.TrimSpace(name); name != "" && strings.EqualFold(name, "upgrade") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // stripHopByHop 移除逐跳头：Proxy-Authorization 必须剥离（凭据不能泄露给
 // 目标服务器），Connection 及其命名头、Proxy-Connection 同样不该转发。
-func stripHopByHop(req *http.Request) {
+//
+// keepUpgrade 为 true（协议升级请求）时例外：Connection 值里的 upgrade
+// token 与其对应的 Upgrade 头必须保留，否则上游无法完成 101 握手。
+func stripHopByHop(req *http.Request, keepUpgrade bool) {
 	req.Header.Del("Proxy-Authorization")
 	req.Header.Del("Proxy-Connection")
 	for _, token := range req.Header.Values("Connection") {
 		for _, name := range strings.Split(token, ",") {
-			if name = strings.TrimSpace(name); name != "" {
+			if name = strings.TrimSpace(name); name != "" &&
+				!(keepUpgrade && strings.EqualFold(name, "upgrade")) {
 				req.Header.Del(name)
 			}
 		}
 	}
-	req.Header.Del("Connection")
+	if !keepUpgrade {
+		req.Header.Del("Connection")
+	}
 }
 
 // checkHTTPAuth 校验 Proxy-Authorization: Basic。未配置认证时恒通过。

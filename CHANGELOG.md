@@ -3,6 +3,48 @@
 本项目所有值得记录的变更。格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v0.5.15] - 2026-08-04
+
+### 修复
+
+- **Android 点击启动闪退 + VPN 不开启 + 分流引擎未初始化（同一根因，真机 SIGABRT）**：
+  `nativeStartVpn` 缓存 `WarpVpnService` 类引用时对 JNI 第二参数 `obj` 调了
+  `GetObjectClass`。但 `nativeStartVpn` 是 **`static native` 方法**——JNI 传给
+  Go 导出的第二参数 `obj` **本身就是 `jclass`（WarpVpnService 类对象）**，再
+  取类得到的是 `java.lang.Class`。随后 `getProtectSocketMethod` 在
+  `java.lang.Class` 上找 `protectSocket` → `NoSuchMethodError` → 主线程抛异常
+  → `SIGABRT` 闪退。
+  - **症状链**：`TUN established` 后 15ms 内崩溃 → 内核装配从未执行 →
+    `androidRuntime.kernel` 恒为 nil → 规则页"分流引擎未初始化（请先启动
+    VPN）"、VPN 永远不启动。修好闪退后装配路径走通，引擎随
+    `NewKernelContext` 就绪。
+  - **修复**：`clsRef := C.newGlobalRef(env, (C.jclass)(obj))`——直接用
+    `obj`（已是类对象），删除错误的 `getObjectClass` helper。其余
+    `nativeStopVpn`/`nativeVpnRunning`/`nativeLogMessage`/`nativeSetTimeZone`
+    同为 static native 但未对 obj 取类，不受影响。
+  - **验证**：真机 logcat 复现（`NoSuchMethodError: no static method
+    "Ljava/lang/Class;.protectSocket(I)Z"` + SIGABRT 三次重复崩溃）；CI
+    `build-android` job 的 JNI 双侧 grep 断言（protectSocket/kernelFailed
+    方法签名）保持通过。
+
+- **开启系统代理后 WebSocket（WebSSH 等）会话无法连接（根因修复）**：
+  mixed 代理的 HTTP 转发路径（`handleHTTPForward` → `stripHopByHop`）把
+  WebSocket 升级请求的 `Connection: Upgrade` 与 `Upgrade: websocket` 逐跳头
+  一并剥掉，上游收到普通 GET 无法完成 101 握手 → webssh 会话建立失败。
+  - **为什么 V2rayN 正常**：直接走 SOCKS5 CONNECT（原始字节隧道）不解析
+    HTTP、头原样透传；系统代理走 HTTP forward 分支才剥头。行业同款坑：
+    netbirdio/netbird #6190。
+  - **修复（方案 1）**：`handleHTTPForward` 检测到 Upgrade 请求时保留
+    `Connection/Upgrade`（及 `Sec-WebSocket-*`）原样透传，不强制
+    `Connection: close`，握手成功后 `relay` 直接双向转发帧。
+  - **加固（方案 2）**：`sysproxy` 三平台启用系统代理时把本机回环地址加入
+    旁路（Linux gsettings `ignore-hosts` / Windows `ProxyOverride`
+    `<local>;localhost` / Darwin networksetup `-setproxybypassdomains`），
+    浏览器访问 `localhost`/本机 webssh 直连，天然绕开代理剥头。
+  - 补集成测试：`TestHTTPForwardWebSocketUpgrade`（真实 mixed 监听器捕获
+    上游原始请求字节，断言 WS 头保留 + 101 回传）、普通 GET 回归测试；
+    `TestLinuxSetEnable` 增补 ignore-hosts 调用断言。
+
 ## [v0.5.14] - 2026-08-03
 
 ### 修复

@@ -10,8 +10,9 @@ import (
 )
 
 // set 写入 HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings：
-// 启用时先写 ProxyServer 再置 ProxyEnable=1；禁用时只清 ProxyEnable（保留
-// ProxyServer 便于用户手动恢复）。只改当前用户，不需要管理员权限。
+// 启用时先写 ProxyServer、ProxyOverride（本机/局域网旁路）再置
+// ProxyEnable=1；禁用时只清 ProxyEnable（保留 ProxyServer 便于用户手动
+// 恢复）。只改当前用户，不需要管理员权限。
 func set(host, port string, enabled bool) error {
 	k, err := registry.OpenKey(registry.CURRENT_USER,
 		`Software\Microsoft\Windows\CurrentVersion\Internet Settings`,
@@ -35,6 +36,11 @@ func set(host, port string, enabled bool) error {
 	proxyServer := fmt.Sprintf("http=%s;https=%s;socks=%s", ep, ep, ep)
 	if err := k.SetStringValue("ProxyServer", proxyServer); err != nil {
 		return fmt.Errorf("写入 ProxyServer 失败：%w", err)
+	}
+	// <local> 是 Windows 专用 token：本机与局域网地址（含回环）一律不经
+	// 代理。旁路本地服务（如 WebSSH 网关），避免其流量被转回代理端口。
+	if err := k.SetStringValue("ProxyOverride", "<local>;localhost"); err != nil {
+		return fmt.Errorf("写入 ProxyOverride 失败：%w", err)
 	}
 	if err := k.SetDWordValue("ProxyEnable", 1); err != nil {
 		return fmt.Errorf("写入 ProxyEnable=1 失败：%w", err)

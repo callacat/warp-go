@@ -9,9 +9,10 @@ import (
 )
 
 // set 对每个启用状态的网络服务执行 networksetup：设置并开启 web 与 secure
-// （HTTPS）代理，或关闭两者。SOCKS 防火墙代理（-setsocksfirewallproxy）不
-// 动——它只影响需要显式 SOCKS 的程序，而 HTTP(S) 代理设置已覆盖绝大多数
-// 系统代理消费方。
+// （HTTPS）代理，或关闭两者；启用时同时把回环地址加入旁路列表
+// （-setproxybypassdomains），本机服务（如 WebSSH 网关）直连不经代理。
+// SOCKS 防火墙代理（-setsocksfirewallproxy）不动——它只影响需要显式 SOCKS
+// 的程序，而 HTTP(S) 代理设置已覆盖绝大多数系统代理消费方。
 func set(host, port string, enabled bool) error {
 	services, err := networkServices()
 	if err != nil {
@@ -21,6 +22,13 @@ func set(host, port string, enabled bool) error {
 		for _, kind := range []string{"web", "secure"} {
 			if err := setService(svc, kind, host, port, enabled); err != nil {
 				return err
+			}
+		}
+		if enabled {
+			// 旁路回环域名与地址（macOS networksetup 逐项传参，逗号分隔）。
+			if err := exec.Command("networksetup",
+				"-setproxybypassdomains", svc, "localhost,127.0.0.1,::1").Run(); err != nil {
+				return fmt.Errorf("networksetup -setproxybypassdomains %q 失败：%v", svc, err)
 			}
 		}
 	}

@@ -51,6 +51,7 @@ func TestLinuxSetEnable(t *testing.T) {
 		"set org.gnome.system.proxy.https port 8080",
 		"set org.gnome.system.proxy.socks host 127.0.0.1",
 		"set org.gnome.system.proxy.socks port 8080",
+		"set org.gnome.system.proxy.ignore-hosts ignore-hosts ['localhost', '127.0.0.0/8', '::1']",
 		"set org.gnome.system.proxy mode manual",
 	}
 	got := readCalls(t, logPath)

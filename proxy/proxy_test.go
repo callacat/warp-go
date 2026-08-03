@@ -450,8 +450,166 @@ func TestMixedPortSniffing(t *testing.T) {
 	}
 }
 
-// TestUDPAssociateRelay 验证 UDP ASSOCIATE：数据报以 SOCKS5 UDP 帧格式发往
-// 绑定地址，回包由 echo 服务原样送回。
+// TestHTTPForwardWebSocketUpgrade 验证 WebSocket 升级请求的逐跳头被保留：
+// handleHTTPForward 不能剥掉 Connection: Upgrade 与 Upgrade: websocket，
+// 否则上游收到普通 GET 无法完成 101 握手（netbirdio/netbird #6190 同款坑）。
+// 用裸 TCP 上游捕获代理转发的原始请求字节，回 101 后验证客户端能收到
+// 握手成功响应——证明升级路径是长连接双向流而非被拆掉的普通转发。
+func TestHTTPForwardWebSocketUpgrade(t *testing.T) {
+	upstream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("启动上游监听失败：%v", err)
+	}
+	defer upstream.Close()
+
+	gotReq := make(chan string, 1)
+	go func() {
+		c, err := upstream.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		buf := make([]byte, 4096)
+		n, err := c.Read(buf)
+		if err != nil {
+			return
+		}
+		gotReq <- string(buf[:n])
+		// 回 101 升级成功响应，之后保持连接等待客户端数据。
+		_, _ = io.WriteString(c, "HTTP/1.1 101 Switching Protocols\r\n"+
+			"Upgrade: websocket\r\n"+
+			"Connection: Upgrade\r\n"+
+			"Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n")
+		_, _ = io.Copy(io.Discard, c)
+	}()
+
+	addr := startProxy(t, Config{
+		Router: func(host string, ip netip.Addr) (string, bool) {
+			return route.ActionDirect, true
+		},
+	})
+
+	cc, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("连接代理失败：%v", err)
+	}
+	defer cc.Close()
+	cc.SetDeadline(time.Now().Add(10 * time.Second))
+
+	// 代理形式 absolute-URI 的 WS 升级请求。
+	host := upstream.Addr().String()
+	req := "GET http://" + host + "/ws/terminal/test HTTP/1.1\r\n" +
+		"Host: " + host + "\r\n" +
+		"Connection: Upgrade\r\n" +
+		"Upgrade: websocket\r\n" +
+		"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" +
+		"Sec-WebSocket-Version: 13\r\n\r\n"
+	if _, err := io.WriteString(cc, req); err != nil {
+		t.Fatalf("发送 WS 升级请求失败：%v", err)
+	}
+
+	// 上游必须收到升级头（Connection/Upgrade/Sec-WebSocket-* 原样透传）。
+	// 注：Go 的 http.Request.Write 会把头名规范化为标准形式（如
+	// Sec-WebSocket-Key → Sec-Websocket-Key），HTTP 头大小写不敏感，
+	// 头名统一小写比较；base64 值大小写敏感，原样比对。
+	select {
+	case raw := <-gotReq:
+		lower := strings.ToLower(raw)
+		for _, want := range []string{
+			"connection: upgrade",
+			"upgrade: websocket",
+			"sec-websocket-version: 13",
+		} {
+			if !strings.Contains(lower, want) {
+				t.Errorf("上游收到的请求缺少 %q：\n%s", want, raw)
+			}
+		}
+		if !strings.Contains(raw, "Sec-Websocket-Key: dGhlIHNhbXBsZSBub25jZQ==") {
+			t.Errorf("上游收到的请求缺少 Sec-Websocket-Key 头：\n%s", raw)
+		}
+		if strings.Contains(lower, "connection: close") {
+			t.Errorf("升级请求不应携带 Connection: close：\n%s", raw)
+		}
+		// 请求行必须已是 origin-form（代理已改写）。
+		if !strings.Contains(raw, "GET /ws/terminal/test HTTP/1.1") {
+			t.Errorf("上游请求行应为 origin-form：\n%s", raw)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("上游未收到升级请求")
+	}
+
+	// 客户端必须收到 101 升级成功（relay 把上游响应原样送回）。
+	resp, err := http.ReadResponse(bufio.NewReader(cc), &http.Request{Method: http.MethodGet})
+	if err != nil {
+		t.Fatalf("读取 101 响应失败：%v", err)
+	}
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("期望 101 Switching Protocols，收到 %d", resp.StatusCode)
+	}
+}
+
+// TestHTTPForwardRejectsInvalidUpgrade 验证普通请求不受影响：无 Upgrade 头的
+// GET 仍按原路径转发（不保留 Connection、设 close），行为与修复前一致。
+func TestHTTPForwardRejectsInvalidUpgrade(t *testing.T) {
+	upstream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("启动上游监听失败：%v", err)
+	}
+	defer upstream.Close()
+
+	gotReq := make(chan string, 1)
+	go func() {
+		c, err := upstream.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		buf := make([]byte, 4096)
+		n, err := c.Read(buf)
+		if err != nil {
+			return
+		}
+		gotReq <- string(buf[:n])
+		_, _ = io.WriteString(c, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+	}()
+
+	addr := startProxy(t, Config{
+		Router: func(host string, ip netip.Addr) (string, bool) {
+			return route.ActionDirect, true
+		},
+	})
+
+	cc, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("连接代理失败：%v", err)
+	}
+	defer cc.Close()
+	cc.SetDeadline(time.Now().Add(10 * time.Second))
+
+	host := upstream.Addr().String()
+	if _, err := fmt.Fprintf(cc, "GET http://%s/ HTTP/1.1\r\nHost: %s\r\n\r\n", host, host); err != nil {
+		t.Fatalf("发送 GET 失败：%v", err)
+	}
+
+	select {
+	case raw := <-gotReq:
+		if strings.Contains(raw, "Connection: Upgrade") || strings.Contains(raw, "Upgrade:") {
+			t.Errorf("普通请求不应透传升级头：\n%s", raw)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("上游未收到请求")
+	}
+
+	resp, err := http.ReadResponse(bufio.NewReader(cc), &http.Request{Method: http.MethodGet})
+	if err != nil {
+		t.Fatalf("读取响应失败：%v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("期望 200，收到 %d", resp.StatusCode)
+	}
+}
+
 func TestUDPAssociateRelay(t *testing.T) {
 	// 本地 UDP echo 服务。
 	echoAddr, err := net.ResolveUDPAddr("udp", "127.0.0.1:0")

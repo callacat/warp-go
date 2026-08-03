@@ -8,10 +8,11 @@ import (
 	"strings"
 )
 
-// set 通过 gsettings（GNOME）配置系统代理：启用时先写各协议的 host/port 再
-// 切 mode=manual；禁用时切回 mode=none（保留已填地址便于恢复）。非 GNOME
-// 桌面没有 gsettings 或没有 org.gnome.system.proxy schema，此时返回明确的
-// 错误并提示替代方案，而不是静默失败。
+// set 通过 gsettings（GNOME）配置系统代理：启用时先写各协议的 host/port，
+// 再设本机旁路（ignore-hosts 含回环地址），最后切 mode=manual；禁用时切回
+// mode=none（保留已填地址便于恢复）。非 GNOME 桌面没有 gsettings 或没有
+// org.gnome.system.proxy schema，此时返回明确的错误并提示替代方案，而不是
+// 静默失败。
 func set(host, port string, enabled bool) error {
 	if _, err := exec.LookPath("gsettings"); err != nil {
 		return fmt.Errorf("Linux 桌面代理需 gsettings（GNOME）；未找到 gsettings，" +
@@ -31,6 +32,14 @@ func set(host, port string, enabled bool) error {
 		if err := gsettings(base, "port", port); err != nil {
 			return err
 		}
+	}
+	// 本机回环地址不进代理：浏览器访问 localhost/127.0.0.1 上的本地服务
+	// （如 WebSSH 网关）时直连，避免被转发到代理端口造成异常（如 WebSocket
+	// 升级头被剥导致握手失败）。只旁路回环，不旁路局域网段，避免影响
+	// 真实分流行为。schema org.gnome.system.proxy.ignore-hosts 的键名即
+	// ignore-hosts（GVariant 数组字面量作为单参数传入）。
+	if err := gsettings("org.gnome.system.proxy.ignore-hosts", "ignore-hosts", "['localhost', '127.0.0.0/8', '::1']"); err != nil {
+		return err
 	}
 	return gsettings("org.gnome.system.proxy", "mode", "manual")
 }
