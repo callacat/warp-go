@@ -181,13 +181,20 @@ release 同名 tag 冲突），但期间 Agent 均提前报告"Android 版已成
 - `gh run watch` 的 exit code 不可靠（部分 job 失败仍可能返回 0）——**必须看 `gh run view` 的
   job 级结论**。
 
-### 6.8.2 Android 代码改动后必须先过 CI，再谈发布
+### 6.8.2 Android 代码改动后 push + tag 同时构建（一次并行跑完所有平台）
 
 - **本地验证门是假的**：`GOOS=android CGO_ENABLED=0 go build ./...` **不编译**
   `androidbridge.go`（`//go:build android && cgo`）——JNI/cgo 错误只在 CI 的 NDK 构建暴露。
-- 任何改动 `gui/androidbridge.go` / `*.java` / Android manifest / gradle / CI Android 步骤后：
-  **先提交 + push 触发一次 CI（可 workflow_dispatch），确认 build-android job 全绿**，再打 tag 发布。
-  不要在 tag 发布时才第一次跑 Android 构建。
+- **发布顺序（v0.5.14 起，经实践确认更合理）**：改动 Android 代码（`gui/androidbridge.go` /
+  `*.java` / manifest / gradle / CI Android 步骤）后，**push main + 打 tag 一次性并行构建**，
+  让 build-android 与其余平台在 tag 触发下同时跑完。理由：
+  - main push 只触发 `docker-ghcr.yml`（不含 build-android；build-android 在
+    `build-release.yml`，只有 tag 才触发）——先 dispatch 验证一轮、再打 tag 又跑一轮，
+    Android 构建要跑两遍，纯浪费。
+  - 若 build-android 翻车：按 §6.8.4 删 tag → 修 → 重建 tag 指向修复 commit，不影响
+    已发布的其它产物（Release 挂旧产物时手动删重建即可）。
+  - **必须满足的前置**：本地 CI grep 断言（§6.8.3）已跑通（新 JNI 双侧签名）+ `go build
+    ./...`/`go vet ./...` 全绿 + 平台 build tag 交叉编译验证（见下）。
 - 本地能做的 Android 验证有限：`go vet`（只查非 cgo 部分）、C preamble 可用 gcc 单独编译
   （无 jni.h 时跳过）、CI 的 grep 断言（只查符号存在，抓不到类型/可见性错误）。
 - **平台 build tag 文件必须交叉编译验证**：`GOOS=windows/darwin CGO_ENABLED=0 go build ./<pkg>/`
@@ -215,8 +222,9 @@ release 同名 tag 冲突），但期间 Agent 均提前报告"Android 版已成
   `gh release view <tag>` 确认产物，不要盲目删除重建。产物完整则直接验证，不折腾。
 - **移动 tag 会留旧 Release**：tag 指向新 commit 后旧 Release 仍挂在旧产物上；要么删除重建
   （会再触发 CI），要么手动上传新产物。推荐：修完所有问题再一次性打 tag。
-- 正确发布顺序：修 bug → push main → 确认 build-android 绿（§6.8.2）→ 打 tag →
-  **等 CI 全绿** → 验证 Release 产物 → 报告完成。
+- 正确发布顺序：修 bug → push main + 打 tag 同时推 → **等 CI 全绿**（§6.8.1）→
+  验证 Release 产物 → 报告完成。若 build-android 翻车：删 tag → 修 → 重建 tag 指向
+  修复 commit（§6.8.2）。
 
 ## 7. 关键决策记录（ADR 摘要）
 
