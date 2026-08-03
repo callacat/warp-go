@@ -85,16 +85,27 @@ type Kernel struct {
 // 内部重试到连通，与 Server.Start 原行为一致）→ 创建分流引擎（自动初始化
 // 默认 rules.txt 模板、加载规则与 GEO 库——GEO 缺失时降级 rules-only、启动
 // 规则文件热重载）。任一步失败都会清理已建资源后返回错误。
+//
+// 隧道拨号在装配时阻塞重试到连通，不可从外部取消（进程持有隧道生命周期）。
 func NewKernel(cfg *Config, regData *registration.Registration, edgeAddrs []string, tlsConfig *tls.Config) (*Kernel, error) {
-	return newKernel(cfg, regData, edgeAddrs, tlsConfig, func() (dialer, error) {
-		return tunnel.NewMasqueClient(edgeAddrs, tlsConfig, regData.Token)
+	return NewKernelContext(context.Background(), cfg, regData, edgeAddrs, tlsConfig)
+}
+
+// NewKernelContext 是 NewKernel 的可取消版本：ctx 取消初始 MASQUE 拨号重试
+// （NewMasqueClientContext）或在装配开始前已取消时直接失败。Android 桥用它
+// 让"装配中停止"能立即中止拨号，而非无限重连停不掉（v0.5.10 反馈）。
+// 桌面/CLI 路径用 NewKernel（background，行为不变）。
+func NewKernelContext(ctx context.Context, cfg *Config, regData *registration.Registration, edgeAddrs []string, tlsConfig *tls.Config) (*Kernel, error) {
+	return newKernel(ctx, cfg, regData, edgeAddrs, tlsConfig, func() (dialer, error) {
+		return tunnel.NewMasqueClientContext(ctx, edgeAddrs, tlsConfig, regData.Token)
 	})
 }
 
-// newKernel 是 NewKernel 的拨号缝版本：newDial 注入拨号器工厂。生产路径由
-// NewKernel 提供真实工厂（tunnel.NewMasqueClient）；测试注入假拨号器避免
-// 真实网络连接。
-func newKernel(cfg *Config, regData *registration.Registration, edgeAddrs []string, tlsConfig *tls.Config, newDial func() (dialer, error)) (*Kernel, error) {
+// newKernel 是 NewKernel/NewKernelContext 的拨号缝版本：ctx 传递取消语义
+// （NewKernel 传 background），newDial 注入拨号器工厂。生产路径由
+// NewKernel/NewKernelContext 提供真实工厂（tunnel.NewMasqueClient[Context]）；
+// 测试注入假拨号器避免真实网络连接。
+func newKernel(ctx context.Context, cfg *Config, regData *registration.Registration, edgeAddrs []string, tlsConfig *tls.Config, newDial func() (dialer, error)) (*Kernel, error) {
 	if cfg == nil {
 		return nil, errors.New("kernel: 配置为空")
 	}
@@ -106,6 +117,9 @@ func newKernel(cfg *Config, regData *registration.Registration, edgeAddrs []stri
 	}
 	if tlsConfig == nil {
 		return nil, errors.New("kernel: TLS 配置为空")
+	}
+	if ctx != nil && ctx.Err() != nil {
+		return nil, context.Cause(ctx)
 	}
 
 	// 先建隧道（拨号在构造时完成，与 Server.Start 原时序一致），后建引擎；

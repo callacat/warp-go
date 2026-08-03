@@ -212,8 +212,20 @@ type reconnectFlight struct {
 }
 
 // NewMasqueClient establishes a QUIC/H3 connection to the WARP edge.
-// edgeAddrs are candidate host:port addresses tried in order.
+// edgeAddrs are candidate host:port addresses tried in order. Dial retries
+// indefinitely (exponential backoff) and is not externally cancellable —
+// used by the desktop/CLI path where the process owns the tunnel lifetime.
 func NewMasqueClient(edgeAddrs []string, tlsConfig *tls.Config, token string) (*MasqueClient, error) {
+	return NewMasqueClientContext(context.Background(), edgeAddrs, tlsConfig, token)
+}
+
+// NewMasqueClientContext is NewMasqueClient with an externally-cancellable
+// initial dial. ctx cancels the bootstrapping dial loop (so a host that wants
+// to abort startup — e.g. the Android bridge when the user hits Stop while the
+// edge is unreachable and the client would otherwise retry forever — can
+// return immediately). The established connection's lifetime is still owned
+// by the returned client's own lifecycle ctx; ctx only gates construction.
+func NewMasqueClientContext(ctx context.Context, edgeAddrs []string, tlsConfig *tls.Config, token string) (*MasqueClient, error) {
 	if len(edgeAddrs) == 0 {
 		return nil, errors.New("未提供任何边缘地址")
 	}
@@ -259,7 +271,7 @@ func NewMasqueClient(edgeAddrs []string, tlsConfig *tls.Config, token string) (*
 	// signal handler is installed below).
 	backoff := reconnectRetryInitial
 	for {
-		bundle, err := c.dial(context.Background())
+		bundle, err := c.dial(ctx)
 		if err == nil {
 			c.cur = bundle
 			return c, nil
@@ -272,6 +284,12 @@ func NewMasqueClient(edgeAddrs []string, tlsConfig *tls.Config, token string) (*
 			timer.Stop()
 			lifeStop()
 			return nil, net.ErrClosed
+		case <-ctx.Done():
+			// 外部（Android 桥）取消装配：立即中止无限重试，不再等下一个
+			// 退避周期——否则用户点停止后拨号仍一直重连（v0.5.10 反馈）。
+			timer.Stop()
+			lifeStop()
+			return nil, context.Cause(ctx)
 		}
 		if backoff < reconnectRetryMax {
 			backoff *= 2

@@ -79,7 +79,7 @@ func newTestKernelRules(t *testing.T, rules string) (*Kernel, *fakeDialer) {
 		AssignedIPv6: "2606:4700:110:8a2e:fb70:7a34:2f7e:1",
 	}
 	fd := &fakeDialer{}
-	k, err := newKernel(cfg, reg, []string{"162.159.192.1:443"}, &tls.Config{}, func() (dialer, error) {
+	k, err := newKernel(context.Background(), cfg, reg, []string{"162.159.192.1:443"}, &tls.Config{}, func() (dialer, error) {
 		return fd, nil
 	})
 	if err != nil {
@@ -196,5 +196,33 @@ func TestKernelCloseIdempotent(t *testing.T) {
 	}
 	if _, err := k.DialTunnel(context.Background(), "x:1"); err == nil {
 		t.Error("Close 后 DialTunnel 应返回错误")
+	}
+}
+
+// T7：NewKernelContext 在 ctx 已取消时立即失败（不调用拨号工厂）——Android
+// 桥"装配中停止"依赖此语义：nativeStopVpn cancel() 后装配必须中止，而非
+// 继续拨号重试（v0.5.10 反馈"停止无效"）。
+func TestKernelNewContextCanceledSkipsDial(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // 装配开始前已取消
+
+	tmp := t.TempDir()
+	rulesPath := filepath.Join(tmp, "rules.txt")
+	if err := os.WriteFile(rulesPath, []byte("proxy,domain:x\n"), 0o644); err != nil {
+		t.Fatalf("写规则文件失败：%v", err)
+	}
+	cfg := &Config{RulesPath: rulesPath, GeoDir: filepath.Join(tmp, "geo")}
+	reg := &registration.Registration{AssignedIPv4: "172.16.0.2"}
+
+	dialCalled := false
+	_, err := newKernel(ctx, cfg, reg, []string{"162.159.192.1:443"}, &tls.Config{}, func() (dialer, error) {
+		dialCalled = true
+		return &fakeDialer{}, nil
+	})
+	if err == nil {
+		t.Fatal("ctx 已取消时 NewKernelContext 应返回错误")
+	}
+	if dialCalled {
+		t.Error("ctx 已取消时不应调用拨号工厂")
 	}
 }
