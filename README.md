@@ -324,8 +324,14 @@ warp-go/
 
 | 版本 | 日期 | 摘要 |
 |---|---|---|
-| [v0.5.4](CHANGELOG.md#unreleased) | 计划中 | 构建产物版本号（CLI -version + Windows PE 版本资源 + GUI 显示 + 产物命名）、检查更新（CLI + GUI 设置页） |
-| [v0.5.3](CHANGELOG.md#v053---2026-08-02) | 2026-08-02 | Android cgo 编译修复、JNI 签名对齐（nativeBridgeReady void→int）、启动失败回滚（状态不再撒谎） |
+| [v0.5.12](CHANGELOG.md#unreleased) | 计划中 | Telegram 默认走 WARP（`proxy,geoip:telegram`）、检查更新外部浏览器打开、运行时文件统一收拢 `config/` 子目录（Docker 修复） |
+| [v0.5.11](CHANGELOG.md#v0511---2026-08-02) | 2026-08-02 | Android 边缘不可达无限重试修复（可取消拨号 + 30s 超时）、点停止无效修复（stopForeground） |
+| [v0.5.10](CHANGELOG.md#v0510---2026-08-02) | 2026-08-02 | Android 扫描 IP 后重启 ANR + 无网修复（异步装配 + 取消信号 + stale TUN 重建） |
+| [v0.5.9](CHANGELOG.md#v059---2026-08-02) | 2026-08-02 | Android VPN 建立失败修复（沙箱 reg.json 读地址兜底）、自绘注销确认框、注册信息完整显示 |
+| [v0.5.8](CHANGELOG.md#v058---2026-08-02) | 2026-08-02 | 双重归一化修复（初始化状态/GEO 时间）、主题默认跟随系统、系统代理真实状态 |
+| [v0.5.7](CHANGELOG.md#v057---2026-08-02) | 2026-08-02 | GUI 状态/GEO 时间/注册信息显示修复、初始化完成门控、Android 日志系统时间 |
+| [v0.5.5](CHANGELOG.md#v055---2026-08-02) | 2026-08-02 | GUI 启动卡死修复、Android 通知栏对比度、全平台注销确认反馈 |
+| [v0.5.3](CHANGELOG.md#v053---2026-08-02) | 2026-08-02 | Android cgo 编译修复、JNI 签名对齐（nativeBridgeReady void→int）、启动成功不再撒谎 |
 | [v0.5.2](CHANGELOG.md#v052---2026-08-01) | 2026-08-01 | Android 内核启动根治（反向 JNI 桥接 VpnService）、日志 init 路由、注册状态切页弹性、扫描无候选修复、状态栏不覆盖、手机底部导航 |
 | [v0.5.1](CHANGELOG.md#unreleased---v051-计划中) | 2026-08-01 | Android 运行时文件统一沙箱锚定（修复 /system/bin 只读崩溃）、日志时间戳去重、注销反馈、竖屏侧边栏自适应、跟随系统主题（全平台） |
 | [v0.5.0](CHANGELOG.md#v050---2026-08-01) | 2026-08-01 | Android 版（Wails VpnService + JNI）、core.Kernel 三端复用、CI build-android、geoip/reject 修复 |

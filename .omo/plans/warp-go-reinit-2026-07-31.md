@@ -252,7 +252,7 @@ jobs:
 - 仓库/URL 可在 GUI 设置页编辑（自定义更新源）
 - **自动更新时间可配置**（GUI 设置项，默认 7 天；可选: 每天/每周/每月/关闭自动更新）
 - **手动触发更新**（GUI 按钮 + CLI `-geo-update`）
-- 下载到 `<data-dir>/geo/`（程序执行目录下 `geo/`，v3: 配置与数据文件统一放执行目录，见 §12 路径约定）
+- 下载到 `<data-dir>/geo/`（运行目录下 `config/geo/`，v4: 配置与数据文件统一收拢进 `config/` 子目录，见 §12 路径约定）
 - 更新策略（参考 mihomo updater）: 启动时本地有则加载；刷新时 **SHA-1 比对**（相同跳过）；**proto.Unmarshal 校验**通过才原子替换
 - 保持**内存解析结构**（非原始字节）用于匹配
 
@@ -391,21 +391,28 @@ CONNECT target (host:port)
 | D1 11 个未决"或" | 🔴 致命 | ✅ 全部收敛为默认选择（见上文各处） |
 | D3 冲突处理通知机制 | 🟡 中 | ✅ PR 打标签 + issue 通知 + 不自动重试 |
 
-## 12. 路径约定（v3，用户指定：配置文件放程序执行目录）
+## 12. 路径约定（v4，用户指定：运行目录下的 config/ 子目录；v0.5.12 由 v3 执行目录升级）
 
-> 所有配置与数据文件默认放在**程序执行目录**（可执行文件所在目录），便于便携部署与 GUI/CLI 共用。
+> 所有配置与数据文件默认收拢在**运行目录下的 `config/` 子目录**（自动创建），
+> 便于便携部署、GUI/CLI 共用，且 Docker 只需映射这一个目录即可持久化全部配置。
 
 | 文件 | 位置 | 说明 |
 |---|---|---|
-| `config.json` | 执行目录 | 主配置：监听端口、规则文件路径、GEO 仓库/URL、自动更新时间、代理开关等；**文件变更热重载**（watcher） |
-| `rules.txt` | 执行目录（默认，config 可改） | 路由规则文本（GUI 增删改 + 热重载） |
-| `reg.json` | 执行目录（上游原约定，保留） | WARP 注册信息 |
-| `geo/` | 执行目录下 `geo/` | geosite.dat + geoip-lite.dat 缓存 |
-| `logs/` | 执行目录下 `logs/`（可选） | 日志文件（GUI 日志查看器读取） |
+| `config.json` | 运行目录/config/（自动创建） | 主配置：监听端口、规则文件路径、GEO 仓库/URL、自动更新时间、代理开关等；**文件变更热重载**（watcher） |
+| `rules.txt` | config/（默认，config 可改） | 路由规则文本（GUI 增删改 + 热重载） |
+| `reg.json` | config/（上游原约定，保留） | WARP 注册信息 |
+| `geo/` | config/geo/ | geosite.dat + geoip-lite.dat 缓存 |
+| `logs/` | config/logs/（可选） | 日志文件（GUI 日志查看器读取） |
 
+- **根目录选定**（`core.baseExecRoot`）：可执行目录（可写）→ 当前工作目录
+  （可写；Docker WORKDIR `/data` 挂载卷——核心修复）→ 用户配置目录 → 兜底
+- **Android 例外**：`DataDir` 非空锚定沙箱根 `getFilesDir()`，不套 config/
+  子目录（真机路径约定未变）
+- 一次性旧布局迁移 `migrateLegacyConfig`：旧执行根散落文件复制进 config/，
+  幂等、非破坏
 - 旗标 > config.json > 默认值（优先级）
 - 热重载：config.json / rules.txt 文件变更 → 自动重载（mtime + 内容 hash 检测），无需重启
-- GUI 与 CLI 共用同一路径约定（GUI 由 core 包启动时解析执行目录）
+- GUI 与 CLI 共用同一路径约定（GUI 由 core 包启动时解析执行根下的 config/）
 
 ## 13. 接手文档（v3，用户要求）
 
