@@ -3,7 +3,33 @@
 本项目所有值得记录的变更。格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased] — v0.5.10 计划中
+## [Unreleased] — v0.5.11 计划中
+
+### 修复
+
+- **Android 边缘不可达时无限重试刷日志、状态永远"连接中"**（真机，v0.5.10）：
+  `NewMasqueClient` 初始拨号无限指数退避重试（3.2s→5s），移动网络下
+  QUIC/UDP 被运营商封锁时永久重连，日志无限刷"边缘 X 不可达...3.2s 后
+  重试"，状态停在"连接中"。现 Android 装配拨号加 30s 总超时
+  （`androidDialTimeout`，`context.WithTimeout`）——超时后经
+  `failStartCtx` 报"连接边缘超时（30 秒内未能连接 WARP 边缘，请检查网络
+  后重试）"，用户可检查网络重试。
+- **Android 点停止无效（装配中/运行中）**（真机，v0.5.10）：
+  - **Go 侧**：装配进行中（`NewKernel` 拨号未完成）`nativeStopVpn` 只能
+    `cancel()`，但 `NewMasqueClient` 拨号用内部 lifeCtx 不响应外部 ctx →
+    无限重连停不掉。新增 `tunnel.NewMasqueClientContext(ctx, ...)` /
+    `core.NewKernelContext(ctx, ...)`：初始拨号循环 select 监听外部 ctx，
+    取消立即中止（桌面/CLI 的 `NewKernel` 传 background，行为不变）。
+  - **Java 侧**：`WarpVpnService` 是 `startForegroundService` 启动的前台
+    服务，`MainActivity.requestStopVpn` 用 `stopService` **无法停止前台
+    服务**（Android 8+ 需先 `stopForeground`，否则 `onDestroy` 从不触发
+    ——日志停在 "TUN established" 后无 onDestroy）。新增
+    `WarpVpnService.stop(Context)`：`stopForeground(STOP_FOREGROUND_REMOVE)`
+    + `stopSelf()`，`requestStopVpn` 改调它。
+  - 补 `TestKernelNewContextCanceledSkipsDial` 回归单测（ctx 已取消时不
+    调用拨号工厂）。
+
+## [v0.5.10] - 2026-08-02
 
 ### 修复
 
