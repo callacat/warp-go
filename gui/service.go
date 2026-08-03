@@ -18,6 +18,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wailsapp/wails/v3/pkg/application"
+
 	"warp/core"
 	"warp/registration"
 	"warp/route"
@@ -568,6 +570,24 @@ func (s *Service) CheckUpdate() (*core.UpdateInfo, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	return core.CheckUpdate(ctx, cur)
+}
+
+// OpenExternalBrowser 用系统浏览器打开 URL（更新下载页等）。
+// 桌面端走 Wails BrowserManager（调系统默认浏览器）；Android 走反向 JNI 桥
+// 跳第三方浏览器——WebView 内 target=_blank 会被应用内捕获，GitHub 下载页
+// 在 WebView 里体验差/登录墙（v0.5.11 反馈）。
+func (s *Service) OpenExternalBrowser(url string) error {
+	if strings.TrimSpace(url) == "" {
+		return errors.New("链接为空")
+	}
+	if runtime.GOOS == "android" {
+		return androidOpenExternalBrowser(url)
+	}
+	app := application.Get()
+	if app == nil || app.Browser == nil {
+		return errors.New("应用未初始化，无法打开浏览器")
+	}
+	return app.Browser.OpenURL(url)
 }
 
 // ---------------------------------------------------------------------------

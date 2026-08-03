@@ -55,8 +55,21 @@ static jmethodID getRequestStopMethod(JNIEnv* env, jclass cls) {
     return (*env)->GetStaticMethodID(env, cls, "requestStopVpn", "()V");
 }
 
+// openExternalBrowser(String) 跳第三方浏览器打开 URL（Android WebView 内
+// target=_blank 会被应用内捕获，GitHub 下载页在 WebView 里体验差/登录墙）。
+static jmethodID getOpenBrowserMethod(JNIEnv* env, jclass cls) {
+    return (*env)->GetStaticMethodID(env, cls, "openExternalBrowser", "(Ljava/lang/String;)V");
+}
+
 static void callStaticVoidMethod(JNIEnv* env, jclass cls, jmethodID mid) {
     (*env)->CallStaticVoidMethod(env, cls, mid);
+}
+
+static void callStaticVoidMethodStr(JNIEnv* env, jclass cls, jmethodID mid, const char* arg) {
+    jstring js = (*env)->NewStringUTF(env, arg);
+    if (js == NULL) return;
+    (*env)->CallStaticVoidMethod(env, cls, mid, js);
+    (*env)->DeleteLocalRef(env, js);
 }
 
 // jstring → Go string 的 C 侧转换原语。JNIEnv 调用必须留在 C preamble
@@ -112,11 +125,12 @@ var androidRuntime struct {
 // nativeBridgeReady 在 Java 主线程（onCreate）缓存它们，避免从任意 Go
 // goroutine FindClass 错失应用 classloader。
 var androidCtl struct {
-	mu     sync.Mutex
-	cls    C.jclass // MainActivity 全局引用
-	startM C.jmethodID
-	stopM  C.jmethodID
-	ready  bool
+	mu           sync.Mutex
+	cls          C.jclass // MainActivity 全局引用
+	startM       C.jmethodID
+	stopM        C.jmethodID
+	openBrowserM C.jmethodID
+	ready        bool
 }
 
 // Java_com_wails_app_WarpVpnService_nativeStartVpn 是 Java 侧
@@ -404,18 +418,41 @@ func Java_com_wails_app_MainActivity_nativeBridgeReady(env *C.JNIEnv, cls C.jcla
 	}
 	startM := C.getRequestStartMethod(env, clsRef)
 	stopM := C.getRequestStopMethod(env, clsRef)
-	if unsafe.Pointer(startM) == nil || unsafe.Pointer(stopM) == nil {
-		log.Println("⚠ nativeBridgeReady：找不到 requestStartVpn/requestStopVpn 静态方法")
+	openBrowserM := C.getOpenBrowserMethod(env, clsRef)
+	if unsafe.Pointer(startM) == nil || unsafe.Pointer(stopM) == nil || unsafe.Pointer(openBrowserM) == nil {
+		log.Println("⚠ nativeBridgeReady：找不到 requestStartVpn/requestStopVpn/openExternalBrowser 静态方法")
 		return -1
 	}
 	androidCtl.mu.Lock()
 	androidCtl.cls = clsRef
 	androidCtl.startM = startM
 	androidCtl.stopM = stopM
+	androidCtl.openBrowserM = openBrowserM
 	androidCtl.ready = true
 	androidCtl.mu.Unlock()
-	log.Println("✓ Android 反向 JNI 桥就绪（requestStartVpn/requestStopVpn）")
+	log.Println("✓ Android 反向 JNI 桥就绪（requestStartVpn/requestStopVpn/openExternalBrowser）")
 	return 0
+}
+
+// androidOpenExternalBrowser 请求 Java 侧用系统浏览器打开 URL（Android
+// WebView 内 target=_blank 会被应用内捕获，GitHub 下载页需跳第三方浏览器）。
+func androidOpenExternalBrowser(url string) error {
+	androidCtl.mu.Lock()
+	cls, mid, ready := androidCtl.cls, androidCtl.openBrowserM, androidCtl.ready
+	androidCtl.mu.Unlock()
+	if !ready || unsafe.Pointer(cls) == nil || unsafe.Pointer(mid) == nil {
+		return errors.New("Android 浏览器桥未就绪（MainActivity 未初始化）")
+	}
+	var needsDetach C.int
+	env := C.getEnv(&needsDetach)
+	if env == nil {
+		return errors.New("Android 浏览器桥：无法获取 JNIEnv")
+	}
+	defer C.releaseEnv(needsDetach)
+	cstr := C.CString(url)
+	C.callStaticVoidMethodStr(env, cls, mid, cstr)
+	C.free(unsafe.Pointer(cstr))
+	return nil
 }
 
 // androidRequestVpnStart 请求 Java 侧启动 VPN（consent 流 + VpnService）。

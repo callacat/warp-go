@@ -92,6 +92,30 @@ public class MainActivity extends AppCompatActivity {
         a.runOnUiThread(() -> WarpVpnService.stop(a));
     }
 
+    /**
+     * Open a URL in the system browser (third-party), not inside the WebView.
+     * Go calls this via the reverse-JNI bridge when the user taps "前往下载"
+     * in the update card — a plain target=_blank link would be captured by the
+     * WebView and GitHub's release page is a poor in-app experience (login
+     * walls, download handling). FLAG_ACTIVITY_NEW_TASK so it works from any
+     * context (Go goroutine, not only an Activity).
+     */
+    public static void openExternalBrowser(String url) {
+        MainActivity a = sInstance;
+        if (a == null || url == null || url.isEmpty()) {
+            nativeLogMessage("error", "打开浏览器失败：Activity 未初始化或链接为空");
+            return;
+        }
+        try {
+            Intent i = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            a.startActivity(i);
+        } catch (Exception e) {
+            Log.e(TAG, "openExternalBrowser failed: " + url, e);
+            nativeLogMessage("error", "打开浏览器失败：" + e.getMessage());
+        }
+    }
+
     private static final String TAG = "WailsActivity";
     private static final boolean DEBUG = BuildConfig.DEBUG;
     private static final String WAILS_SCHEME = "https";

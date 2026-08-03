@@ -6,6 +6,7 @@ import {
   getConfig,
   getVersion,
   isDemoMode,
+  openExternalBrowser,
   saveConfig,
   setAutostart,
 } from "../lib/api";
@@ -128,14 +129,13 @@ export default function SettingsPage() {
               {updateInfo}
             </span>
             {updateUrl && (
-              <a
-                href={updateUrl}
-                target="_blank"
-                rel="noreferrer"
+              <button
+                type="button"
+                onClick={() => openExternalBrowser(updateUrl)}
                 className="ml-2 text-orange-600 underline dark:text-orange-400"
               >
                 前往下载
-              </a>
+              </button>
             )}
           </p>
         )}

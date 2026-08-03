@@ -9,3 +9,7 @@ func androidRequestVpnStart() error { return errors.New("此操作仅支持 Andr
 func androidRequestVpnStop() error  { return nil }
 func androidVpnRunning() bool       { return false }
 func androidVpnLastError() string   { return "" }
+
+// androidOpenExternalBrowser 桌面桩：桌面端用 Wails BrowserManager（service.go
+// 的 OpenExternalBrowser 在 !android 分支直接调用，不会走到这里）。
+func androidOpenExternalBrowser(url string) error { return nil }

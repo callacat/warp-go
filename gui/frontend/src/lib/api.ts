@@ -51,6 +51,7 @@ interface ServiceAPI {
   GetLogs(limit: number): Promise<unknown>;
   GetVersion(): Promise<unknown>;
   CheckUpdate(): Promise<unknown>;
+  OpenExternalBrowser(url: string): Promise<unknown>;
 }
 
 // ---------- demo data (used while bindings are placeholders) ----------
@@ -61,6 +62,7 @@ direct,geosite:private
 direct,geoip:private
 proxy,geosite:google
 proxy,geosite:geolocation-!cn
+proxy,geoip:telegram
 direct,geosite:cn
 direct,geoip:cn
 `;
@@ -445,6 +447,14 @@ export async function checkUpdate(): Promise<UpdateInfo> {
   }
   const raw = await svc.CheckUpdate();
   return (raw as UpdateInfo) ?? { current: "", latest: "", has_update: false, url: "", tag: "" };
+}
+
+// openExternalBrowser 用系统浏览器打开 URL（桌面走默认浏览器，Android 跳
+// 第三方浏览器而非 WebView 内打开）。
+export async function openExternalBrowser(url: string): Promise<void> {
+  const svc = await loadService();
+  if (!svc) return;
+  await svc.OpenExternalBrowser(url);
 }
 
 function now(): string {
