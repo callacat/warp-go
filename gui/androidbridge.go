@@ -157,8 +157,9 @@ var androidCtl struct {
 
 // warpCtl 持有 WarpVpnService 的类引用与静态方法 ID（protectSocket /
 // kernelFailed）。与 androidCtl 分开（那是 MainActivity）；在 nativeStartVpn
-// 内于 Java 主线程缓存（GetObjectClass(obj)，具备正确 classloader），供
-// startVpnKernel goroutine 里保护拨号 socket 与上报装配失败时调用。
+// 内于 Java 主线程缓存（nativeStartVpn 是 static native，JNI 传入的 obj
+// 本身就是 WarpVpnService 的 jclass），供 startVpnKernel goroutine 里保护
+// 拨号 socket 与上报装配失败时调用。
 var warpCtl struct {
 	mu          sync.Mutex
 	cls         C.jclass // WarpVpnService 全局引用
