@@ -2,12 +2,17 @@
 #
 # 用法：
 #   1. 首次运行先注册（下方"注册"命令），注册完成后删除 volumes 里
-#      ./warp-data/reg.json 会丢失注册 → 需重新注册。
+#      ./warp-config/reg.json 会丢失注册 → 需重新注册。
 #   2. 日常启动：把 command 切换为运行命令（见下），`docker compose up -d`。
 #   3. 验证：curl --socks5-hostname 127.0.0.1:40000 https://www.cloudflare.com/cdn-cgi/trace
 #
-# 数据文件（config.json / reg.json / rules.txt / geo/）持久化在宿主 ./warp-data，
-# 容器删除重建不丢注册与配置。执行目录即 /data，所有相对路径锚定于此。
+# 数据文件全部集中在容器内 /data/config（应用自动创建该目录），持久化在
+# 宿主 ./warp-config —— 只需映射这一个目录，config.json / reg.json /
+# rules.txt / geo/ 都在里面。容器删除重建不丢注册与配置。
+#
+# 注意：若宿主 ./warp-config 不存在，Docker 会以 root 自动创建它，容器内
+# uid 1001 将无法写入 → 首次使用前先执行：mkdir -p warp-config
+# （需要时 chown 1001:1001 warp-config）。
 
 services:
   warp:
@@ -15,7 +20,7 @@ services:
     container_name: warp
     restart: unless-stopped
     volumes:
-      - ./warp-data:/data
+      - ./warp-config:/data/config
     ports:
       - "40000:40000"
     cap_drop:
@@ -23,7 +28,7 @@ services:
     security_opt:
       - no-new-privileges:true
 
-    # ── 首次运行：注册（生成 reg.json 到 ./warp-data）──
+    # ── 首次运行：注册（生成 reg.json 到 ./warp-config）──
     # 注册完成（看到 "✓ 注册成功"）后按 Ctrl+C 停止，再切到下方"日常启动"。
     # command: ["-reg"]
 
@@ -37,4 +42,4 @@ services:
     # ── 进阶：配置文件方式（GEO 分流/热重载）──
     # 首次以 -l 启动会生成默认 config.json；之后可改用：
     # command: ["-config", "config.json"]
-    # 并自行编辑 ./warp-data/config.json 与 ./warp-data/rules.txt（变更热重载）。
+    # 并自行编辑 ./warp-config/config.json 与 ./warp-config/rules.txt（变更热重载）。

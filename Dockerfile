@@ -12,9 +12,12 @@ FROM alpine:latest
 # 注册阶段走 HTTPS 到 Cloudflare API，需要根证书
 RUN apk add --no-cache ca-certificates
 COPY --from=build /out/warp /usr/local/bin/warp
-# reg.json / config.json / rules.txt 固定落工作目录（见 main.go）；compose 挂载到这里
+# 运行时文件（reg.json / config.json / rules.txt / geo）统一落在工作目录下的
+# config/ 子目录（应用自动创建，见 core/baseExecRoot + resolveExecPath）：
+# 容器内 exe 在只读 /usr/local/bin → 回退到可写的 WORKDIR /data → /data/config。
+# compose 把 ./warp-config 挂载到这里即可持久化全部配置。
 WORKDIR /data
-# 与宿主 gyue(uid 1001)对齐：reg.json 由 uid 1001 写、0600，容器 uid 1001 即属主可读
+# 与宿主 uid 1001 对齐：reg.json 由 uid 1001 写、0600，容器 uid 1001 即属主可读
 USER 1001:1001
 EXPOSE 40000
 ENTRYPOINT ["warp"]
