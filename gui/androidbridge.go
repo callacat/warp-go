@@ -4,6 +4,7 @@ package main
 
 /*
 #include <jni.h>
+#include <stdlib.h> // C.free（释放 C.CString 分配的 C 字符串）
 
 // Global JavaVM reference for thread attachment. Captured on the first native
 // call via GetJavaVM — the same pattern Wails' application_android.go uses
