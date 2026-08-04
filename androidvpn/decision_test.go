@@ -54,13 +54,16 @@ func TestDecideAction(t *testing.T) {
 			wantMatched: true,
 		},
 		{
-			// T4: 未命中 → 隐式 direct 兜底（与桌面一致）。
-			name: "no match → direct fallback",
+			// T4: 未命中 → VPN 隧道兜底 proxy（v0.5.18 无法互联网根因修复）。
+			// TUN 收到 IP 字面量 → route.Match 只走 geoip → 国外 IP 不命中
+			// → 若非 proxy 兜底则直连被墙。VPN 语义：除显式 direct/reject
+			// （私有段、中国大陆）外全部走隧道。
+			name: "no match → proxy fallback (VPN tunnel default)",
 			route: func(host string, ip netip.Addr) (string, bool) {
 				return "", false
 			},
-			wantAction:  "direct",
-			wantMatched: false,
+			wantAction:  "proxy",
+			wantMatched: true,
 		},
 		{
 			// T5: 命中 reject → 原样返回，调用方必须关闭连接（新路径）。
@@ -73,15 +76,15 @@ func TestDecideAction(t *testing.T) {
 		},
 		{
 			// T6: Android 调用方传 netip.Addr{} 零值 → route 收到零值；
-			// geoip 匹配零值 Addr 查不到 → 未命中（matched=false → direct）。
-			name: "geoip zero addr → route receives netip.Addr{}",
+			// geoip 匹配零值 Addr 查不到 → 未命中 → 隧道兜底 proxy。
+			name: "geoip zero addr → route receives netip.Addr{}, proxy fallback",
 			route: func(host string, ip netip.Addr) (string, bool) {
 				gotHost, gotIP = host, ip
 				return "", false
 			},
 			ip:          netip.Addr{},
-			wantAction:  "direct",
-			wantMatched: false,
+			wantAction:  "proxy",
+			wantMatched: true,
 			check: func(t *testing.T) {
 				if gotHost != host {
 					t.Errorf("route received host %q, want %q", gotHost, host)

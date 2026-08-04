@@ -119,10 +119,18 @@ func resolveAction(action string, ctx context.Context, targetAddr string, tunnel
 
 // decideAction 把 (host, ip) 判定为 proxy / direct / reject。
 //
-// 语义（与桌面端 route.Engine 一致）：
-//   - route == nil          → ("proxy", true)   全流量走隧道
+// 语义（与桌面端 route.Engine 在"命中规则"上一致，但**未命中兜底不同**）：
+//   - route == nil          → ("proxy", true)  全流量走隧道
 //   - route 命中            → 透传其 action（"proxy"/"direct"/"reject"），matched=true
-//   - route 未命中          → ("direct", false) 隐式 direct 兜底
+//   - route 未命中          → ("proxy", true)  VPN 隧道兜底
+//
+// 未命中兜底必须是 **proxy 而非 direct**（v0.5.18 无法互联网根因）：TUN 收到
+// 的是已解析的 IP 字面量，route.Engine.Match 对 IP 只走 geoip 规则（geosite/
+// domain 的域名语义对 IP 无意义）→ 国外目标（如 Google 的 172.217.x）不命中
+// 默认规则里唯一一条 geoip-proxy（telegram）→ miss。若兜底 direct，国外流量
+// 全落本地直连 → 被墙 i/o timeout、浏览器不通。VPN 语义是"除显式 direct/reject
+// （私有段、中国大陆）外全部走隧道"，故兜底 proxy。桌面 SOCKS 拿域名走
+// route.Engine（其 miss→direct），不经过本函数，不受影响。
 //
 // reject 命中时调用方必须关闭连接（绝不建连），与 M6 桌面 REJECT 行为一致
 // （SOCKS5 0x02 / HTTP 403）。
@@ -132,7 +140,7 @@ func decideAction(route RouteFunc, host string, ip netip.Addr) (action string, m
 	}
 	action, matched = route(host, ip)
 	if !matched {
-		return "direct", false
+		return "proxy", true
 	}
 	return action, true
 }
