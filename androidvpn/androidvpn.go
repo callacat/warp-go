@@ -26,6 +26,7 @@ import (
 	"github.com/sagernet/sing/common/logger"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
+	"golang.org/x/sys/unix"
 )
 
 // stdLogger 把 Go 标准 log 适配到 sing 的 logger.Logger 接口。
@@ -49,6 +50,7 @@ type Vpn struct {
 	tun    tun.Tun
 	stack  tun.Stack
 	cfg    Config
+	fd     int // 原始 TUN fd：tun.New 包装前由 Stop 兜底关闭（Java 已 detachFd）
 	ctx    context.Context
 	cancel context.CancelFunc
 
@@ -67,7 +69,7 @@ func New(cfg Config) (*Vpn, error) {
 	if len(cfg.DNSServers) == 0 {
 		cfg.DNSServers = []netip.Addr{netip.MustParseAddr("1.1.1.1")}
 	}
-	return &Vpn{cfg: cfg}, nil
+	return &Vpn{cfg: cfg, fd: cfg.FileDescriptor}, nil
 }
 
 // Start 启动 TUN 设备与 gVisor 栈，阻塞直到 ctx 取消或 Stop。
@@ -85,13 +87,23 @@ func (v *Vpn) Start(ctx context.Context) error {
 	}
 	t, err := tun.New(base)
 	if err != nil {
+		// fd 尚未被 NativeTun 包装，v.fd 由 Stop() 兜底关闭（Java 已 detachFd，
+		// 不再负责关闭）。
 		return fmt.Errorf("sing-tun 创建失败：%w", err)
 	}
 	v.tun = t
+	v.fd = 0 // fd 所有权已转移给 NativeTun（其 Close 关闭）
 	log.Printf("✓ TUN 已创建（fd=%d, mtu=%d）", v.cfg.FileDescriptor, v.cfg.MTU)
 
 	// gVisor 用户态栈：TUN 上的 TCP/UDP 包在这里被解析成流。
-	stack, err := tun.NewStack("", tun.StackOptions{
+	// 必须显式指定 "gvisor" 而非空串：空串在 sing-tun 里按编译标志
+	// （WithGVisor）选择 NewMixed 或 NewSystem——CI 的 Android 构建若没带
+	// with_gvisor tag，WithGVisor=false 落到 NewSystem。而 NewSystem 要求
+	// Inet4Address[0] 前缀含 next 地址（HasNextAddress），我们传的是
+	// /32 单地址（WARP 只分配一个 IP），必然报 "need one more IPv4 address
+	// in first prefix for system stack"（v0.5.15 真机：TUN 栈创建失败）。
+	// NewGVisor 只取前缀首个地址、不要求 next，与 /32 前缀匹配。
+	stack, err := tun.NewStack("gvisor", tun.StackOptions{
 		Context:    v.ctx,
 		Tun:        t,
 		TunOptions: base,
@@ -130,6 +142,12 @@ func (v *Vpn) Stop() error {
 	}
 	if v.tun != nil {
 		_ = v.tun.Close()
+	}
+	// 兜底：tun.New 尚未成功（v.fd 仍持有原始 fd，Java 已 detachFd 不再负责）
+	// 时显式关闭，防泄漏。fd 已被 NativeTun 包装后 v.fd==0，此处不会双关。
+	if v.fd > 0 {
+		_ = unix.Close(v.fd)
+		v.fd = 0
 	}
 	return nil
 }

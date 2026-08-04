@@ -37,9 +37,11 @@ jobs:
 
       # Android 目标编译检查（CGO=0：androidbridge.go 的 JNI cgo 代码被排除，
       # 但 T2 桩 / T4 kernel / androidconfig.go 等 android 标签代码必须可编译）。
+      # with_gvisor：Android TUN 栈走 gVisor（/32 前缀只有 gVisor 栈支持，
+      # system/mixed 栈要求前缀含 next 地址——见 androidvpn.go NewStack 注释）。
       # 真实的 cgo 编译门在 build-android job 的 NDK c-shared 构建。
       - name: 编译（Android 目标）
-        run: GOOS=android GOARCH=arm64 CGO_ENABLED=0 go build ./...
+        run: GOOS=android GOARCH=arm64 CGO_ENABLED=0 go build -tags with_gvisor ./...
 
       - name: 运行测试
         run: go test ./...
@@ -303,7 +305,7 @@ jobs:
           if [ -z "$VERSION" ]; then VERSION="dev"; fi
           mkdir -p build/android/app/src/main/jniLibs/arm64-v8a
           go build -buildmode=c-shared -overlay build/android/overlay.json \
-            -tags production,android -trimpath -buildvcs=false \
+            -tags production,android,with_gvisor -trimpath -buildvcs=false \
             -ldflags="-w -s -X main.version=${VERSION}" \
             -o build/android/app/src/main/jniLibs/arm64-v8a/libwails.so
 
@@ -319,7 +321,7 @@ jobs:
           if [ -z "$VERSION" ]; then VERSION="dev"; fi
           mkdir -p build/android/app/src/main/jniLibs/x86_64
           go build -buildmode=c-shared -overlay build/android/overlay.json \
-            -tags production,android -trimpath -buildvcs=false \
+            -tags production,android,with_gvisor -trimpath -buildvcs=false \
             -ldflags="-w -s -X main.version=${VERSION}" \
             -o build/android/app/src/main/jniLibs/x86_64/libwails.so
 

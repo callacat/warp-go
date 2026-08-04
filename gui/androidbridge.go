@@ -116,6 +116,7 @@ import (
 	"unsafe"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
+	"golang.org/x/sys/unix"
 
 	"warp/androidvpn"
 	"warp/core"
@@ -213,6 +214,8 @@ func Java_com_wails_app_WarpVpnService_nativeStartVpn(env *C.JNIEnv, obj C.jobje
 	if androidRuntime.started {
 		androidRuntime.mu.Unlock()
 		log.Println("⚠ nativeStartVpn：VPN 已在运行")
+		// Java 已 detachFd，fd 所有权在 Go：同步失败路径必须关闭，防泄漏。
+		_ = unix.Close(int(fd))
 		return -1
 	}
 	androidRuntime.mu.Unlock()
@@ -225,6 +228,7 @@ func Java_com_wails_app_WarpVpnService_nativeStartVpn(env *C.JNIEnv, obj C.jobje
 	sandboxDir := application.Android.StoragePath()
 	if sandboxDir == "" {
 		log.Println("⚠ nativeStartVpn：无法获取应用沙箱目录")
+		_ = unix.Close(int(fd))
 		return -1
 	}
 
@@ -238,6 +242,8 @@ func Java_com_wails_app_WarpVpnService_nativeStartVpn(env *C.JNIEnv, obj C.jobje
 		androidRuntime.mu.Lock()
 		androidRuntime.lastErr = err.Error()
 		androidRuntime.mu.Unlock()
+		// Java 已 detachFd：同步失败路径 Go 负责关闭 fd（防泄漏）。
+		_ = unix.Close(int(fd))
 		return -1
 	}
 

@@ -196,7 +196,14 @@ public class WarpVpnService extends VpnService {
         vpnPfd = pfd;
         nativeRunning = true;
 
-        int fd = pfd.getFd();
+        // detachFd 把 OS fd 的所有权转移给 Go 侧：此后 Java 的 pfd.close()
+        // 只关 ParcelFileDescriptor 包装、不再关底层 fd，fd 的关闭统一由 Go
+        // 负责（tun.New 包装成功后 NativeTun.Close；tun.New 失败或同步校验
+        // 失败由 nativeStartVpn 内的 unix.Close）。此前 Java 持有 fd 且
+        // closeNative() 关它，而 Go 侧 rollback→vpn.Stop()→tun.Close() 也关
+        // 同一 fd → Android 15 fdsan double-close → SIGABRT（v0.5.15 真机
+        // "kernel assembly failed" 后崩溃的根因）。
+        int fd = pfd.detachFd();
         Log.i(TAG, "TUN established, handing fd=" + fd + " to nativeStartVpn");
         MainActivity.nativeLogMessage("info", "VPN 隧道已建立（fd=" + fd + "），正在启动内核...");
         int result;
