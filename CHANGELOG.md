@@ -22,8 +22,8 @@
      型。
      - **修复**：`NewStack("gvisor")` 显式指定 gVisor 栈（不再依赖空串的
        编译标志分支）；CI 的 `build-android` c-shared 两架构 + Android 兼容
-       门全部加 `with_gvisor` tag；`github.com/sagernet/gvisor` 提升为主
-       module 直接依赖（原为 indirect）。
+       门全部加 `with_gvisor` tag；`github.com/sagernet/gvisor` 依赖确认可用
+       （经 sing-tun 传递，indirect 即满足 with_gvisor 构建）。
   2. **fdsan: double-close of file descriptor 329 → SIGABRT**：栈创建失败 →
      `rollback` → Go `vpn.Stop()`→`tun.Close()` 关 fd，同时 `failStart` →
      `kernelFailed`→Java `closeNative()`→`pfd.close()` 再关**同一 fd** →
