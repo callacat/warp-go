@@ -1002,6 +1002,18 @@ func (s *Server) SaveConfig(cfg *Config) error {
 	if err := WriteConfig(path, merged); err != nil {
 		return err
 	}
+	// 同步更新内存快照 s.cfg（Status().Config → GUI GetConfig 数据源），
+	// 使保存立即在后续读取生效，无需重启（v0.5.16 反馈"保存后切页回来
+	// 配置没变"——此前只写盘，Status 一直返回启动时或首次 ensureConfig 的旧
+	// 值）。磁盘上写传入的相对路径保持可移植；内存快照锚定到运行时目录
+	// （与 ensureConfig/applyConfigReload 一致），避免 GeoReady 用相对路径
+	// 查错目录。
+	s.mu.Lock()
+	snapshot := *merged
+	snapshot.RulesPath = resolveWithDir(s.opts.DataDir, merged.RulesPath)
+	snapshot.GeoDir = resolveWithDir(s.opts.DataDir, merged.GeoDir)
+	s.cfg = &snapshot
+	s.mu.Unlock()
 	log.Printf("✓ 配置已保存 %s（热重载将自动应用）", path)
 	return nil
 }
@@ -1012,6 +1024,10 @@ func (s *Server) SaveConfig(cfg *Config) error {
 //   - 其余字段（监听地址、UDP 开关、GEO 仓库与更新周期）绑定启动时的监听器
 //     与更新协程，变更需重启生效，此处只打日志提示。
 func (s *Server) applyConfigReload(old, nc *Config) {
+	// 相对路径锚定到运行时目录（与 ensureConfig 一致）；否则热重载重建引擎
+	// 会用相对路径在 CWD 下找文件，而非 config/ 子目录。
+	nc.RulesPath = resolveWithDir(s.opts.DataDir, nc.RulesPath)
+	nc.GeoDir = resolveWithDir(s.opts.DataDir, nc.GeoDir)
 	if nc.RulesPath != old.RulesPath || nc.GeoDir != old.GeoDir {
 		ne, err := route.NewEngine(nc.RulesPath, nc.GeoDir)
 		if err != nil {
@@ -1063,6 +1079,11 @@ func (s *Server) applyConfigReload(old, nc *Config) {
 	if len(restart) > 0 {
 		log.Printf("⚠ 配置变更需重启生效：%s", strings.Join(restart, "、"))
 	}
+	// 同步内存快照，使 Status().Config 反映已应用的值（运行中热重载不再
+	// 停在旧值直到重启——v0.5.16"切页回来配置没变"的根因之一）。
+	s.mu.Lock()
+	s.cfg = nc
+	s.mu.Unlock()
 }
 
 // geoDataPresent 判断 GEO 数据文件是否已就绪（任一缺失即视为"尚未就绪"）。

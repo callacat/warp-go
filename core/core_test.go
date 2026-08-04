@@ -124,6 +124,46 @@ func TestEnsureConfigAnchorsToDataDir(t *testing.T) {
 	}
 }
 
+// TestSaveConfigUpdatesSnapshot 回归：保存配置后 Status().Config（GUI 设置页
+// 数据源）必须立即反映新值，而不是等重启（v0.5.16"保存后切页回来配置没变"）。
+func TestSaveConfigUpdatesSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(cfgPath, []byte(`{"listen_addr":"127.0.0.1:40000"}`), 0o600); err != nil {
+		t.Fatalf("写入测试配置失败：%v", err)
+	}
+
+	s := New(Options{ConfigPath: cfgPath, StateFile: filepath.Join(dir, "reg.json"), DataDir: dir})
+	if _, err := s.ensureConfig(); err != nil {
+		t.Fatalf("ensureConfig 失败：%v", err)
+	}
+
+	newCfg := DefaultConfig()
+	newCfg.ListenAddr = "0.0.0.0:9999"
+	newCfg.RulesPath = "myrules.txt"
+	if err := s.SaveConfig(newCfg); err != nil {
+		t.Fatalf("SaveConfig 失败：%v", err)
+	}
+
+	st := s.Status()
+	if st.Config == nil {
+		t.Fatal("Status().Config 为 nil")
+	}
+	if st.Config.ListenAddr != "0.0.0.0:9999" {
+		t.Errorf("保存后 ListenAddr 未更新：%q", st.Config.ListenAddr)
+	}
+	if !strings.HasPrefix(st.Config.RulesPath, dir) {
+		t.Errorf("内存快照 RulesPath 未锚定到 DataDir：%q", st.Config.RulesPath)
+	}
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), filepath.Join(dir, "myrules.txt")) {
+		t.Error("磁盘 config.json 不应写入锚定后的绝对路径")
+	}
+}
+
 // TestResolveExecPathUsesConfigSubdir 验证非 Android（DataDir 空）时，
 // resolveExecPath 把相对路径解析到执行根目录下的 config/ 子目录。
 func TestResolveExecPathUsesConfigSubdir(t *testing.T) {
