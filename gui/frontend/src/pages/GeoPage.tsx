@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { RefreshCw, Database, Clock } from "lucide-react";
 import { getGeo, updateGeo, isDemoMode } from "../lib/api";
 import { GeoInfo } from "../lib/types";
@@ -11,12 +11,7 @@ export default function GeoPage() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
-  useEffect(() => {
-    void isDemoMode().then(setDemo);
-    void refresh();
-  }, []);
-
-  const refresh = async () => {
+  const refresh = useCallback(async () => {
     try {
       // getGeo 已返回 fromGeo 归一化后的 GeoInfo，不要再包一层 fromGeo
       // （双重归一化，v0.5.7 与 StatusPage 同源 bug）。
@@ -25,7 +20,12 @@ export default function GeoPage() {
     } catch (e) {
       setError(String(e));
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    void isDemoMode().then(setDemo);
+    void refresh();
+  }, [refresh]);
 
   const onUpdate = async () => {
     setBusy(true);
@@ -43,6 +43,7 @@ export default function GeoPage() {
   };
 
   const fmt = (s?: string) => s ?? "—";
+  const geoReady = geo?.geositeUpdated !== undefined && geo?.geoipUpdated !== undefined;
 
   return (
     <div className="space-y-4">
@@ -50,7 +51,7 @@ export default function GeoPage() {
         title="GEO 数据库"
         action={
           geo ? (
-            <StatusPill ok={geo.geositeUpdated !== undefined && geo.geoipUpdated !== undefined} text="已就绪" />
+            <StatusPill ok={geoReady} text={geoReady ? "已就绪" : "未下载"} />
           ) : (
             <StatusPill ok={false} text="加载中" />
           )
@@ -65,7 +66,7 @@ export default function GeoPage() {
               {geo ? geo.geositePath : "…"}
             </p>
             <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-              更新于 {fmt(geo?.geositeUpdated)}
+              {geo?.geositeUpdated ? `更新于 ${fmt(geo.geositeUpdated)}` : "未下载"}
             </p>
           </div>
           <div className="rounded-lg border border-slate-200 p-4 dark:border-slate-800">
@@ -76,7 +77,7 @@ export default function GeoPage() {
               {geo ? geo.geoipPath : "…"}
             </p>
             <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-              更新于 {fmt(geo?.geoipUpdated)}
+              {geo?.geoipUpdated ? `更新于 ${fmt(geo.geoipUpdated)}` : "未下载"}
             </p>
           </div>
         </div>
