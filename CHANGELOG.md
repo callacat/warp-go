@@ -3,6 +3,44 @@
 本项目所有值得记录的变更。格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v0.5.16] - 2026-08-04
+
+### 修复
+
+- **Android VPN 仍无法启动（v0.5.15 修复 JNI 闪退后暴露的下一层，真机两层根因）**：
+  真机 logcat（`logcat_recording_2026-08-04_07-36-26`）显示 `nativeStartVpn`
+  已成功受理（v0.5.15 的 JNI 闪退已修复），但两秒后 `kernel assembly failed`
+  → `fdsan: double-close` → SIGABRT。定位到**两个独立 bug**：
+  1. **TUN 栈选型退化为 system 栈（`need one more IPv4 address in first
+     prefix for system stack`）**：`androidvpn.Start` 调 `tun.NewStack("")`
+     空串，sing-tun 按编译标志选栈——CI 的 Android 构建 `-tags
+     production,android` **没带 `with_gvisor`** → `WithGVisor=false` → 落到
+     `NewSystem`。`NewSystem` 要求 `Inet4Address[0]` 前缀含 **next 地址**
+     （`HasNextAddress(prefix,1)`），而 WARP 只分配单个 IP，我们传
+     `172.16.0.2/32`——`/32` 单地址无 next → 报错。`NewGVisor` 只取前缀首
+     地址、不要求 next，且我们的 handler（`NewConnectionEx`）本就是 gVisor
+     型。
+     - **修复**：`NewStack("gvisor")` 显式指定 gVisor 栈（不再依赖空串的
+       编译标志分支）；CI 的 `build-android` c-shared 两架构 + Android 兼容
+       门全部加 `with_gvisor` tag；`github.com/sagernet/gvisor` 提升为主
+       module 直接依赖（原为 indirect）。
+  2. **fdsan: double-close of file descriptor 329 → SIGABRT**：栈创建失败 →
+     `rollback` → Go `vpn.Stop()`→`tun.Close()` 关 fd，同时 `failStart` →
+     `kernelFailed`→Java `closeNative()`→`pfd.close()` 再关**同一 fd** →
+     Android 15 fdsan 检测 → SIGABRT。**Go 与 Java 同时持有同一 OS fd 的
+     所有权**。
+     - **修复（fd 所有权归 Go 单一持有）**：Java `establish()` 后
+       `pfd.detachFd()` 把 OS fd 转移给 Go（此后 `pfd.close()` 只关
+       ParcelFileDescriptor 壳、不关 fd）；Go 侧负责 fd 关闭——`tun.New`
+       包装成功后 `NativeTun.Close()`，包装前/同步校验失败路径
+       `nativeStartVpn` 内 `unix.Close(fd)`（`androidvpn.Vpn` 增 `fd` 字段 +
+       `v.fd=0` 防双关 + Stop 兜底关）。
+  - **验证**：`GOOS=android GOARCH=arm64 CGO_ENABLED=0 go build -tags
+    with_gvisor ./androidvpn/` 通过（决定性——v0.5.15 该命令落 `NewSystem`
+    会报错）；`go build/vet/test ./...` 全绿；CI `build-android` job 的 JNI
+    双侧 grep 断言保持通过。真机行为（TUN `warp=on`）仍需装
+    `app-release.apk` 验证。
+
 ## [v0.5.15] - 2026-08-04
 
 ### 修复
