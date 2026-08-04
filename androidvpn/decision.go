@@ -10,9 +10,43 @@ package androidvpn
 import (
 	"context"
 	"errors"
+	"log"
 	"net"
 	"net/netip"
+	"syscall"
 )
+
+// socketProtector, when non-nil, is invoked with the raw fd of every direct
+// (non-tunnel) socket the TUN stack dials, right after creation and before any
+// packet is sent. Android injects VpnService.protect via SetSocketProtector so
+// direct sockets egress over the physical network instead of looping back into
+// the TUN (v0.5.14 protected only the QUIC dial socket; direct sockets without
+// protect caused a loop storm — see relayUDP/NewConnectionEx). Desktop/CLI
+// leave this nil (no-op).
+var socketProtector func(fd int) error
+
+// SetSocketProtector 注册包级 socket 保护器，供 Android 桥注入
+// VpnService.protect 实现。桌面/CLI 不调用，保持 nil。
+func SetSocketProtector(fn func(fd int) error) {
+	socketProtector = fn
+}
+
+// protectConn 对已建连接的底层 socket 调用 socketProtector（UDP 路径）。
+func protectConn(conn syscall.Conn) {
+	if socketProtector == nil {
+		return
+	}
+	raw, err := conn.SyscallConn()
+	if err != nil {
+		log.Printf("⚠ 获取直连 socket 原始 fd 失败：%v", err)
+		return
+	}
+	_ = raw.Control(func(fd uintptr) {
+		if perr := socketProtector(int(fd)); perr != nil {
+			log.Printf("⚠ 保护直连 socket（fd=%d）失败：%v", int(fd), perr)
+		}
+	})
+}
 
 // RouteFunc 判定 (host, ip) 的转发行为，返回 ("proxy"|"direct"|"reject", matched)。
 // 与 core 的 route.Engine.Match 语义一致；nil 时全部走 proxy（隧道）。
@@ -65,7 +99,20 @@ func resolveAction(action string, ctx context.Context, targetAddr string, tunnel
 			conn, err := directDial(ctx, targetAddr)
 			return conn, err, false
 		}
-		conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", targetAddr)
+		// TCP direct：用 Dialer.Control 在建立连接前 protect 底层 fd——
+		// 否则 Android 上该 socket 重新进入 TUN 造成环路风暴（v0.5.14
+		// 只 protect 了 QUIC 拨号 socket，direct 未豁免）。
+		dialer := &net.Dialer{}
+		if socketProtector != nil {
+			dialer.Control = func(network, address string, c syscall.RawConn) error {
+				return c.Control(func(fd uintptr) {
+					if perr := socketProtector(int(fd)); perr != nil {
+						log.Printf("⚠ 保护直连 socket（fd=%d）失败：%v", int(fd), perr)
+					}
+				})
+			}
+		}
+		conn, err := dialer.DialContext(ctx, "tcp", targetAddr)
 		return conn, err, false
 	}
 }

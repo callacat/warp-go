@@ -273,8 +273,11 @@ func Java_com_wails_app_WarpVpnService_nativeStartVpn(env *C.JNIEnv, obj C.jobje
 	// 注册拨号 socket 保护器：Android 上 VpnService.establish() 后应用自身
 	// 新 socket 也走 TUN，拨号 QUIC 的 ClientHello 会滞留未读取的 tun 里导致
 	// 所有边缘超时（v0.5.13 反馈"连接所有边缘地址失败"）。protect() 豁免该
-	// socket 走物理网络（根因修复，见 tunnel.socketProtector）。
+	// socket 走物理网络（根因修复，见 tunnel.socketProtector）。同时注册到
+	// androidvpn：direct 直连（TCP/UDP）socket 同样需要豁免，否则环路风暴
+	// （v0.5.17 模拟器实测 tun0 TX 31GB、浏览器不通）。
 	tunnel.SetSocketProtector(androidProtectSocket)
+	androidvpn.SetSocketProtector(androidProtectSocket)
 
 	go startVpnKernel(ctx, cancel, sandboxDir, built, int(fd))
 	log.Printf("✓ 已受理 VPN 启动（fd=%d，内核装配异步进行）", int(fd))

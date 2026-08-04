@@ -236,6 +236,10 @@ func (v *Vpn) relayUDP(ctx context.Context, conn N.PacketConn, destination M.Soc
 		return
 	}
 	defer remote.Close()
+	// Android：direct UDP 数据报经本机栈发出，socket 必须豁免出 VPN 路由
+	// （protect），否则重新进入 TUN 造成环路风暴（v0.5.14 只 protect 了
+	// QUIC 拨号 socket，UDP relay 未豁免）。
+	protectConn(remote)
 
 	done := make(chan struct{}, 2)
 	go func() {
