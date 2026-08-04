@@ -123,10 +123,20 @@ public class WarpVpnService extends VpnService {
      * does not stop a foreground service (Android 8+): the service stays
      * foreground and {@code onDestroy} never fires — the reported v0.5.10
      * "停止按钮无效" root cause. Must remove the foreground state first.
+     *
+     * v0.5.18: additionally call {@link #stopNativeAndClose()} here instead of
+     * relying on {@code onDestroy}. A VpnService is bound by the system's
+     * VpnManager (ConnectionRecord) and runs as a foreground service, so
+     * {@code stopSelf()} alone may not deliver onDestroy promptly (or at all):
+     * real-device evidence — after tapping 停止, logcat showed no
+     * "onDestroy - stopping VPN" and tun0 kept growing. stopNativeAndClose is
+     * idempotent (nativeRunning guard), so double-teardown with onDestroy is
+     * safe.
      */
     public static void stop(Context ctx) {
         WarpVpnService svc = sInstance;
         if (svc != null) {
+            svc.stopNativeAndClose();
             svc.stopForeground(STOP_FOREGROUND_REMOVE);
             svc.stopSelf();
         } else {
