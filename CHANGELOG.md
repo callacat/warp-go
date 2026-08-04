@@ -3,6 +3,32 @@
 本项目所有值得记录的变更。格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v0.5.18] - 2026-08-04
+
+### 修复
+
+- **Android 浏览器不通 + 停止按钮失效（direct 环路风暴，v0.5.14 修复不完整的下一层）**：
+  模拟器实测 tun0 TX **33.9GB / 5 亿包**、app CPU **456%**、系统负载 12+——direct
+  （非隧道）TCP/UDP socket 未豁免出 VPN 路由，包从 Go 进程发出后重新进入 TUN，
+  形成环路风暴。风暴打爆 UI 线程 → 点"停止"的 tap 事件饿死（看似按钮失效）、
+  浏览器访问全部超时。
+  - **根因**：v0.5.14 只给 QUIC 拨号 socket（`tunnel.dialAddr`）加了
+    `VpnService.protect`；`androidvpn` 的 direct 直连 socket 没 protect——
+    TCP 走 `net.Dialer`（decision.go）、UDP 走 `net.DialUDP`（relayUDP）。
+    默认规则 `direct,geoip:cn` + GEO 库缺失 → 流量全落 direct → 全环路。
+  - **修复**：`androidvpn` 新增包级 `SetSocketProtector`（与 tunnel 同模式）：
+    TCP direct 用 `Dialer.Control` 在建连前 protect fd，UDP relay 用
+    `SyscallConn` protect；`gui/androidbridge.go` 同时注册到 tunnel 与 androidvpn
+    两个包（复用 `androidProtectSocket`）。
+  - **验证**：`go build/vet/test ./...` 全绿；`GOOS=android CGO_ENABLED=0 go
+    build ./...` 通过；真机（模拟器）行为待部署新 APK 复测（CPU 回落 + tun0
+    计数不再暴涨 + 浏览器可通 + 停止按钮生效）。
+
+- **GEO 页看不到数据库更新时间**：`GetGeo` 用 `os.Stat(geoDir).ModTime()`，但
+  GEO 数据从未下载时 `geo/` 目录为空 → `os.Stat` ErrNotExist → `GeositeUpdated/
+  GeoIPUpdated` 为空 → 前端显示"—"，且 StatusPill 误标"已就绪"。修复：未下载
+  时前端显示"未下载"徽标 + 每文件"未下载"文案（不再误报已就绪）。
+
 ## [v0.5.17] - 2026-08-04
 
 ### 修复
