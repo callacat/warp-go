@@ -1,7 +1,7 @@
 # AGENTS.md — warp-go 接手指南
 
 > 本文件供后续 Agent 快速了解项目。配合计划文档 `.omo/plans/warp-go-reinit-2026-07-31.md`（随进度更新）阅读。
-> 最后更新: 2026-08-01
+> 最后更新: 2026-08-04（v0.5.17）
 
 ## 1. 项目是什么
 
@@ -139,6 +139,7 @@ go test ./androidvpn/... ./gui/...                       # 决策逻辑 + androi
 | M8.9 v0.5.12 反馈修复（win/Android 真机） | ✅ | **Telegram 无法连接**：默认规则未覆盖 TG——`149.154.175.100` 等 TG IP 落隐式 direct，网络封锁直连失败。默认模板 + `rules/default-rules.txt` 新增 `proxy,geoip:telegram`（geoip 类别大小写不敏感，`Lookup` ToUpper→`TELEGRAM`）；补 telegram 匹配/解析/加载单测。**Android 检查更新在应用内 WebView 打开**：`<a target=_blank>` 被 WebView 捕获 → 新增 `Service.OpenExternalBrowser`（桌面 Wails `application.Get().Browser.OpenURL`，Android 反向 JNI `MainActivity.openExternalBrowser` 用 `Intent.ACTION_VIEW` 跳第三方浏览器），前端"前往下载"改调它 |
 | M9 运行时文件统一 config/ 子目录（v0.5.12） | ✅ | **Docker 版"自动生成注册文件无法保存"根因修复**：旧 `resolveExecPath` 锚定可执行目录，Docker exe 在只读 `/usr/local/bin` → 回退容器层 `~/.config/warp-go`，从不落挂载卷 `/data`。现 `core.baseExecRoot`：可执行目录（可写）→ **当前工作目录**（可写；Docker WORKDIR `/data` 挂载卷——核心修复）→ 用户配置目录 → 兜底；`resolveExecPath` 统一收拢进 `<根>/config/`（config.json/reg.json/rules.txt/geo），自动 `MkdirAll` + 一次性旧布局迁移（`migrateLegacyConfig`，幂等非破坏）。**Android 例外**：`DataDir` 非空仍锚定沙箱根（不套 config/ 子目录）。**Docker compose 挂载改 `./warp-config:/data/config`**（只需映射 config 一个目录）；`configDirWritable` 以"能否在候选根下创建 config/ 子目录"探测（适配挂载点父目录 root 属主场景）。测试：6 新增 + 3 更新路径契约测试；Docker 真实冒烟（reg/config/rules/geo 全落挂载） |
 | M9.5 Android 自路由修复（v0.5.14） | ✅ | **连接所有边缘地址失败根因**：`VpnService.establish()` 全量路由后应用自身新 socket 也走 TUN（未 protect 时），而 TUN 在拨号成功后才被 sing-tun 读取 → QUIC ClientHello 滞留 tun 里、所有边缘握手超时。修复：`tunnel.socketProtector` 钩子（`dialAddr` 建 UDP 拨号 socket 后、发包前调用）+ Android 桥 `WarpVpnService.protectSocket(fd)`（`VpnService.protect()` 豁免拨号 socket 走物理网络；DoH 复用同一 QUIC 连接无需单独保护）。**启动失败"无法停止"修复**：`failStart`/`rollback` 额外经 `kernelFailed(msg)` JNI 通知 Java 自拆除（stopForeground+stopSelf+关 TUN fd），停止按钮幂等生效。`warpCtl` 缓存 WarpVpnService 类/方法 ID（nativeStartVpn 主线程 GetObjectClass 缓存，避免 goroutine FindClass 错失 classloader）。拨号总超时改可配置 `config.json` `dial_timeout_seconds`（默认 60s）；补 T6 androidconfig 测试 + CI `protectSocket`/`kernelFailed` 双侧签名 grep 断言；tag v0.5.14 |
+| M9.6 Android udpnat panic + GUI 配置快照（v0.5.17） | ✅ | **Android `panic: invalid timeout` SIGABRT 根因**：`androidvpn.Vpn.Start` 构造 `tun.StackOptions` 未设 `UDPTimeout/ICMPTimeout`（自 v0.5.15 强制 gVisor 才触达此路径）→ `NewUDPForwarder` → sing v0.8.0 `udpnat.New` 对 `timeout==0` **panic 而非返回错误** → 异步 goroutine 崩溃整个进程。修复：`UDPTimeout: 5m` / `ICMPTimeout: 10s`（对齐 sing-box `constant/timeout.go`）+ `kernel.Start`/`vpn.Start` 异步 goroutine 加 `recover` 兜底（未来库 panic 走 failStart 正常回滚，不 SIGABRT）。**GUI 保存配置后切页看不到变更**：`Server.SaveConfig` 只写盘不更新 `s.cfg` 快照、`applyConfigReload` 也不写回 → `Status().Config`（GUI `GetConfig` 数据源）恒为启动时旧值直到重启。修复：两者都同步 `s.cfg`（内存锚定路径、磁盘仍相对）+ `applyConfigReload` 补路径锚定；新增 `TestSaveConfigUpdatesSnapshot` 回归 |
 
 ## 6.6 上游冲突处理（重要）
 
@@ -265,6 +266,15 @@ release 同名 tag 冲突），但期间 Agent 均提前报告"Android 版已成
   nativeStartVpn 主线程 GetObjectClass 缓存，避免 goroutine FindClass 错失 classloader）。
   拨号总超时改为可配置 `config.json` `dial_timeout_seconds`（默认 60s）。**改 JNI 前必读
   §6.8.3**（Go 侧不能直接调 JNIEnv 方法，必须走 C preamble helper）。
+- **v0.5.17 Android `udpnat` panic + GUI 配置快照（2026-08-04）**：`androidvpn.Vpn.Start`
+  构造 `tun.StackOptions` **必须设 `UDPTimeout`（5m）与 `ICMPTimeout`（10s）**——sing
+  v0.8.0 的 `udpnat.New` 对 `timeout==0` 直接 `panic("invalid timeout")` 而非返回错误
+  （经 `NewUDPForwarder` 触发；v0.5.16 强制 gVisor 后此路径必达，真机 SIGABRT）。取值
+  对齐 sing-box `constant/timeout.go`。异步启动 `kernel.Start`/`vpn.Start` goroutine 带
+  `recover` 兜底（库 panic 走 failStart 回滚，不崩溃）。**GUI 保存配置后切页看不到变更**：
+  `SaveConfig` 与 `applyConfigReload` 都必须同步 `s.cfg` 快照（`Status().Config` →
+  `GetConfig` 数据源），否则恒为启动时旧值直到重启；快照内路径锚定运行时目录、磁盘仍
+  写相对路径。回归：`TestSaveConfigUpdatesSnapshot`。
 - JNI 导出面（v0.5.9 起 5 个，v0.5.14 静态方法桥 2 个）：`gui/androidbridge.go` 的
   `Java_com_wails_app_WarpVpnService_nativeStartVpn/nativeStopVpn/nativeVpnRunning` +
   `Java_com_wails_app_MainActivity_nativeLogMessage/nativeSetTimeZone`；Java 侧

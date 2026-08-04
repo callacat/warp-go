@@ -3,6 +3,51 @@
 本项目所有值得记录的变更。格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v0.5.17] - 2026-08-04
+
+### 修复
+
+- **Android VPN 仍启动崩溃（v0.5.16 修复 gVisor 栈选型后暴露的第三层，`panic: invalid timeout` → SIGABRT）**：
+  真机 logcat（`logcat_recording_2026-08-04_09-07-28.txt`）显示 `nativeStartVpn`
+  已受理、`panic: invalid timeout` 后 `Fatal signal 6 (SIGABRT)` 崩溃，栈：
+  `udpnat.New` ← `sing-tun.NewUDPForwarder` ← `GVisor.Start` ← `androidvpn.Vpn.Start`
+  ← `startVpnKernel.func`.
+  - **根因**：`androidvpn.Vpn.Start` 构造 `tun.StackOptions` 时**未设置
+    `UDPTimeout`/`ICMPTimeout`**（自 v0.5.15 起强制 gVisor 才走这条路）。gVisor
+    `Start()` 用 `UDPTimeout` 构造 UDP NAT（`NewUDPForwarder` → `udpnat.New`），
+    而 sing v0.8.0 的 `udpnat.New` 对 `timeout==0` **直接 `panic("invalid
+    timeout")` 而非返回错误**——panic 发生在 `startVpnKernel` 的异步 goroutine
+    里，整个进程崩溃。v0.5.16 之前走 `NewSystem`（`udpTimeout` 同样为 0 也会
+    panic，但该校验在 system 栈更晚触达），故"与前几版同样的问题"。
+    - **修复**：`UDPTimeout: 5*time.Minute`、`ICMPTimeout: 10*time.Second`
+      （对齐 sing-box `constant/timeout.go` 默认值；`udpnat.New` 要求
+      `timeout>0`）。
+  - **加固**：异步启动 `kernel.Start`/`vpn.Start` 的 goroutine 增加
+    `recover` 兜底——未来任何库函数直接 panic（如本次）都能经 `failStart`
+    正常回滚 + 通知 Java 拆除，而不是 SIGABRT 崩溃。
+  - **验证**：`GOOS=android GOARCH=arm64 CGO_ENABLED=0 go build -tags
+    with_gvisor ./androidvpn/` 通过；`go build/vet/test ./...` 全绿（新增
+    `core.TestSaveConfigUpdatesSnapshot` 回归）；真机行为（TUN `warp=on`）仍需
+    装 `app-release.apk` 验证。
+
+- **Windows/macOS/Linux GUI 保存配置后切页再回来看不到变更（需重启才刷新）**：
+  设置页"保存配置"提示成功，但切走再切回，改动仍是旧值。这是配置热重载的
+  **内存快照未同步**问题：
+  - **根因**：`Service.GetConfig` 的数据源是 `Server.Status().Config`（即
+    `s.cfg` 快照）。`Server.SaveConfig` 只把配置**写盘**（`WriteConfig`），
+    从不更新 `s.cfg`；热重载的 `applyConfigReload` 也只做分流引擎重建/系统
+    代理副作用，**同样不写 `s.cfg`**。前端每次切页都会重新 `getConfig()`，但
+    拿到的始终是启动时或首次 `ensureConfig` 的旧快照——直到重启（Launch 把
+    `s.cfg` 重新从磁盘加载）才看到新值。
+    - **修复**：`SaveConfig` 写盘后立即更新内存快照（`s.cfg = &snapshot`，
+      快照内 `RulesPath/GeoDir` 锚定到运行时目录，磁盘仍写相对路径保持
+      可移植）；`applyConfigReload` 校验失败路径外一律 `s.cfg = nc`，运行中
+      热重载同样立即反映。另修复 `applyConfigReload` 重建引擎时未对
+      `RulesPath/GeoDir` 做运行时目录锚定（相对路径会用 CWD 而非 config/ 目录
+      找文件）的隐患。
+  - **验证**：新增 `TestSaveConfigUpdatesSnapshot` 回归（保存后 `Status().Config`
+    立即为新值、内存锚定、磁盘仍相对）；`go test ./core/...` 全绿。
+
 ## [v0.5.16] - 2026-08-04
 
 ### 修复

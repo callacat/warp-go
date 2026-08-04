@@ -326,6 +326,7 @@ warp-go/
 
 | 版本 | 日期 | 摘要 |
 |---|---|---|
+| [v0.5.17](CHANGELOG.md#v0517---2026-08-04) | 2026-08-04 | **Android `udpnat` panic 崩溃修复**（`UDPTimeout/ICMPTimeout` 未设 → `udpnat.New` 对 timeout=0 panic → SIGABRT；对齐 sing-box 默认 5m/10s）+ 异步启动 `recover` 兜底；**GUI 保存配置后切页看不到变更修复**（`SaveConfig`/`applyConfigReload` 同步 `s.cfg` 内存快照 + 路径锚定） |
 | [v0.5.14](CHANGELOG.md#v0514---2026-08-03) | 2026-08-03 | **Android 连接失败根因修复**（自路由 → `VpnService.protect` 拨号 socket）、启动失败通知残留修复（kernelFailed 自拆除）、拨号超时可配置（`dial_timeout_seconds`，默认 60s） |
 | [v0.5.13](CHANGELOG.md#v0513---2026-08-03) | 2026-08-03 | 运行时文件统一 `config/` 子目录（Docker 修复 + 旧布局迁移）、Android 规则页"分流引擎未初始化"修复（ReloadRules 路由到 androidRuntime.kernel） |
 | [v0.5.12](CHANGELOG.md#v0512---2026-08-03) | 2026-08-03 | Telegram 默认走 WARP（`proxy,geoip:telegram`）、检查更新外部浏览器打开 |
