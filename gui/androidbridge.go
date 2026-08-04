@@ -628,7 +628,11 @@ func androidRequestVpnStop() error {
 	cls, stopM, ready := androidCtl.cls, androidCtl.stopM, androidCtl.ready
 	androidCtl.mu.Unlock()
 	if !ready || unsafe.Pointer(cls) == nil || unsafe.Pointer(stopM) == nil {
-		return nil // 桥未就绪 = 尚未启动，停止为幂等 no-op
+		// 桥未就绪时打日志（与启动路径一致），避免"点停止没反应且无日志"
+		// 掩埋停止链路问题（v0.5.18 真机停止排查）。不再静默 no-op。
+		err := errors.New("Android VPN 桥未就绪（MainActivity 未初始化），停止未执行")
+		log.Printf("⚠ 停止失败：%v", err)
+		return err
 	}
 	var needsDetach C.int
 	env := C.getEnv(&needsDetach)
