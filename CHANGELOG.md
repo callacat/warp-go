@@ -3,6 +3,27 @@
 本项目所有值得记录的变更。格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v0.5.19] - 2026-08-04
+
+### 修复
+
+- **Android 无法访问互联网（国外流量直连被墙）**：真机日志页显示 `[tun] 拨号失败
+  172.217.x:443 / 74.125.x:5228：dial tcp ... i/o timeout`（全是 Google IP，走了
+  direct 直连），浏览器打开即超时。根因：TUN 收到的是**已解析的 IP 字面量**，
+  `route.Engine.Match` 对 IP 只走 geoip 规则（geosite/domain 的域名语义对 IP 无
+  意义）→ 国外 IP 不命中默认规则里唯一的 geoip-proxy（telegram）→ **miss →
+  兜底 direct** → 直连被墙。VPN 语义本应是"除显式 direct/reject（私有段、中国
+  大陆）外全部走隧道"，故未命中兜底改为 **proxy**（`androidvpn.decideAction`
+  miss→proxy）。桌面 SOCKS 拿域名走 route.Engine（其 miss→direct），不经过此
+  函数，不受影响。测试 `TestDecideAction` T4/T6 同步更新。
+- **Android 停止按钮部分失效**：真机证据——tap 停止后 logcat 无 `onDestroy -
+  stopping VPN`、tun0 持续增长。根因：VpnService 被系统 VpnManager 绑定
+  （ConnectionRecord）+ 前台服务，`stopSelf()` 可能不触发 `onDestroy`，而
+  `WarpVpnService.stop()` 只 stopForeground+stopSelf 依赖 onDestroy 才拆 Go 内核。
+  修复：`stop()` 直接调 `stopNativeAndClose()`（拆 Go 内核 + 关 TUN），幂等
+  （nativeRunning 守卫），与 onDestroy 双拆除安全。另：`androidRequestVpnStop`
+  桥未就绪时不再静默 no-op，改打日志（与启动路径一致），让"点停止没反应"可排查。
+
 ## [v0.5.18] - 2026-08-04
 
 ### 修复
