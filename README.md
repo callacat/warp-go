@@ -251,7 +251,7 @@ Android 版是 **Wails v3 Android 壳 + 自写 Java `VpnService`**（不使用 g
 4. 打开 VPN 开关，`curl`/浏览器验证 `warp=on`
 
 > [!NOTE]
-> Android 版无真机验证（本机无设备/模拟器）——运行时行为需真机测试，验收项见 [`.omo/plans/warp-go-android-2026-08-01.md`](.omo/plans/warp-go-android-2026-08-01.md) §11。
+> Android 版运行时行为已经远程模拟器验收通过（v0.5.17 起，见 [AGENTS.md §6](AGENTS.md#6-构建测试验证命令)）——TUN 建立、consent 流、UI 内一键注册、无 panic。
 
 ## 项目结构
 
@@ -310,7 +310,7 @@ warp-go/
 4. **重连是惰性的**——空闲断线不会后台恢复，下一个请求承担重连延迟。
 5. **PQ 密钥交换无法对齐**（Go 标准库无 `P256Kyber768Draft00`）。
 6. **注册信息不会刷新**——端点一直沿用，需 `-del` 后重新 `-reg` 更新。
-7. **Android 无真机验证**（v0.5.0-v0.5.2）——仅 CI 构建，运行时行为需真机测试；验收项见 android 计划文档 §11（TUN `warp=on`、consent UX、GEO 分流、Always-On 重启、JNI 无 `UnsatisfiedLinkError`、前台服务/电池等）。v0.5.1 修复 /system/bin 只读崩溃；v0.5.2 修复启动内核失败（桥接 VpnService）、日志不可见、注册状态切页丢失、扫描无候选。
+7. **Android 验收已转正**（v0.5.17 起）——远程模拟器（LDPlayer `adb connect`)完成 consent / UI 一键注册 / TUN 建立 / 无 panic 验收；`warp=on` 无法在 root 模拟器 shell 内验证（root 流量绕过 VpnService 路由），用 tun0 计数增长替代。历史修复：v0.5.1 修 /system/bin 只读崩溃；v0.5.2 修启动内核失败。构建仍 CI-only（本地无 SDK/NDK/JDK）。
 8. **Android 需手动放入 reg.json**——注册信息不在 UI 内生成，需从桌面端 `-reg` 复制进沙箱 `getFilesDir()` 才能启动 VPN（v0.5.1 起注册写盘已正确落到沙箱，UI 内"一键注册"可用）。
 9. **Android UI 为初版 consent 流**——首启自动弹授权对话框；React 前端按钮触发路径为后续版本。Wails v3 Android 仍 experimental（alpha2.119，已知 bug：onDestroy #5859、bindings 上下文 #5810 等）。
 

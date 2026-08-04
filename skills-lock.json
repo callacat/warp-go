@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "android-adb": {
+      "source": "httprunner/skills",
+      "sourceType": "github",
+      "skillPath": "android-adb/SKILL.md",
+      "computedHash": "8bfc27c21a6c3b20ec258d1525c2b6e9b16644e2a2b48530e3dd125b36b627f9"
+    }
+  }
+}
