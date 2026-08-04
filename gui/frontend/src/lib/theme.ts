@@ -75,3 +75,16 @@ export function applyDarkClass(dark: boolean): void {
   }
   document.documentElement.classList.toggle("dark", dark);
 }
+
+/** Loads theme mode from Go config (camelCase from snake_case JSON). */
+export function loadModeFromConfig(config: { themeMode?: string } | null): ThemeMode {
+  if (config?.themeMode) {
+    return normalizeMode(config.themeMode);
+  }
+  return "system";
+}
+
+/** Returns payload to send to Go SaveConfig for theme mode. */
+export function saveModeToConfig(mode: ThemeMode): { theme_mode: string } {
+  return { theme_mode: mode };
+}

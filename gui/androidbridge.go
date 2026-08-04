@@ -361,12 +361,20 @@ func startVpnKernel(ctx context.Context, cancel context.CancelFunc, sandboxDir s
 		return
 	}
 
+	// runCancel 是装配完成后创建的运行期取消函数（见下方 ctx 切换）。声明在
+	// rollback 之前以便闭包捕获：装配失败时它仍为 nil（只取消装配 ctx），
+	// 装配成功后取消它即停止 kernel/vpn 生命周期。
+	var runCancel context.CancelFunc
+
 	// rollback 在 kernel/vpn 任一异步启动失败时拆除本实例并回滚状态。
 	// 闭包捕获本地变量而非 androidRuntime 字段：若回滚前已有新实例
 	// （started 被再次置 true），旧实例的拆除不碰新实例状态。
 	rollback := func(name string, err error) {
 		log.Printf("⚠ nativeStartVpn：%s 启动失败，回滚：%v", name, err)
 		cancel()
+		if runCancel != nil {
+			runCancel()
+		}
 		if vpn != nil {
 			_ = vpn.Stop()
 		}
@@ -374,16 +382,19 @@ func startVpnKernel(ctx context.Context, cancel context.CancelFunc, sandboxDir s
 			_ = kernel.Close()
 		}
 		androidRuntime.mu.Lock()
-		if androidRuntime.kernel == kernel {
+		current := androidRuntime.kernel == kernel
+		if current {
 			androidRuntime.kernel = nil
 			androidRuntime.vpn = nil
 			androidRuntime.ctx = nil
 			androidRuntime.cancel = nil
 			androidRuntime.started = false
+			androidRuntime.lastErr = err.Error()
 		}
-		androidRuntime.lastErr = err.Error()
 		androidRuntime.mu.Unlock()
-		androidNotifyKernelFailed(name + "：" + err.Error())
+		if current {
+			androidNotifyKernelFailed(name + "：" + err.Error())
+		}
 	}
 
 	// 装配完成前的最后一次取消检查：nativeStopVpn 可能已拆除了本实例
@@ -396,6 +407,18 @@ func startVpnKernel(ctx context.Context, cancel context.CancelFunc, sandboxDir s
 		return
 	}
 
+	// 装配完成后切换运行期 ctx：装配 ctx 带 60s 拨号超时（见 nativeStartVpn
+	// 的 WithTimeout），若把它继续传给 kernel.Start/vpn.Start，超时到期时
+	// sing-tun 栈随 ctx 取消整体关闭——用户看到"VPN 开"但 TUN 已死，且拨号
+	// 耗时接近 60s 时（移动网络常态）栈只活几秒。运行期 ctx 改为从 background
+	// 派生、生命周期只由 nativeStopVpn 的 cancel 控制，装配计时器不再约束
+	// 运行。kernel.Start 内部对 ctx.Done 返回 nil（不触发 rollback），故用
+	// runCancel 作为实例的停止信号，与 androidRuntime.cancel 保持一致。
+	//
+	// 校验 ctx 身份、写入运行状态、替换运行期 ctx 必须在同一临界区完成：
+	// 拆分锁块会让 nativeStopVpn 在两次加锁之间插入——它读到 kernel 已写入
+	// 但 ctx 仍是装配 ctx，清空状态后本函数又写入 runCtx，复活已停止的实例
+	// 且 runCancel 泄漏（无人再取消它）。
 	androidRuntime.mu.Lock()
 	if androidRuntime.ctx != ctx {
 		// nativeStopVpn 已更换/清空 ctx（新实例启动或已停止）：本实例
@@ -406,8 +429,11 @@ func startVpnKernel(ctx context.Context, cancel context.CancelFunc, sandboxDir s
 		log.Println("⚠ nativeStartVpn：实例已过期（期间被停止/重启），丢弃装配结果")
 		return
 	}
+	runCtx, runCancel := context.WithCancel(context.Background())
 	androidRuntime.kernel = kernel
 	androidRuntime.vpn = vpn
+	androidRuntime.ctx = runCtx
+	androidRuntime.cancel = runCancel
 	androidRuntime.mu.Unlock()
 
 	// 异步启动 kernel/vpn。recover 兜底（v0.5.16 教训）：sing 库会直接
@@ -419,7 +445,7 @@ func startVpnKernel(ctx context.Context, cancel context.CancelFunc, sandboxDir s
 				rollback("kernel panic", fmt.Errorf("panic: %v", r))
 			}
 		}()
-		if err := kernel.Start(ctx); err != nil {
+		if err := kernel.Start(runCtx); err != nil {
 			rollback("kernel", err)
 		}
 	}()
@@ -429,7 +455,7 @@ func startVpnKernel(ctx context.Context, cancel context.CancelFunc, sandboxDir s
 				rollback("TUN 栈 panic", fmt.Errorf("panic: %v", r))
 			}
 		}()
-		if err := vpn.Start(ctx); err != nil {
+		if err := vpn.Start(runCtx); err != nil {
 			rollback("TUN 栈", err)
 		}
 	}()

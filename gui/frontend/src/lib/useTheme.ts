@@ -15,11 +15,12 @@ import { useEffect, useState } from "react";
 import { Events, System } from "@wailsio/runtime";
 import {
   applyDarkClass,
-  loadMode,
+  loadModeFromConfig,
   resolveDark,
   saveMode,
   type ThemeMode,
 } from "./theme";
+import { saveConfigPartial } from "./api";
 
 /** Wails runtime theme-change event names, one per platform plus "common". */
 export const THEME_EVENT_NAMES: readonly string[] = [
@@ -82,12 +83,13 @@ function querySystemDark(setDark: (dark: boolean) => void): void {
   });
 }
 
-export function useTheme(): {
+export function useTheme(initialConfig?: { themeMode?: string } | null): {
   mode: ThemeMode;
   systemDark: boolean;
   setMode: (mode: ThemeMode) => void;
+  setModeFromConfig: (config: { themeMode?: string } | null) => void;
 } {
-  const [mode, setMode] = useState<ThemeMode>(() => loadMode());
+  const [mode, setModeState] = useState<ThemeMode>(() => loadModeFromConfig(initialConfig ?? null));
   // Seed with the browser preference; the Wails bridge overwrites it once it
   // resolves. In a plain browser the bridge never resolves, so the matchMedia
   // value stays authoritative.
@@ -107,7 +109,20 @@ export function useTheme(): {
   useEffect(() => {
     applyDarkClass(resolveDark(mode, systemDark));
     saveMode(mode);
+    // Also persist to Go config.json
+    saveConfigPartial({ themeMode: mode }).catch((e: Error) => {
+      console.warn("保存主题到配置失败:", e);
+    });
   }, [mode, systemDark]);
+
+  const setMode = (newMode: ThemeMode) => {
+    setModeState(newMode);
+  };
+
+  const setModeFromConfig = (config: { themeMode?: string } | null) => {
+    const newMode = loadModeFromConfig(config);
+    setModeState(newMode);
+  };
 
   // Wails OS theme-change events (all platforms). The callback receives a
   // WailsEvent object; extractEventData unwraps it defensively.
@@ -123,7 +138,7 @@ export function useTheme(): {
         }
       }),
     );
-    return () => offs.forEach((off) => off());
+    return () => { offs.forEach((off) => { off(); }); };
   }, []);
 
   // Browser fallback: keep following prefers-color-scheme changes.
@@ -137,5 +152,5 @@ export function useTheme(): {
     return () => mq.removeEventListener("change", onChange);
   }, []);
 
-  return { mode, systemDark, setMode };
+  return { mode, systemDark, setMode, setModeFromConfig };
 }

@@ -153,6 +153,7 @@ function mockConfig(): AppConfig {
     systemProxy: mockState.sysProxy,
     allowUDP: false,
     downloadProxy: "https://gh-proxy.org/",
+    themeMode: "system",
   };
 }
 
@@ -409,7 +410,14 @@ export async function saveConfig(config: AppConfig): Promise<void> {
     enable_system_proxy: config.systemProxy,
     allow_udp: config.allowUDP,
     download_proxy: config.downloadProxy,
+    theme_mode: config.themeMode,
   });
+}
+
+/** 仅更新部分配置字段（如 theme_mode），避免覆盖其他字段。 */
+export async function saveConfigPartial(patch: Partial<AppConfig>): Promise<void> {
+  const current = await getConfig();
+  await saveConfig({ ...current, ...patch });
 }
 
 export async function getLogs(limit = 200): Promise<LogEntry[]> {

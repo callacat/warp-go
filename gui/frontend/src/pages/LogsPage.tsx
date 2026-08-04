@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { ScrollText, Trash2 } from "lucide-react";
 import { getLogs, isDemoMode } from "../lib/api";
 import { fromLogs, LogEntry } from "../lib/types";
+import { logsTailChanged } from "../lib/logsTail";
 import { Button, Card } from "../components/ui";
 
 const LEVEL_COLOR: Record<LogEntry["level"], string> = {
@@ -25,11 +26,9 @@ export default function LogsPage() {
       try {
         const entries = fromLogs(await getLogs(200));
         if (alive) {
-          setLogs((prev) => {
-            // Only replace when the tail differs (avoids clobbering on no-op polls).
-            if (prev.length === entries.length) return prev;
-            return entries;
-          });
+          setLogs((prev) =>
+            logsTailChanged(prev, entries) ? entries : prev,
+          );
         }
       } catch {
         /* transient poll failure: keep previous logs */

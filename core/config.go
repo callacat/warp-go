@@ -48,6 +48,9 @@ type Config struct {
 	// DialTimeoutSeconds 是边缘拨号总超时（秒）。仅 Android 使用：装配
 	// ctx 的 WithTimeout 值；0 或缺失 = 默认 60s（见 androidDialTimeoutDefault）。
 	DialTimeoutSeconds int `json:"dial_timeout_seconds,omitempty"`
+	// ThemeMode 是界面主题模式：light / dark / system（跟随系统）。
+	// GUI 保存设置时同步写入 config.json，启动时从配置读取并注入前端。
+	ThemeMode string `json:"theme_mode,omitempty"`
 }
 
 // DefaultConfig 返回内置默认值。LoadConfig 以它为基底，JSON 反序列化只覆盖
@@ -62,6 +65,7 @@ func DefaultConfig() *Config {
 		EnableSystemProxy: false,
 		AllowUDP:          false,
 		DownloadProxy:     "https://gh-proxy.org/",
+		ThemeMode:         "system",
 	}
 }
 

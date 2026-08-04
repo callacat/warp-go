@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { Monitor, Moon, Palette, Rocket, RotateCcw, Save, Sun } from "lucide-react";
 import {
   checkUpdate,
@@ -33,14 +33,27 @@ export default function SettingsPage() {
   const [updateInfo, setUpdateInfo] = useState<string | null>(null);
   const [updateUrl, setUpdateUrl] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
-  const { mode, setMode } = useTheme();
+  const { mode, setMode, setModeFromConfig } = useTheme();
+
+  const load = useCallback(async () => {
+    try {
+      // getConfig 已返回 fromConfig 归一化后的 AppConfig，不要再包一层
+      // fromConfig（双重归一化，v0.5.7 与 StatusPage 同源 bug）。
+      const config = await getConfig();
+      setCfg(config);
+      setModeFromConfig(config);
+      setError(null);
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [setModeFromConfig]);
 
   useEffect(() => {
     void isDemoMode().then(setDemo);
     void load();
     getAutostartEnabled().then(setAutostartState).catch(() => {});
     getVersion().then(setVersion).catch(() => {});
-  }, []);
+  }, [load]);
 
   const onCheckUpdate = async () => {
     setChecking(true);
@@ -60,17 +73,6 @@ export default function SettingsPage() {
       setUpdateInfo(`检查失败：${String(e)}`);
     } finally {
       setChecking(false);
-    }
-  };
-
-  const load = async () => {
-    try {
-      // getConfig 已返回 fromConfig 归一化后的 AppConfig，不要再包一层
-      // fromConfig（双重归一化，v0.5.7 与 StatusPage 同源 bug）。
-      setCfg(await getConfig());
-      setError(null);
-    } catch (e) {
-      setError(String(e));
     }
   };
 

@@ -64,6 +64,7 @@ REJECT,geosite:category-ads-all
 direct,geosite:private
 direct,geoip:private
 proxy,geosite:google
+proxy,geoip:google
 proxy,geosite:geolocation-!cn
 proxy,geoip:telegram
 direct,geosite:cn

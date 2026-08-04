@@ -48,6 +48,7 @@ export interface AppConfig {
   systemProxy: boolean;
   allowUDP: boolean;
   downloadProxy: string;
+  themeMode: "light" | "dark" | "system";
 }
 
 export type RuleAction = "proxy" | "direct";
@@ -155,6 +156,9 @@ export function fromConfig(v: unknown): AppConfig {
     systemProxy: o.enable_system_proxy === true || o.systemProxy === true,
     allowUDP: o.allow_udp === true || o.allowUDP === true,
     downloadProxy: str(o.download_proxy ?? o.downloadProxy, "https://gh-proxy.org/"),
+    themeMode: ((o.theme_mode ?? o.themeMode) === "light" || (o.theme_mode ?? o.themeMode) === "dark" || (o.theme_mode ?? o.themeMode) === "system"
+      ? (o.theme_mode ?? o.themeMode)
+      : "system") as "light" | "dark" | "system",
   };
 }
 

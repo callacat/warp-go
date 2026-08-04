@@ -192,7 +192,8 @@ func TestKernelReloadRules(t *testing.T) {
 }
 
 // T4：未命中 → ("", false)（隐式 direct 兜底）；引擎已关闭（Close 后）也返回 ("", false)。
-func TestKernelRouteUnmatched(t *testing.T) {	k, _ := newTestKernel(t)
+func TestKernelRouteUnmatched(t *testing.T) {
+	k, _ := newTestKernel(t)
 	if action, matched := k.Route("other.example", netip.Addr{}); action != "" || matched {
 		t.Errorf("Route(未命中) = (%q, %v)，期望 (\"\", false)", action, matched)
 	}
@@ -262,5 +263,51 @@ func TestKernelNewContextCanceledSkipsDial(t *testing.T) {
 	}
 	if dialCalled {
 		t.Error("ctx 已取消时不应调用拨号工厂")
+	}
+}
+
+// T8：装配完成后，运行期 ctx（background 派生）取消时 Start 返回 nil 且
+// kernel 仍可用——Android 桥 v0.5.20 的修复语义：装配 ctx（60s 拨号超时）
+// 与运行期 ctx 分离，装配超时到期不得静默杀死 TUN 栈（此前直接把带超时的
+// 装配 ctx 传给 Start，60s 后 sing-tun 栈整体关闭但 started 仍 true——
+// 用户看到"VPN 开"却无网络，真机报"use of closed network connection"）。
+func TestKernelStartRuntimeCtxCancelKeepsKernel(t *testing.T) {
+	k, fd := newTestKernel(t)
+
+	// 运行期 ctx：与装配分离，background 派生（模拟 startVpnKernel 的
+	// runCtx 切换）。
+	runCtx, runCancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- k.Start(runCtx) }()
+
+	// 运行中 kernel 可用：Route 正常判定、DialTunnel 正常建流。
+	if action, matched := k.Route("proxy.example", netip.Addr{}); action != "proxy" || !matched {
+		t.Errorf("Route(proxy.example) = (%q, %v)，期望 (\"proxy\", true)", action, matched)
+	}
+	conn, err := k.DialTunnel(context.Background(), "8.7.198.46:443")
+	if err != nil {
+		t.Fatalf("DialTunnel 失败：%v", err)
+	}
+	_ = conn.Close()
+	if n := fd.callCount(); n != 1 {
+		t.Errorf("DialTunnel 调用次数 = %d，期望 1", n)
+	}
+
+	// 取消运行期 ctx：Start 返回 nil（不报错），但 kernel 未被拆除
+	// （拆除是 Stop/Close 的职责）——Route 仍可用。
+	runCancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Start 返回错误：%v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Start 未在运行期 ctx 取消后返回")
+	}
+	if action, matched := k.Route("proxy.example", netip.Addr{}); action != "proxy" || !matched {
+		t.Errorf("ctx 取消后 Route 不可用：(%q, %v)，期望 kernel 保持可用", action, matched)
+	}
+	if fd.isClosed() {
+		t.Error("ctx 取消不应关闭隧道拨号器（拆除是 Close 的职责）")
 	}
 }
