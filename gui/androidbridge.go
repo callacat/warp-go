@@ -109,6 +109,7 @@ import "C"
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -406,12 +407,25 @@ func startVpnKernel(ctx context.Context, cancel context.CancelFunc, sandboxDir s
 	androidRuntime.vpn = vpn
 	androidRuntime.mu.Unlock()
 
+	// 异步启动 kernel/vpn。recover 兜底（v0.5.16 教训）：sing 库会直接
+	// panic（如 udpnat.New 对 timeout==0），goroutine 内 panic 将 SIGABRT
+	// 拖垮进程——recover 后走 failStart 正常回滚，而不是崩溃。
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				rollback("kernel panic", fmt.Errorf("panic: %v", r))
+			}
+		}()
 		if err := kernel.Start(ctx); err != nil {
 			rollback("kernel", err)
 		}
 	}()
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				rollback("TUN 栈 panic", fmt.Errorf("panic: %v", r))
+			}
+		}()
 		if err := vpn.Start(ctx); err != nil {
 			rollback("TUN 栈", err)
 		}

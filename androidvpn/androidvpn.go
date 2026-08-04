@@ -103,12 +103,19 @@ func (v *Vpn) Start(ctx context.Context) error {
 	// /32 单地址（WARP 只分配一个 IP），必然报 "need one more IPv4 address
 	// in first prefix for system stack"（v0.5.15 真机：TUN 栈创建失败）。
 	// NewGVisor 只取前缀首个地址、不要求 next，与 /32 前缀匹配。
+	//
+	// UDPTimeout/ICMPTimeout 必须显式设置（v0.5.16 真机 SIGABRT 根因）：
+	// sing v0.8.0 的 udpnat.New 对 timeout==0 直接 panic("invalid timeout")
+	// 而非返回错误（经 NewUDPForwarder → udpnat.New 触发，异步 goroutine 内
+	// panic 拖垮整个进程）。取值对齐 sing-box 默认：UDP NAT 5m / ICMP 10s。
 	stack, err := tun.NewStack("gvisor", tun.StackOptions{
-		Context:    v.ctx,
-		Tun:        t,
-		TunOptions: base,
-		Handler:    v,
-		Logger:     stdLogger{},
+		Context:     v.ctx,
+		Tun:         t,
+		TunOptions:  base,
+		UDPTimeout:  5 * time.Minute,
+		ICMPTimeout: 10 * time.Second,
+		Handler:     v,
+		Logger:      stdLogger{},
 	})
 	if err != nil {
 		t.Close()
