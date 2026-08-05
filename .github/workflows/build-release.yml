@@ -357,9 +357,12 @@ jobs:
           grep -qE 'int +nativeSetTimeZone *\(String tz\)' build/android/app/src/main/java/com/wails/app/MainActivity.java
           grep -qE 'Java_com_wails_app_MainActivity_nativeSetTimeZone.*C\.jint' androidbridge.go
 
-      # assembleRelease 用 debug keystore 兜底签名（app/build.gradle：
-      # signingConfig hasKeystore ? signingConfigs.release : signingConfigs.debug），
-      # 无需仓库 secrets；产物可安装。AAB 同理（Play 上传需正式 keystore，此处仅作产物）。
+      # assembleRelease 用仓库内固定的 warp-release.p12 签名（app/build.gradle
+      # signingConfigs.release 默认引用该 p12，无需仓库 secrets；仅在设置
+      # ANDROID_KEYSTORE_* 环境变量时才用环境 keystore）。固定签名保证每次构建
+      # 的 APK/AAB 签名一致，可覆盖安装升级（v0.5.23：此前无 keystore 时 release
+      # 兜底 debug keystore，runner 每次现生成 → 签名不同 → 覆盖安装必须卸载）。
+      # 产物可直接安装；AAB 同理（Play 上传需自己的正式 keystore，此处仅作产物）。
       - name: 构建 Release APK 与 AAB
         working-directory: gui/build/android
         shell: bash

@@ -3,6 +3,31 @@
 本项目所有值得记录的变更。格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v0.5.23] - 2026-08-05
+
+### 修复
+
+- **Android 开启后无法访问外网（隧道黑洞后永不重连，v0.5.21 回归）**：用户日志
+  `H3 CONNECT 69.171.235.22:443 失败：读取 CONNECT 响应失败：http3: parsing frame
+  failed: deadline exceeded` 反复出现但**从不触发重连**（境内直连正常、境外全
+  超时，重启应用才恢复）。根因：v0.5.21 把 CONNECT 超时的重连判定改为"**窗口内
+  3 个不同目标**失败才重连"，用 `map[string]struct{}` 去重——浏览器对少数站点
+  并发重试时**同一目标反复失败在 distinct 去重下永不累计**（用户日志 2 目标 ×
+  各 2 次 = distinct 2 < 3），QUIC 连接进入黑洞态后外网永久不通。修复：
+  `noteProgressingCONNECTFailure` 改为**计数语义**（`map[string]int`，窗口内
+  累计失败次数），`connectFailureTargets` 从 3 收紧到 2；单目标首次失败仍不
+  重连（保留 v0.5.21 的"保护共享连接"场景），同/异目标窗口内累计 2 次即触发
+  `establishCONNECT` 的 retire + 重连恢复。新增回归测试
+  `TestConnectFailureSameTargetTwiceTriggersReconnect`（同目标第 2 次失败触发
+  重连）、`TestConnectFailureSuccessResetsWindow`（成功 CONNECT 清空失败窗口）
+  及更新 v0.5.21 窗口测试。
+- **Android 每次构建的 APK 签名不一致（覆盖安装必须卸载重装）**：CI
+  `assembleRelease` 无 keystore 时兜底用 **debug keystore**，GitHub runner 每次
+  现生成 → 每次构建签名不同。修复：仓库内置固定 `gui/build/android/app/
+  warp-release.p12`（openssl 生成 PKCS12，密钥与密码随仓库公开——仅保证覆盖
+  升级签名一致，非 Play 商店上传密钥），build.gradle `release` signingConfig
+  默认引用它，设 `ANDROID_KEYSTORE_*` 环境变量可覆盖为正式 keystore。
+
 ## [v0.5.22] - 2026-08-05
 
 ### 修复
