@@ -670,10 +670,15 @@ func (b *connBundle) receivedPackets() uint64 {
 }
 
 // connectFailureRequiresReconnect applies the transport-vs-target distinction
-// to a CONNECT exchange failure. No received QUIC packet during the whole
-// exchange is strong evidence of a path blackhole and recovers immediately. If
-// the path made progress, require several distinct target failures in one short
-// window before declaring the shared H3 session bad.
+// to a CONNECT exchange failure. A non-timeout error (e.g. the socket was
+// closed) is connection-level and recovers immediately. For a timeout, require
+// several distinct targets failing in one short window before declaring the
+// shared H3 session bad: a single unreachable target (e.g. an IPv6 address on
+// an IPv4-only physical network) times out with no new QUIC packets during the
+// exchange — that is target-level failure, not a path blackhole, and must not
+// tear down the shared connection (v0.5.20 real-device: one IPv6 target's
+// CONNECT timeout retired the bundle and every concurrent flow died with
+// "use of closed network connection").
 func (b *connBundle) connectFailureRequiresReconnect(err, callerErr error, target string, packetsBefore uint64) bool {
 	if !shouldReconnectH3(err, callerErr) {
 		return false
@@ -681,9 +686,14 @@ func (b *connBundle) connectFailureRequiresReconnect(err, callerErr error, targe
 	if !isTimeout(err) {
 		return true
 	}
-	if b.receivedPackets() <= packetsBefore {
-		return true
-	}
+	// Timeout: no QUIC packet progress during the exchange used to be treated
+	// as strong evidence of a path blackhole and recovered immediately. But a
+	// CONNECT exchange is bounded by connectExchangeTimeout (10s), the same
+	// order as KeepAlivePeriod (10s), so a healthy-but-unreachable target also
+	// produces "timeout, no new packets". Distinguish by target: only when
+	// several DISTINCT targets fail in one window is the shared connection
+	// declared bad (connectFailureTargets). This keeps a single unreachable
+	// target scoped to its own stream.
 	return b.noteProgressingCONNECTFailure(target, time.Now())
 }
 

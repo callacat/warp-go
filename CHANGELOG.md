@@ -3,6 +3,30 @@
 本项目所有值得记录的变更。格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v0.5.21] - 2026-08-05
+
+### 修复
+
+- **Android 开启后无网络（单目标 CONNECT 超时污染共享连接，v0.5.20 回归）**：
+  真机日志 `HTTP/3 CONNECT 交换失败（读取 CONNECT 响应失败：http3: parsing
+  frame failed: deadline exceeded），淘汰当前连接并重连` + `[tun] 拨号失败
+  [2001::1]:443 ... use of closed network connection`。根因：模拟器物理网络
+  **IPv4-only**（wlan0 无全局 IPv6、`ip -6 route default` 空），app 发往 IPv6
+  目标（如 `[2001::1]:443`）经 TUN 全量路由进隧道后 CONNECT 超时。而
+  `tunnel.connectFailureRequiresReconnect` 对"超时 + 交换期间无新包"**立即判定
+  路径黑洞** → `retireConnection` 关闭共享 QUIC 连接 → 其他并发流撞上关闭的
+  socket → `use of closed network connection`。但 `connectExchangeTimeout`
+  （10s）与 `KeepAlivePeriod`（10s）同量级——健康但不可达的目标同样表现为
+  "超时无新包"，无法据此区分目标级失败与路径黑洞。修复：超时统一走
+  **failure-window**（`noteProgressingCONNECTFailure`，30s 窗口内 3 个**不同**
+  目标才触发重连），单个不可达目标只 fail 自己的流、共享连接保留；真正路径
+  黑洞（多目标陆续超时）仍能检出。新增 4 个回归单测（单目标不重连/同目标不
+  累计/3 不同目标重连/窗口过期重置）。
+- **注（方案 C 澄清）**：Android 边缘已是 IPv4（`ResolveEdgeAddrs` 无旗标回落
+  `"4"`→`162.159.198.2`），`[2001::1]:443` 是**目标**而非边缘；本地连 IPv4
+  边缘、无法预判边缘对目标的可达性，故"本地地址族过滤边缘候选"不适用——
+  failure-window 已决定性修复单目标污染，无需单独地址族过滤。
+
 ## [v0.5.20] - 2026-08-05
 
 ### 修复
@@ -13,33 +37,8 @@
   或切页才更新）。修复：改为比较**尾条**（time+level+msg），无变化时不触发
   重渲染、有变化即刷新；抽出纯函数 `logsTailChanged` + 8 个回归单测
   （含"200 上限后长度不变但尾条变化必须刷新"关键场景）。
-- **Android 开启后无网络（装配超时杀死 TUN 栈）**：真机日志 `[tun] 拨号失败
-  8.7.198.46:443 ... use of closed network connection`。根因：`startVpnKernel`
-  把**带 60s 拨号超时的装配 ctx** 同时用作 `kernel.Start(ctx)`/`vpn.Start(ctx)`
-  的**运行期生命周期 ctx**——sing-tun 栈内部 `context.WithCancel(ctx)` 派生栈
-  生命周期，装配超时到期（移动网络拨号耗时接近 60s 是常态）时栈随 ctx 取消
-  整体关闭，但 `androidRuntime.started` 仍为 true，用户看到"VPN 开"却无网络；
-  栈关闭的同时共享 QUIC bundle 被拆，并发 CONNECT 撞上关闭的 UDP socket 报
-  `use of closed network connection`。修复：装配完成后切换为 background 派生的
-  **运行期 ctx**（生命周期只由 `nativeStopVpn` 的 cancel 控制），装配计时器
-  不再约束运行；ctx 身份校验 + 状态写入 + runCtx 替换合并为**单临界区**，杜绝
-  `nativeStopVpn` 在两次加锁之间插入导致实例复活/runCancel 泄漏；`rollback`
-  增加 `current` 守卫，过期实例失败不再误拆新实例的 Java 服务。回归测试
-  `TestKernelStartRuntimeCtxCancelKeepsKernel`（运行期 ctx 取消后 Start 返回
-  nil 但 kernel 保持可用、拨号器不关闭）。
-
-## [v0.5.20] - 2026-08-05
-
-### 修复
-
-- **Windows GUI 日志页不自动刷新**：日志页每秒轮询 `GetLogs(200)`，但去重逻辑只比
-  `prev.length === entries.length`——一旦日志达到 200 条上限，新日志顶替最旧条目而
-  长度不变，页面从此冻结（用户反馈"必须点清空或切页才刷新"）。修复：改为比较尾条
-  （time+level+msg）判定内容变化（`logsTailChanged` 纯函数），长度不变但内容变化时
-  正确刷新；无变化轮询不触发重渲染。新增 `logsTail.test.ts` 8 用例（含"200 上限
-  轮询冻结"回归场景）。
 - **Android 开启后无网络（装配 ctx 泄漏进运行期）**：真机日志 `[tun] 拨号失败
-  ...：H3 CONNECT ... 失败：... write udp [::]:60687->...:443: use of closed network
+  ...：H3 CONNECT ... 失败：... make udp [::]:60687->...:443: use of closed network
   connection`。根因：`startVpnKernel` 把带 60s 拨号超时的装配 ctx 继续传给
   `kernel.Start(ctx)`/`vpn.Start(ctx)` 作**运行期生命周期 ctx**——移动网络下拨号
   接近 60s 时（或装配超时到期）sing-tun 栈随 ctx 取消整体关闭，但 `started` 仍
