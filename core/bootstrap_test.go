@@ -27,6 +27,19 @@ func TestInitDefaultsBootstraps(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// 预写空 GEO 文件跳过真实下载：CI 无外网/慢网下 4MB×2 下载（超时
+	// 5min）会超过下方 30s 等待导致测试挂（GEO 下载路径由 route 包单测
+	// 覆盖；此处只验证引导全链路）。空文件使 geoDataPresent 为真 → 跳过
+	// 下载；后续引擎加载失败仅降级 rules-only（非致命）。
+	if err := os.MkdirAll(geoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"geosite.dat", "geoip-lite.dat"} {
+		if err := os.WriteFile(filepath.Join(geoDir, name), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
 	s := New(Options{ConfigPath: cfgPath, StateFile: filepath.Join(dir, "reg.json")})
 
 	done := make(chan error, 1)
