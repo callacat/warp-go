@@ -110,9 +110,15 @@ const (
 	socksSetupTimeout      = 35 * time.Second
 	streamOpenTimeout      = 10 * time.Second
 	connectFailureWindow   = 30 * time.Second
-	connectFailureTargets  = 3
-	reconnectRetryInitial  = 100 * time.Millisecond
-	reconnectRetryMax      = 5 * time.Second
+	// connectFailureTargets 是窗口内的失败次数阈值（v0.5.23 改为计数而非
+	// distinct 目标数）：浏览器对少数站点并发重试时，同一目标反复失败在
+	// distinct 去重下永不累计（v0.5.21 的 "3 个不同目标" 判定 → 隧道黑洞后
+	// 外网永久不通，用户日志 2 个目标 × 各 2 次 = distinct 2 < 3）。计数语义
+	// 下：单目标失败 1 次不重连（保护共享连接，保留 v0.5.21 场景），同/异
+	// 目标累计 2 次即触发 retire + 重连恢复。
+	connectFailureTargets = 2
+	reconnectRetryInitial = 100 * time.Millisecond
+	reconnectRetryMax     = 5 * time.Second
 )
 
 // connBundle groups everything owned by a single QUIC connection attempt so the
@@ -126,11 +132,13 @@ type connBundle struct {
 	closeOnce sync.Once
 	healthMu  sync.Mutex
 
-	// A live QUIC path can coexist with a wedged H3 session. Track distinct
-	// targets that timed out in one short window so a single unreachable target
-	// doesn't cause collateral reconnects, while session-wide failures still do.
+	// A live QUIC path can coexist with a wedged H3 session. Track CONNECT
+	// timeouts in one short window so a single unreachable target doesn't cause
+	// collateral reconnects, while repeated failures — same or distinct target
+	// — still detect a session-wide blackhole (v0.5.23: distinct-only counting
+	// never reached the threshold for browser-style retries on one host).
 	failureSince   time.Time
-	failureTargets map[string]struct{}
+	failureTargets map[string]int
 }
 
 // close abortively tears down the bundle. Safe on a nil receiver, concurrent
@@ -672,13 +680,15 @@ func (b *connBundle) receivedPackets() uint64 {
 // connectFailureRequiresReconnect applies the transport-vs-target distinction
 // to a CONNECT exchange failure. A non-timeout error (e.g. the socket was
 // closed) is connection-level and recovers immediately. For a timeout, require
-// several distinct targets failing in one short window before declaring the
-// shared H3 session bad: a single unreachable target (e.g. an IPv6 address on
-// an IPv4-only physical network) times out with no new QUIC packets during the
-// exchange — that is target-level failure, not a path blackhole, and must not
-// tear down the shared connection (v0.5.20 real-device: one IPv6 target's
-// CONNECT timeout retired the bundle and every concurrent flow died with
-// "use of closed network connection").
+// several failures in one short window before declaring the shared H3 session
+// bad: a single unreachable target (e.g. an IPv6 address on an IPv4-only
+// physical network) times out with no new QUIC packets during the exchange —
+// that is target-level failure, not a path blackhole, and must not tear down
+// the shared connection (v0.5.21 real-device: one IPv6 target's CONNECT timeout
+// retired the bundle and every concurrent flow died with "use of closed network
+// connection"). Distinct targets were originally required, but browser retries
+// hammer one host, so counting failures (v0.5.23) detects the blackhole without
+// resurrecting the collateral teardown (see noteProgressingCONNECTFailure).
 func (b *connBundle) connectFailureRequiresReconnect(err, callerErr error, target string, packetsBefore uint64) bool {
 	if !shouldReconnectH3(err, callerErr) {
 		return false
@@ -686,26 +696,33 @@ func (b *connBundle) connectFailureRequiresReconnect(err, callerErr error, targe
 	if !isTimeout(err) {
 		return true
 	}
-	// Timeout: no QUIC packet progress during the exchange used to be treated
-	// as strong evidence of a path blackhole and recovered immediately. But a
-	// CONNECT exchange is bounded by connectExchangeTimeout (10s), the same
-	// order as KeepAlivePeriod (10s), so a healthy-but-unreachable target also
-	// produces "timeout, no new packets". Distinguish by target: only when
-	// several DISTINCT targets fail in one window is the shared connection
-	// declared bad (connectFailureTargets). This keeps a single unreachable
-	// target scoped to its own stream.
 	return b.noteProgressingCONNECTFailure(target, time.Now())
 }
 
+// noteProgressingCONNECTFailure counts a CONNECT timeout towards the
+// failure-window threshold (connectFailureTargets failures in
+// connectFailureWindow). Counting — not distinct-target de-duplication —
+// matters because a browser retries the same few hosts concurrently: with
+// distinct-only accounting, repeated failures of one host never reach the
+// threshold and a blackholed shared session is never recovered (v0.5.23
+// real-device: 2 targets × 2 failures each = distinct 2 < 3, foreign traffic
+// dead until app restart). A single failure still stays scoped to its stream;
+// the second failure in the window (same or different target) crosses the
+// threshold, after which establishCONNECT retires the dead bundle and
+// reconnects.
 func (b *connBundle) noteProgressingCONNECTFailure(target string, now time.Time) bool {
 	b.healthMu.Lock()
 	defer b.healthMu.Unlock()
 	if b.failureSince.IsZero() || now.Sub(b.failureSince) > connectFailureWindow {
 		b.failureSince = now
-		b.failureTargets = make(map[string]struct{})
+		b.failureTargets = make(map[string]int)
 	}
-	b.failureTargets[target] = struct{}{}
-	return len(b.failureTargets) >= connectFailureTargets
+	b.failureTargets[target]++
+	var total int
+	for _, n := range b.failureTargets {
+		total += n
+	}
+	return total >= connectFailureTargets
 }
 
 func (b *connBundle) noteCONNECTSuccess() {
@@ -1153,6 +1170,13 @@ func (c *MasqueClient) establishCONNECT(ctx context.Context, req *http.Request, 
 			return nil, nil, nil, err
 		}
 
+		// The threshold (connectFailureTargets failures in the window) has been
+		// crossed, so the shared session is likely blackholed. retireConnection
+		// removes it from service and aborts it — new requests then join the
+		// reconnect flight instead of burning another CONNECT timeout on the
+		// dead session. Retiring only happens here, after the failure threshold,
+		// so a single unreachable target never kills the connection under
+		// healthy flows (v0.5.20 collateral-teardown regression).
 		retired := c.retireConnection(bundle)
 		if attempt != 0 {
 			// The retry budget is exhausted, but leave no connection that this
@@ -1404,7 +1428,7 @@ type dohConn struct {
 
 	healthMu       sync.Mutex
 	failureSince   time.Time
-	failureTargets map[string]struct{}
+	failureTargets map[string]int
 }
 
 func (d *dohConn) close() {
@@ -1439,10 +1463,14 @@ func (d *dohConn) noteProgressingQueryTimeout(target string, now time.Time) bool
 	defer d.healthMu.Unlock()
 	if d.failureSince.IsZero() || now.Sub(d.failureSince) > connectFailureWindow {
 		d.failureSince = now
-		d.failureTargets = make(map[string]struct{})
+		d.failureTargets = make(map[string]int)
 	}
-	d.failureTargets[target] = struct{}{}
-	return len(d.failureTargets) >= connectFailureTargets
+	d.failureTargets[target]++
+	var total int
+	for _, n := range d.failureTargets {
+		total += n
+	}
+	return total >= connectFailureTargets
 }
 
 func (d *dohConn) noteQuerySuccess() {
