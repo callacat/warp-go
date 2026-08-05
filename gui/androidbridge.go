@@ -142,7 +142,12 @@ var androidRuntime struct {
 	ctx     context.Context
 	cancel  context.CancelFunc
 	started bool
-	lastErr string
+	// startTime 是 VPN 内核装配成功（写入 androidRuntime.kernel）的时刻。
+	// GUI GetStatus 的 Android 分支读它填充状态页"启动时间"——此前读
+	// Server.kernel.StartTime（Android 上 Server 从未 Start → 零值，见
+	// v0.5.22 修复"状态页启动时间不显示"）。
+	startTime time.Time
+	lastErr   string
 }
 
 // androidCtl 持有反向 JNI 桥的 MainActivity 全局引用与方法 ID。
@@ -434,6 +439,9 @@ func startVpnKernel(ctx context.Context, cancel context.CancelFunc, sandboxDir s
 	androidRuntime.vpn = vpn
 	androidRuntime.ctx = runCtx
 	androidRuntime.cancel = runCancel
+	if androidRuntime.startTime.IsZero() {
+		androidRuntime.startTime = time.Now()
+	}
 	androidRuntime.mu.Unlock()
 
 	// 异步启动 kernel/vpn。recover 兜底（v0.5.16 教训）：sing 库会直接
@@ -742,6 +750,22 @@ func Java_com_wails_app_MainActivity_nativeSetTimeZone(env *C.JNIEnv, obj C.jobj
 		log.Printf("⚠ 无法加载时区 %q：%v", id, err)
 	}
 	return 0
+}
+
+// androidVpnStartTime 返回 VPN 内核装配成功的时间（零值 = 从未运行）。
+func androidVpnStartTime() time.Time {
+	androidRuntime.mu.Lock()
+	defer androidRuntime.mu.Unlock()
+	return androidRuntime.startTime
+}
+
+// androidVpnKernel 返回当前运行的 VPN 内核（nil = 未运行）。GUI GetStatus
+// 的 Android 分支从它读真实分流统计（Stats）与规则数，而非从未启动的
+// Server.kernel（nil → 全 0，v0.5.22 修复"流量统计无变化"）。
+func androidVpnKernel() *core.Kernel {
+	androidRuntime.mu.Lock()
+	defer androidRuntime.mu.Unlock()
+	return androidRuntime.kernel
 }
 
 // androidVpnRunning 报告 VPN 是否运行中（androidRuntime 状态）。

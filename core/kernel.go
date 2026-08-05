@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"time"
 
 	"warp/registration"
 	"warp/route"
@@ -75,9 +76,10 @@ type Kernel struct {
 	dial   dialer        // 隧道拨号器（生产 = *tunnel.MasqueClient）
 
 	mu         sync.Mutex
-	started    bool // Start 已进入生命周期（阻塞等待）
-	closed     bool // Close 已执行（幂等）
-	stopClosed bool // stopCh 已关闭（Stop/Close 触发）
+	started    bool      // Start 已进入生命周期（阻塞等待）
+	startTime  time.Time // Start 首次进入的壁钟时间（StartedAt 数据源）
+	closed     bool      // Close 已执行（幂等）
+	stopClosed bool      // stopCh 已关闭（Stop/Close 触发）
 	stopCh     chan struct{}
 }
 
@@ -161,6 +163,7 @@ func (k *Kernel) Start(ctx context.Context) error {
 		return nil
 	}
 	k.started = true
+	k.startTime = time.Now()
 	k.mu.Unlock()
 	defer func() {
 		k.mu.Lock()
@@ -243,6 +246,42 @@ func (k *Kernel) AssignedIPv4() netip.Addr {
 	}
 	a, _ := netip.ParseAddr(k.regData.AssignedIPv4)
 	return a
+}
+
+// Stats 返回分流引擎的命中统计（proxy/direct/reject/miss 计数）。
+// Android 状态页从此读真实统计——GUI GetStatus 的 Android 分支从
+// androidRuntime.kernel（VpnService 驱动的内核）取数，而非从未启动的
+// Server.kernel（nil → 全 0，v0.5.22 修复"流量统计无变化"）。
+func (k *Kernel) Stats() route.Stats {
+	e := k.engine.get()
+	if e == nil {
+		return route.Stats{}
+	}
+	return e.Stats()
+}
+
+// Rules 返回分流引擎当前规则数（GUI 状态页"规则条数"数据源）。
+// 与 Stats 同属 Android 状态页修复：从真实内核读，而非从未启动的
+// Server.kernel（无规则、恒 0）。
+func (k *Kernel) Rules() int {
+	e := k.engine.get()
+	if e == nil {
+		return 0
+	}
+	return len(e.Rules())
+}
+
+// StartedAt 返回内核启动时间。Android 桥在装配成功（kernel 写入
+// androidRuntime）时自行记录真实开始时间（见 androidbridge.go startTime）并
+// 用它填充状态页；此处返回零值供 Server 语义区分（Server.Start 才写入）。
+// 未 Start 时返回零值 time.Time。
+func (k *Kernel) StartedAt() time.Time {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if !k.started {
+		return time.Time{}
+	}
+	return k.startTime
 }
 
 // AssignedIPv6 返回 WARP 分配的 IPv6 地址；未分配 / 非法时返回零值 netip.Addr。

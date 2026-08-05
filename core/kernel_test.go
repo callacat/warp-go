@@ -311,3 +311,40 @@ func TestKernelStartRuntimeCtxCancelKeepsKernel(t *testing.T) {
 		t.Error("ctx 取消不应关闭隧道拨号器（拆除是 Close 的职责）")
 	}
 }
+
+// T9：Kernel.Stats / StartedAt 访问器——Android 状态页修复的底层契约：
+// GUI GetStatus 的 Android 分支从 androidRuntime.kernel 读统计与启动时间，
+// 不再读从未启动的 Server.kernel（nil → Stats 全 0、StartTime 零值——
+// v0.5.22 修复"状态页启动时间不显示 + 流量统计无变化"）。统计经 Match 累加
+// 后必须可读；未 Start 时 StartedAt 为零值（Android 桥自行记录真实开始时间）。
+func TestKernelStatsAccessors(t *testing.T) {
+	k, _ := newTestKernel(t)
+
+	// 未 Start：StartedAt 零值（Server 语义），Stats 全 0。
+	if !k.StartedAt().IsZero() {
+		t.Errorf("未 Start 时 StartedAt() = %v，期望零值", k.StartedAt())
+	}
+	st := k.Stats()
+	if st.ProxyHits != 0 || st.DirectHits != 0 || st.Misses != 0 || st.RejectedHits != 0 {
+		t.Errorf("未匹配时 Stats() = %+v，期望全 0", st)
+	}
+
+	// 命中 proxy 规则 → ProxyHits 累加。
+	_, _ = k.Route("www.proxy.example", netip.Addr{})
+	st = k.Stats()
+	if st.ProxyHits != 1 {
+		t.Errorf("命中 proxy 后 ProxyHits = %d，期望 1", st.ProxyHits)
+	}
+	// 命中 direct 规则 → DirectHits 累加。
+	_, _ = k.Route("direct.example", netip.Addr{})
+	st = k.Stats()
+	if st.DirectHits != 1 {
+		t.Errorf("命中 direct 后 DirectHits = %d，期望 1", st.DirectHits)
+	}
+	// 未命中 → Misses 累加（引擎层返回 matched=false）。
+	_, _ = k.Route("other.example", netip.Addr{})
+	st = k.Stats()
+	if st.Misses != 1 {
+		t.Errorf("未命中后 Misses = %d，期望 1", st.Misses)
+	}
+}

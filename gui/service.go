@@ -157,6 +157,17 @@ func (s *Service) GetStatus() core.Status {
 		if e := androidVpnLastError(); e != "" && st.LastError == "" {
 			st.LastError = e
 		}
+		// 启动时间与分流统计也从真实内核取：Server.kernel 在 Android 永不
+		// 启动（startTime 零值、engine nil → Stats 全 0），此前状态页"启动
+		// 时间 —"且流量统计卡恒 0（v0.5.22 修复）。androidRuntime.kernel
+		// 是 VpnService 驱动的真实内核，其 engine 有实际命中计数。
+		if st.StartTime.IsZero() {
+			st.StartTime = androidVpnStartTime()
+		}
+		if k := androidVpnKernel(); k != nil {
+			st.Stats = k.Stats()
+			st.RulesCount = len(k.Rules())
+		}
 	}
 	s.mu.Lock()
 	if s.startErr != nil && st.LastError == "" {

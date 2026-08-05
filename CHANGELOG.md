@@ -3,6 +3,22 @@
 本项目所有值得记录的变更。格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v0.5.22] - 2026-08-05
+
+### 修复
+
+- **Android 状态页"启动时间不显示 + 流量统计无变化"**：`Service.GetStatus` 的
+  Android 分支只覆盖了 `State`/`LastError`，而 `StartTime`/`Stats`/`RulesCount`
+  仍来自 `Server.Status()`——但 **Android 上 `Server.kernel` 永不启动**
+  （SOCKS 内核在 Android 由 VpnService 驱动，真实内核在 `androidRuntime.kernel`）。
+  于是 `StartTime` 恒为零值（Server 从未 Start）、`Stats` 全 0（`s.kernel` 为
+  nil）、`RulesCount` 恒 0。用户误判为"内核没真正运行"（实际 tun0 在转发，只
+  是状态页数据源脱节）。修复：`core.Kernel` 新增 `Stats()`/`Rules()`/`StartedAt()`
+  访问器；`androidRuntime` 记录装配成功时刻 `startTime`；GetStatus Android 分支
+  从 `androidRuntime.kernel` 读真实统计与规则数、从 `androidRuntime.startTime`
+  填启动时间。新增 `TestKernelStatsAccessors` 回归（proxy/direct/miss 命中计数、
+  未 Start 时 StartedAt 零值）。
+
 ## [v0.5.21] - 2026-08-05
 
 ### 修复
