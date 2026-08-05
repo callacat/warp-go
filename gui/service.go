@@ -166,7 +166,7 @@ func (s *Service) GetStatus() core.Status {
 		}
 		if k := androidVpnKernel(); k != nil {
 			st.Stats = k.Stats()
-			st.RulesCount = len(k.Rules())
+			st.RulesCount = k.Rules()
 		}
 	}
 	s.mu.Lock()
