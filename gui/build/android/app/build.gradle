@@ -35,19 +35,28 @@ android {
         }
     }
 
-    def keystoreFile = System.getenv("ANDROID_KEYSTORE_FILE")
-    def hasKeystore = keystoreFile != null && !keystoreFile.trim().isEmpty()
+    // 签名一致性（v0.5.23）：默认用仓库内固定的 warp-release.p12（PKCS12，
+    // openssl 生成的测试/分发密钥，公钥与密码随仓库公开——仅保证安装覆盖升级
+    // 的签名一致，非 Play 商店上传密钥）。此前无 keystore 时 release 兜底用
+    // debug keystore，GitHub runner 每次现生成 → 每次构建签名不同 → 覆盖安装
+    // 必须卸载重装。Play 商店上传需自己的正式 keystore：设
+    // ANDROID_KEYSTORE_FILE/PASSWORD/KEY_ALIAS/KEY_PASSWORD 环境变量覆盖。
+    def envKeystore = System.getenv("ANDROID_KEYSTORE_FILE")
+    def hasEnvKeystore = envKeystore != null && !envKeystore.trim().isEmpty()
 
     signingConfigs {
-        // A real keystore can be provided via environment variables; without
-        // one, release builds are signed with the debug keystore so they can
-        // be installed for testing (not suitable for Play Store uploads).
         release {
-            if (hasKeystore) {
-                storeFile file(keystoreFile)
+            if (hasEnvKeystore) {
+                storeFile file(envKeystore)
                 storePassword System.getenv("ANDROID_KEYSTORE_PASSWORD")
                 keyAlias System.getenv("ANDROID_KEY_ALIAS")
                 keyPassword System.getenv("ANDROID_KEY_PASSWORD")
+            } else {
+                storeFile file("warp-release.p12")
+                storeType "PKCS12"
+                storePassword "warp123456"
+                keyAlias "warp-android"
+                keyPassword "warp123456"
             }
         }
     }
@@ -56,7 +65,7 @@ android {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
-            signingConfig hasKeystore ? signingConfigs.release : signingConfigs.debug
+            signingConfig signingConfigs.release
         }
         debug {
             debuggable true
