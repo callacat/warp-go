@@ -178,6 +178,9 @@ public class WarpVpnService extends VpnService {
         builder.setBlocking(true);
         builder.addRoute("0.0.0.0", 0);
         builder.addRoute("::", 0);
+        // DNS 指向 TUN 内拦截服务器（Go 侧 androidvpn.DNSInterceptAddr，
+        // v0.5.24）：查询经隧道 DoH 解析，返回边缘网络视图可达的 IP。
+        builder.addDnsServer("198.18.0.1");
 
         addAddress(builder, ipv4);
         addAddress(builder, ipv6);

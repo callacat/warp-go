@@ -333,7 +333,7 @@ func (s *Service) SaveRules(rulesText string) error {
 	if err := atomicWriteFile(rulesPath, []byte(rulesText)); err != nil {
 		return fmt.Errorf("写入规则文件失败：%w", err)
 	}
-	// 触发引擎重载（文件变更热重载会自行发现；显式调用保证立即生效）。
+	// 触发引擎重载（规则文件热重载会自行发现；显式调用保证立即生效）。
 	_ = srv.ReloadRules()
 	return nil
 }
@@ -550,7 +550,7 @@ func (s *Service) GetConfig() core.Config {
 	return *core.DefaultConfig()
 }
 
-// SaveConfig 校验并保存配置；config.json 热重载自动应用。
+// SaveConfig 校验并保存配置；写入即生效（内存快照同步），无需重启。
 func (s *Service) SaveConfig(cfg core.Config) error {
 	srv, err := s.serverInstance()
 	if err != nil {

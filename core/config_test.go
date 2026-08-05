@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"warp/route"
 )
@@ -212,87 +211,5 @@ func TestDownloadProxy(t *testing.T) {
 	// 非 GitHub URL 不加速。
 	if got := cfg.AccelerateURL("https://example.com/x.txt"); got != "https://example.com/x.txt" {
 		t.Errorf("AccelerateURL(非GitHub) = %q，应原样", got)
-	}
-}
-
-// TestWatchConfigReload 验证文件变更（mtime 或内容）触发 onReload 回调。
-func TestWatchConfigReload(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.json")
-	cfg0 := DefaultConfig()
-	if err := WriteConfig(path, cfg0); err != nil {
-		t.Fatalf("WriteConfig 失败：%v", err)
-	}
-
-	reloaded := make(chan *Config, 1)
-	stop, err := WatchConfig(path, func(cfg *Config, err error) {
-		if err != nil {
-			t.Errorf("热重载回调收到错误：%v", err)
-			return
-		}
-		reloaded <- cfg
-	})
-	if err != nil {
-		t.Fatalf("WatchConfig 失败：%v", err)
-	}
-	defer stop()
-
-	// 修改配置（写不同内容）。
-	cfg1 := DefaultConfig()
-	cfg1.ListenAddr = "127.0.0.1:50000"
-	// 等一个轮询周期再写，保证 mtime 变化可见。
-	time.Sleep(2100 * time.Millisecond)
-	if err := WriteConfig(path, cfg1); err != nil {
-		t.Fatalf("改写配置失败：%v", err)
-	}
-
-	select {
-	case cfg := <-reloaded:
-		if cfg.ListenAddr != "127.0.0.1:50000" {
-			t.Errorf("热重载 ListenAddr = %q，期望 127.0.0.1:50000", cfg.ListenAddr)
-		}
-	case <-time.After(6 * time.Second):
-		t.Fatal("配置变更后 6 秒内未触发热重载")
-	}
-}
-
-// TestWatchConfigStop 验证 stop 后不再触发回调。
-func TestWatchConfigStop(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.json")
-	if err := WriteConfig(path, DefaultConfig()); err != nil {
-		t.Fatalf("WriteConfig 失败：%v", err)
-	}
-
-	reloaded := make(chan *Config, 1)
-	stop, err := WatchConfig(path, func(cfg *Config, err error) {
-		reloaded <- cfg
-	})
-	if err != nil {
-		t.Fatalf("WatchConfig 失败：%v", err)
-	}
-	stop()
-
-	cfg := DefaultConfig()
-	cfg.ListenAddr = "127.0.0.1:60000"
-	if err := WriteConfig(path, cfg); err != nil {
-		t.Fatalf("改写配置失败：%v", err)
-	}
-
-	select {
-	case c := <-reloaded:
-		t.Fatalf("stop 后不应触发回调，收到 ListenAddr=%s", c.ListenAddr)
-	case <-time.After(3 * time.Second):
-		// 超过一个轮询周期仍未回调即通过。
-	}
-}
-
-// TestWatchConfigMissingFile 验证对不存在的文件启动监听直接报错。
-func TestWatchConfigMissingFile(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "nope.json")
-
-	if _, err := WatchConfig(path, func(*Config, error) {}); err == nil {
-		t.Fatal("监听不存在的配置文件应返回错误")
 	}
 }

@@ -74,6 +74,15 @@ type Config struct {
 	Route      RouteFunc
 	TunnelDial TunnelDial
 	DirectDial DirectDial
+	// TunnelDNS 是隧道内域名解析函数（Android 桥注入
+	// *core.Kernel.ResolveDNS → 隧道内 DoH）。非 nil 时启用 TUN DNS 拦截
+	// （androidvpn.go）：Java 侧把系统 DNS 指向 TUN 内拦截服务器
+	// （198.18.0.1），UDP:53 查询经隧道 DoH 解析——只有这种 IP 才是 WARP
+	// 边缘网络视图可达的（v0.5.24 Android 外网根因）；解析结果同时记录
+	// IP→域名映射，NewConnectionEx 对 TCP 目标 IP 查表还原域名后走
+	// DialTunnel，保证 CONNECT 目标永远边缘可达。nil 时不拦截（桌面/CLI
+	// 无 TUN，恒 nil）。
+	TunnelDNS ResolveFunc
 }
 
 // rejectErr 是命中 reject 规则时返回给调用方的错误（与 M6 桌面端

@@ -1,10 +1,9 @@
-// Package core 提供可复用的 WARP 客户端核心：配置加载/热重载、注册编排、
+// Package core 提供可复用的 WARP 客户端核心：配置加载、注册编排、
 // Server 生命周期（Start/Stop）、状态查询。CLI（main.go）与 GUI（gui/）共用，
 // 不依赖任何界面层。
 package core
 
 import (
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,16 +12,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
-	"time"
 
 	"warp/route"
 )
 
 // Config 是 config.json 的运行时配置，位于程序执行目录。
 //
-// 优先级：命令行旗标 > config.json > 默认值。文件变更（mtime 或内容）触发
-// 热重载，见 WatchConfig。
+// 优先级：命令行旗标 > config.json > 默认值。配置文件只在启动/显式保存时
+// 读取（v0.5.24 起取消运行中热加载——避免外部编辑与 GUI 保存相互覆盖）。
 type Config struct {
 	// ListenAddr 是 mixed HTTP+SOCKS5 代理的监听地址。
 	ListenAddr string `json:"listen_addr"`
@@ -155,73 +152,4 @@ func WriteConfig(path string, cfg *Config) error {
 		return fmt.Errorf("原子替换 %s 失败：%w", path, err)
 	}
 	return nil
-}
-
-// configPollInterval 是配置热重载轮询间隔，与 route 包规则文件热重载一致。
-const configPollInterval = 2 * time.Second
-
-// WatchConfig 启动基于轮询的 config.json 热重载：
-//   - 每 configPollInterval 检查一次文件的 mtime 与内容 SHA-256，
-//     任一变化即重新加载并调用 onReload(cfg, err)（err 为读取/解析错误，
-//     此时 cfg 为 nil）
-//   - 返回的停止函数用于退出监听 goroutine；可安全重复调用
-//   - 文件暂时消失（编辑器原子替换的间隙）不触发回调
-//
-// 调用方负责在启动监听前完成首次加载，监听只报告"之后的变更"。
-func WatchConfig(path string, onReload func(cfg *Config, err error)) (stop func(), err error) {
-	baseHash, baseMtime, err := configFileState(path)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil, fmt.Errorf("配置文件 %s 不存在（%w）", path, err)
-		}
-		return nil, fmt.Errorf("读取配置文件 %s 状态失败：%w", path, err)
-	}
-
-	stopCh := make(chan struct{})
-	var once sync.Once
-	go func() {
-		ticker := time.NewTicker(configPollInterval)
-		defer ticker.Stop()
-		hash, mtime := baseHash, baseMtime
-		for {
-			select {
-			case <-stopCh:
-				return
-			case <-ticker.C:
-				nh, nm, err := configFileState(path)
-				if err != nil {
-					if errors.Is(err, fs.ErrNotExist) {
-						continue // 原子替换间隙等瞬态，忽略
-					}
-					// 永久性读取失败（权限等）：上报一次，避免静默失聪
-					log.Printf("⚠ 配置文件 %s 状态读取失败：%v", path, err)
-					continue
-				}
-				if nh == hash && nm == mtime {
-					continue
-				}
-				hash, mtime = nh, nm
-				cfg, cerr := LoadConfig(path)
-				onReload(cfg, cerr)
-			}
-		}
-	}()
-
-	return func() {
-		once.Do(func() { close(stopCh) })
-	}, nil
-}
-
-// configFileState 返回文件的 mtime 纳秒值与内容 SHA-256 摘要，用于变更检测。
-func configFileState(path string) (hash string, mtime int64, err error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return "", 0, err
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", 0, err
-	}
-	sum := sha256.Sum256(data)
-	return fmt.Sprintf("%x", sum), info.ModTime().UnixNano(), nil
 }

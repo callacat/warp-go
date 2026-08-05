@@ -1319,6 +1319,16 @@ func (c *MasqueClient) cacheResolution(host string, ip net.IP, ttl time.Duration
 	c.dnsCache[host] = dnsCacheEntry{ip: ip, expiresAt: time.Now().Add(ttl)}
 }
 
+// ResolveDNS 经隧道内 DoH 解析 host（A/AAAA 并发，A 优先），返回边缘网络
+// 视图可达的 IP。Android DNS 拦截服务器用它响应 TUN 内的 DNS 查询——关键：
+// 只有隧道内 DoH 解析出的 IP 才是 WARP 边缘可达的（v0.5.24 Android 根因：
+// 系统 DNS 解析出的 IP 与边缘网络视图不同，边缘 CONNECT 该 IP hang 到
+// deadline）。返回的 IP 同时被拦截服务器记录进 IP→域名映射表，供
+// NewConnectionEx 还原域名后走 DialTunnel（内部再次 DoH 解析，保证边缘可达）。
+func (c *MasqueClient) ResolveDNS(ctx context.Context, host string) (net.IP, error) {
+	return c.resolveDNS(ctx, host)
+}
+
 func (c *MasqueClient) resolveDNS(ctx context.Context, host string) (net.IP, error) {
 	// Check cache first
 	c.dnsCacheMu.RLock()

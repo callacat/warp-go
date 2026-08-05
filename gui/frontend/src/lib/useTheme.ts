@@ -2,13 +2,20 @@
  * React hook for tri-state theme (light / dark / system) backed by the
  * theme-mode library in ./theme.ts.
  *
- * - Persists the mode via saveMode() and applies the resolved .dark class.
+ * - Applies the resolved .dark class based on mode + OS preference.
  * - Resolves the OS dark preference through the Wails runtime bridge
  *   (System.IsDarkMode()); while that promise is pending, or when it fails
  *   (e.g. running in a plain browser during dev), window.matchMedia stands in.
  * - Auto-switches on OS theme changes via Wails runtime events on every
  *   platform (common / windows / linux / android / ios), plus a matchMedia
  *   change listener as the browser fallback.
+ * - On mount, loads the persisted theme_mode from config.json so a launch
+ *   respects the saved choice even before the user opens the settings page.
+ * - Persists theme_mode ONLY on an explicit user action (setMode); it never
+ *   persists from an effect. This fixes v0.5.24 regressions: the old code
+ *   persisted inside an effect that ran on mount and on every OS theme flip,
+ *   writing the default "system" back over the user's saved theme, and the
+ *   resulting saveConfig call covered the whole config (GUI 改配置被自动重置).
  */
 
 import { useEffect, useState } from "react";
@@ -20,7 +27,7 @@ import {
   saveMode,
   type ThemeMode,
 } from "./theme";
-import { saveConfigPartial } from "./api";
+import { getConfig, saveConfigPartial } from "./api";
 
 /** Wails runtime theme-change event names, one per platform plus "common". */
 export const THEME_EVENT_NAMES: readonly string[] = [
@@ -78,9 +85,11 @@ function matchMediaDark(): boolean {
 
 /** Queries the OS dark preference through the Wails bridge, ignoring failures. */
 function querySystemDark(setDark: (dark: boolean) => void): void {
-  System.IsDarkMode().then(setDark).catch(() => {
-    /* Bridge unavailable (plain browser) — matchMedia stays authoritative. */
-  });
+  System.IsDarkMode()
+    .then(setDark)
+    .catch(() => {
+      /* Bridge unavailable (plain browser) — matchMedia stays authoritative. */
+    });
 }
 
 export function useTheme(initialConfig?: { themeMode?: string } | null): {
@@ -89,7 +98,9 @@ export function useTheme(initialConfig?: { themeMode?: string } | null): {
   setMode: (mode: ThemeMode) => void;
   setModeFromConfig: (config: { themeMode?: string } | null) => void;
 } {
-  const [mode, setModeState] = useState<ThemeMode>(() => loadModeFromConfig(initialConfig ?? null));
+  const [mode, setModeState] = useState<ThemeMode>(() =>
+    loadModeFromConfig(initialConfig ?? null),
+  );
   // Seed with the browser preference; the Wails bridge overwrites it once it
   // resolves. In a plain browser the bridge never resolves, so the matchMedia
   // value stays authoritative.
@@ -105,23 +116,43 @@ export function useTheme(initialConfig?: { themeMode?: string } | null): {
     return () => clearTimeout(t);
   }, []);
 
-  // Apply the resolved theme class and persist the choice.
+  // Load the persisted theme_mode from config.json on mount so a launch
+  // respects the saved choice even before the user visits the settings page
+  // (v0.5.24: the settings page was the only reader → theme reverted to
+  // "system" unless the user opened it). Reading here never writes:
+  // persisting only happens on an explicit user action (setMode), never in
+  // this effect — otherwise mount would write the default back over the
+  // user's saved mode and trigger the whole SaveConfig chain (the v0.5.24
+  // "主题持久化不生效" + "GUI 改配置被自动重置" root cause).
+  useEffect(() => {
+    getConfig()
+      .then((c) => setModeState(loadModeFromConfig(c ?? null)))
+      .catch(() => {
+        /* bridge unavailable — keep current mode */
+      });
+  }, []);
+
+  // Apply the resolved theme class. No SaveConfig here: this effect re-runs
+  // on mount and on OS theme flips, so persisting would overwrite the user's
+  // saved mode with the default and spam writes.
   useEffect(() => {
     applyDarkClass(resolveDark(mode, systemDark));
-    saveMode(mode);
-    // Also persist to Go config.json
-    saveConfigPartial({ themeMode: mode }).catch((e: Error) => {
-      console.warn("保存主题到配置失败:", e);
-    });
   }, [mode, systemDark]);
 
+  // setMode is the only path that persists — it is triggered by an explicit
+  // user action (theme buttons on the settings page), so it writes both
+  // localStorage (instant cross-session memory) and config.json (theme_mode),
+  // while mount/OS events never touch the file.
   const setMode = (newMode: ThemeMode) => {
     setModeState(newMode);
+    saveMode(newMode);
+    saveConfigPartial({ themeMode: newMode }).catch((e: Error) => {
+      console.warn("保存主题到配置失败:", e);
+    });
   };
 
   const setModeFromConfig = (config: { themeMode?: string } | null) => {
-    const newMode = loadModeFromConfig(config);
-    setModeState(newMode);
+    setModeState(loadModeFromConfig(config));
   };
 
   // Wails OS theme-change events (all platforms). The callback receives a
@@ -138,7 +169,11 @@ export function useTheme(initialConfig?: { themeMode?: string } | null): {
         }
       }),
     );
-    return () => { offs.forEach((off) => { off(); }); };
+    return () => {
+      offs.forEach((off) => {
+        off();
+      });
+    };
   }, []);
 
   // Browser fallback: keep following prefers-color-scheme changes.

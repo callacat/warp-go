@@ -20,6 +20,7 @@ import (
 // proxy 与 Kernel）。
 type dialer interface {
 	DialTunnel(ctx context.Context, targetAddr string) (net.Conn, error)
+	ResolveDNS(ctx context.Context, host string) (net.IP, error)
 	Close() error
 }
 
@@ -59,8 +60,8 @@ func (h *engineHolder) close() {
 }
 
 // Kernel 是可复用的 WARP 内核：MASQUE 隧道客户端 + 分流引擎 + 注册信息。
-// 与 Server 的差异：Kernel 不含 mixed 代理监听、系统代理、配置热重载与
-// 状态快照 —— 这些留在 Server（CLI/GUI 共用）。Kernel 供 Server 与未来的
+// 与 Server 的差异：Kernel 不含 mixed 代理监听、系统代理与配置管理
+// （含状态快照）——这些留在 Server（CLI/GUI 共用）。Kernel 供 Server 与
 // Android 桥（androidvpn）共用：创建即建好隧道与引擎，Start/Stop 管理
 // 生命周期，DialTunnel / Route 直接可用。
 //
@@ -208,6 +209,22 @@ func (k *Kernel) DialTunnel(ctx context.Context, targetAddr string) (net.Conn, e
 		return nil, errors.New("kernel: 隧道不可用")
 	}
 	return d.DialTunnel(ctx, targetAddr)
+}
+
+// ResolveDNS 经隧道内 DoH 解析 host（A/AAAA 并发，A 优先），返回边缘网络
+// 视图可达的 IP。Android 桥注入 vpnCfg.TunnelDNS 供 TUN DNS 拦截服务器使用
+// （v0.5.24 Android 根因修复：只有隧道内 DoH 解析出的 IP 才是 WARP 边缘
+// 可达的；系统 DNS 解析出的 IP 与边缘网络视图不同，CONNECT 会 hang 到
+// deadline）。Kernel 关闭后返回错误。
+func (k *Kernel) ResolveDNS(ctx context.Context, host string) (net.IP, error) {
+	k.mu.Lock()
+	d := k.dial
+	closed := k.closed
+	k.mu.Unlock()
+	if closed || d == nil {
+		return nil, errors.New("kernel: 隧道不可用")
+	}
+	return d.ResolveDNS(ctx, host)
 }
 
 // Route 判定 host/ip 应走的路径，镜像 proxy 包对 Router 的调用语义：

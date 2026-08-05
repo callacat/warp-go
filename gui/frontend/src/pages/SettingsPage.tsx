@@ -88,7 +88,7 @@ export default function SettingsPage() {
     setNotice(null);
     try {
       await saveConfig(cfg);
-      setNotice("配置已保存（文件变更将触发热重载）");
+      setNotice("配置已保存（重启后生效）");
     } catch (e) {
       setError(String(e));
     } finally {
@@ -256,7 +256,7 @@ export default function SettingsPage() {
           {error && <span className="text-sm text-red-600 dark:text-red-400">{error}</span>}
         </div>
         <p className="mt-3 text-xs text-slate-500 dark:text-slate-400">
-          配置写入执行目录下的 config.json；文件被外部修改时会自动热重载。
+          配置写入执行目录下的 config.json；修改需重启生效（取消热加载）。
         </p>
       </Card>
 

@@ -58,7 +58,7 @@ const (
 type Options struct {
 	// ConfigPath 是 config.json 路径（默认 "config.json"，缺失时自动生成
 	// 默认配置模板）。config.json 负责 rules_path / geo_dir / 系统代理开关
-	// 等运行时配置，文件变更热重载。
+	// 等运行时配置（启动时读取一次，不热重载）。
 	ConfigPath string
 
 	// StateFile 是注册信息文件路径（默认 "reg.json"）。
@@ -120,7 +120,6 @@ type Server struct {
 	startTime       time.Time
 	lastError       string
 	geoCancel       context.CancelFunc
-	stopWatch       func()
 	sysProxyEnabled atomic.Bool
 }
 
@@ -389,7 +388,7 @@ func (s *Server) ensureConfig() (*Config, error) {
 //
 // 启动序列（与旧 CLI main 一致）：加载配置与注册信息 → 解析边缘候选 →
 // 公钥固定 TLS → 可选边缘扫描 → 建立 MASQUE 连接 → 分流引擎 →
-// mixed 代理监听 → 系统代理 → GEO 自动更新与配置热重载协程 → 阻塞等待。
+// mixed 代理监听 → 系统代理 → GEO 自动更新协程 → 阻塞等待。
 // 任一步失败都会清理已建立的资源后返回错误。
 //
 // 注意：tunnel.NewMasqueClient 内部重试直到连通，不响应 ctx 取消，因此
@@ -458,7 +457,7 @@ func (s *Server) Start(ctx context.Context) error {
 
 	// Kernel：MASQUE 隧道 + 分流引擎（NewKernel 内部先建隧道后建引擎，
 	// 与旧时序一致；隧道重试到连通，引擎自动初始化默认 rules.txt 模板、
-	// 加载规则与 GEO 库——缺失时降级 rules-only、启动规则文件热重载）。
+	// 加载规则与 GEO 库——缺失时降级 rules-only。
 	kernel, err := NewKernel(cfg, regData, edgeAddrs, tlsConfig)
 	if err != nil {
 		return fmt.Errorf("Kernel 初始化失败：%w", err)
@@ -503,7 +502,7 @@ func (s *Server) Start(ctx context.Context) error {
 	// GEO 自动更新：数据缺失时启动即补一份，之后按 GeoAutoUpdateDays
 	// 周期更新（0 表示关闭）。失败只打 warning，下个周期重试。
 	geoCtx, geoCancel := context.WithCancel(context.Background())
-	defer geoCancel() // 提前返回路径（如热重载启动失败）不泄漏 context
+	defer geoCancel() // 提前返回路径不泄漏 context
 	if cfg.GeoAutoUpdateDays > 0 {
 		interval := time.Duration(cfg.GeoAutoUpdateDays) * 24 * time.Hour
 		go func() {
@@ -522,18 +521,6 @@ func (s *Server) Start(ctx context.Context) error {
 				}
 			}
 		}()
-	}
-
-	// config.json 热重载：rules/geo 路径与系统代理开关即时生效，其余需重启。
-	stopWatch, err := WatchConfig(s.opts.ConfigPath, func(nc *Config, rerr error) {
-		if rerr != nil {
-			log.Printf("⚠ 配置热重载失败（保持原配置生效）：%v", rerr)
-			return
-		}
-		s.applyConfigReload(cfg, nc)
-	})
-	if err != nil {
-		return fmt.Errorf("启动配置热重载失败：%w", err)
 	}
 
 	// 启动 mixed 代理（监听与 Accept 循环在 proxy 包内）。
@@ -557,7 +544,6 @@ func (s *Server) Start(ctx context.Context) error {
 	s.edgeAddrs = edgeAddrs
 	s.startTime = time.Now()
 	s.geoCancel = geoCancel
-	s.stopWatch = stopWatch
 	if s.stopRequested {
 		s.st = stateStopping
 		s.mu.Unlock()
@@ -635,7 +621,7 @@ func (s *Server) setLastError(err error) {
 }
 
 // shutdown 按序拆除全部资源（幂等，可重复调用）：
-// 停 GEO 自动更新协程 → 停监听与新连接 → 撤系统代理 → 停配置热重载 →
+// 停 GEO 自动更新协程 → 停监听与新连接 → 撤系统代理 →
 // 关分流引擎 → 拆 MASQUE 隧道。
 func (s *Server) shutdown() {
 	s.mu.Lock()
@@ -645,7 +631,6 @@ func (s *Server) shutdown() {
 	}
 	geoCancel := s.geoCancel
 	server := s.server
-	stopWatch := s.stopWatch
 	kernel := s.kernel
 	listenAddr := s.listenAddr
 	sysProxyEnabled := s.sysProxyEnabled.Load()
@@ -653,7 +638,6 @@ func (s *Server) shutdown() {
 	s.server = nil
 	s.kernel = nil
 	s.geoCancel = nil
-	s.stopWatch = nil
 	s.st = stateStopped
 	s.mu.Unlock()
 
@@ -673,9 +657,6 @@ func (s *Server) shutdown() {
 		}
 	} else if sysProxyEnabled {
 		log.Println("系统代理未指向本程序，跳过清除（保留外部代理设置）")
-	}
-	if stopWatch != nil {
-		stopWatch()
 	}
 	if kernel != nil {
 		_ = kernel.Close()
@@ -970,7 +951,7 @@ func (s *Server) AutostartEnabled() bool {
 }
 
 // ReloadRules 从磁盘重新加载路由规则（GUI "重新加载"按钮 / 外部编辑后
-// 手动触发；与文件热重载同一 applyRules 路径）。
+// 手动触发；与规则文件热重载同一 applyRules 路径）。
 func (s *Server) ReloadRules() error {
 	s.mu.Lock()
 	k := s.kernel
@@ -981,8 +962,10 @@ func (s *Server) ReloadRules() error {
 	return k.engine.get().Reload()
 }
 
-// SaveConfig 校验并原子写回 config.json；运行中由 WatchConfig 热重载应用。
-// GUI 设置页保存入口。
+// SaveConfig 校验并原子写回 config.json，并同步内存快照 s.cfg
+// （Status().Config → GUI GetConfig 数据源），使保存立即在后续读取生效。
+// 磁盘上写传入的相对路径保持可移植；内存快照锚定到运行时目录（与
+// ensureConfig 一致），避免 GeoReady 用相对路径查错目录。
 func (s *Server) SaveConfig(cfg *Config) error {
 	path := s.opts.ConfigPath
 	if path == "" {
@@ -1002,88 +985,14 @@ func (s *Server) SaveConfig(cfg *Config) error {
 	if err := WriteConfig(path, merged); err != nil {
 		return err
 	}
-	// 同步更新内存快照 s.cfg（Status().Config → GUI GetConfig 数据源），
-	// 使保存立即在后续读取生效，无需重启（v0.5.16 反馈"保存后切页回来
-	// 配置没变"——此前只写盘，Status 一直返回启动时或首次 ensureConfig 的旧
-	// 值）。磁盘上写传入的相对路径保持可移植；内存快照锚定到运行时目录
-	// （与 ensureConfig/applyConfigReload 一致），避免 GeoReady 用相对路径
-	// 查错目录。
 	s.mu.Lock()
 	snapshot := *merged
 	snapshot.RulesPath = resolveWithDir(s.opts.DataDir, merged.RulesPath)
 	snapshot.GeoDir = resolveWithDir(s.opts.DataDir, merged.GeoDir)
 	s.cfg = &snapshot
 	s.mu.Unlock()
-	log.Printf("✓ 配置已保存 %s（热重载将自动应用）", path)
+	log.Printf("✓ 配置已保存 %s", path)
 	return nil
-}
-
-// applyConfigReload 把热重载后的配置应用到运行中的进程：
-//   - rules_path / geo_dir 变更 → 重建分流引擎（热加载新规则与新 GEO 库）
-//   - enable_system_proxy 变更 → 立即设置/清除系统代理
-//   - 其余字段（监听地址、UDP 开关、GEO 仓库与更新周期）绑定启动时的监听器
-//     与更新协程，变更需重启生效，此处只打日志提示。
-func (s *Server) applyConfigReload(old, nc *Config) {
-	// 相对路径锚定到运行时目录（与 ensureConfig 一致）；否则热重载重建引擎
-	// 会用相对路径在 CWD 下找文件，而非 config/ 子目录。
-	nc.RulesPath = resolveWithDir(s.opts.DataDir, nc.RulesPath)
-	nc.GeoDir = resolveWithDir(s.opts.DataDir, nc.GeoDir)
-	if nc.RulesPath != old.RulesPath || nc.GeoDir != old.GeoDir {
-		ne, err := route.NewEngine(nc.RulesPath, nc.GeoDir)
-		if err != nil {
-			log.Printf("⚠ 规则/GEO 路径变更后重建引擎失败（保持旧引擎）：%v", err)
-		} else {
-			s.mu.Lock()
-			k := s.kernel
-			s.mu.Unlock()
-			if k != nil {
-				k.engine.swap(ne)
-			} else {
-				ne.Close()
-			}
-			log.Printf("✓ 分流引擎已按新路径重建（rules=%s，geo=%s）", nc.RulesPath, nc.GeoDir)
-		}
-	}
-
-	if nc.EnableSystemProxy != old.EnableSystemProxy {
-		if nc.EnableSystemProxy {
-			if err := setSystemProxy(s.listenAddr, true); err != nil {
-				log.Printf("⚠ 启用系统代理失败：%v", err)
-			} else {
-				s.sysProxyEnabled.Store(true)
-				log.Printf("✓ 系统代理已指向 %s", s.listenAddr)
-			}
-		} else {
-			if err := setSystemProxy(s.listenAddr, false); err != nil {
-				log.Printf("⚠ 清除系统代理失败：%v", err)
-			} else {
-				s.sysProxyEnabled.Store(false)
-				log.Println("✓ 系统代理已清除")
-			}
-		}
-	}
-
-	var restart []string
-	if nc.ListenAddr != old.ListenAddr {
-		restart = append(restart, "listen_addr")
-	}
-	if nc.AllowUDP != old.AllowUDP {
-		restart = append(restart, "allow_udp")
-	}
-	if nc.GeoRepo != old.GeoRepo {
-		restart = append(restart, "geo_repo")
-	}
-	if nc.GeoAutoUpdateDays != old.GeoAutoUpdateDays {
-		restart = append(restart, "geo_auto_update_days")
-	}
-	if len(restart) > 0 {
-		log.Printf("⚠ 配置变更需重启生效：%s", strings.Join(restart, "、"))
-	}
-	// 同步内存快照，使 Status().Config 反映已应用的值（运行中热重载不再
-	// 停在旧值直到重启——v0.5.16"切页回来配置没变"的根因之一）。
-	s.mu.Lock()
-	s.cfg = nc
-	s.mu.Unlock()
 }
 
 // geoDataPresent 判断 GEO 数据文件是否已就绪（任一缺失即视为"尚未就绪"）。

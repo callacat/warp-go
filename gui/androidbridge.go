@@ -350,6 +350,7 @@ func startVpnKernel(ctx context.Context, cancel context.CancelFunc, sandboxDir s
 	// 使 geoip 规则可命中。
 	built.vpnCfg.Route = kernel.Route
 	built.vpnCfg.TunnelDial = kernel.DialTunnel
+	built.vpnCfg.TunnelDNS = kernel.ResolveDNS // v0.5.24：TUN DNS 拦截 → 隧道内 DoH
 	built.vpnCfg.DirectDial = nil
 
 	vpn, err := androidvpn.New(built.vpnCfg)

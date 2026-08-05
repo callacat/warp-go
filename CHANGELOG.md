@@ -3,6 +3,54 @@
 本项目所有值得记录的变更。格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v0.5.24] - 2026-08-05
+
+### 变更
+
+- **取消 config.json 文件热加载**（用户需求）：`core/config.go` 的
+  `WatchConfig`/`configFileState`/`configPollInterval` 全部移除，
+  `core/core.go` 的启动 WatchConfig 协程与 `applyConfigReload` 删除，
+  `Server` 结构去掉 `stopWatch` 字段，`core/config_test.go` 删 3 个
+  WatchConfig 测试。配置只在启动/显式保存时读取，运行中修改需重启生效。
+  根因：热加载每 2s 轮询回读磁盘，GUI 保存后被 `applyConfigReload` 用磁盘
+  值覆盖刚保存的快照 → "GUI 改配置被自动重置"。**规则文件（rules.txt）热
+  重载保留**（独立功能，用户未要求取消）。
+
+### 修复
+
+- **Android 无法访问外网（隧道 CONNECT 目标 IP 边缘不可达）**：决定性实验
+  （`TestIPEdgeProbe`，真实边缘 + 用户 reg.json）确证——WARP 边缘 CONNECT 的
+  目标 IP 必须处于**边缘网络视图**：隧道内 DoH 解析出的 facebook IP
+  （57.145.12.1）CONNECT 成功；Android 系统 DNS 解析出的同一域名 IP
+  （69.171.235.22）CONNECT hang 到 deadline（`http3: parsing frame failed:
+  deadline exceeded`，与用户日志一字不差）。域名路径成功的根源是
+  `resolveTarget` 用隧道内 DoH 解析（天然拿到边缘可达 IP）；TUN 只收到系统
+  DNS 的 IP → `DialTunnel("IP:443")` → 边缘连不到 → 全挂。修复：`tunnel`
+  导出 `ResolveDNS`（隧道内 DoH）；新增 `androidvpn/dns.go` DNS 拦截服务器
+  （sing-box 标准架构）——拦截 UDP:53 → 隧道 DoH 解析 → 返回边缘可达真实 IP
+  并记录 IP→域名映射 → `NewConnectionEx` 查表还原域名走 `DialTunnel`。9 个
+  宿主单测覆盖 A/AAAA 查询、类型过滤、映射表、过期清理。**接线完成**：
+  `core.Kernel` 新增 `ResolveDNS`（委托隧道拨号器，`dialer` 接口扩展 +
+  回归测试）；`androidvpn/dns.go` 导出 `DNSInterceptAddr`（198.18.0.1，
+  RFC 2544 保留段）；`WarpVpnService.java` `addDnsServer("198.18.0.1")`
+  把系统 DNS 指向 TUN 内拦截服务器；`NewPacketConnectionEx` 对
+  `198.18.0.1:53` 的 UDP 查询走 `handleDNSQuery`（HandleQuery 响应写回，
+  解析失败静默丢弃、Android 回退下个 DNS）；`NewConnectionEx` 对 TCP 目标
+  IP 查 IP→域名映射，命中则用域名走 `DialTunnel`（CONNECT 目标永远边缘
+  可达）。
+- **主题模式持久化不生效**（用户反馈）：根因链有二——① `useTheme` 的
+  effect（`[mode,systemDark]` 依赖）在挂载与 OS 主题切换时用默认 `"system"`
+  无条件写回 config.json，覆盖用户持久化的 theme_mode；② 主题只在
+  SettingsPage 挂载时读取，App 壳不读 → 启动恒 system。修复：
+  `useTheme.ts` 重写——mount 时从 config.json 读取持久化主题并应用；只在
+  用户显式点击主题按钮（`setMode`）时持久化（localStorage + config.json
+  theme_mode），effect/OS 事件永不写文件。
+- **GUI 改配置被自动重置**（用户反馈）：主因即热加载回写（见上）；辅因
+  `saveConfigPartial`（useTheme 触发）会 `getConfig()+saveConfig({...current,
+  ...patch})` 整链覆盖。取消热加载 + 移除 effect 内自动写回后根治。
+- **设置页文案同步**：保存提示由"文件变更将触发热重载"改为"重启后生效"，
+  说明文字同步更新。
+
 ## [v0.5.23] - 2026-08-05
 
 ### 修复

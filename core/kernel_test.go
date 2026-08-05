@@ -32,6 +32,13 @@ func (f *fakeDialer) DialTunnel(_ context.Context, targetAddr string) (net.Conn,
 	return a, nil
 }
 
+func (f *fakeDialer) ResolveDNS(_ context.Context, host string) (net.IP, error) {
+	f.mu.Lock()
+	f.calls++
+	f.mu.Unlock()
+	return net.ParseIP("1.1.1.1"), nil
+}
+
 func (f *fakeDialer) Close() error {
 	f.mu.Lock()
 	f.closed = true
@@ -218,6 +225,21 @@ func TestKernelDialTunnel(t *testing.T) {
 	}
 	if addr := fd.lastAddr(); addr != "example.com:443" {
 		t.Errorf("拨号目标 = %q，期望 example.com:443", addr)
+	}
+}
+
+// T5b：ResolveDNS 委托给拨号器并返回解析结果。
+func TestKernelResolveDNS(t *testing.T) {
+	k, fd := newTestKernel(t)
+	ip, err := k.ResolveDNS(context.Background(), "example.com")
+	if err != nil {
+		t.Fatalf("ResolveDNS 失败：%v", err)
+	}
+	if fd.callCount() != 1 {
+		t.Errorf("拨号器调用次数 = %d，期望 1", fd.callCount())
+	}
+	if !ip.Equal(net.ParseIP("1.1.1.1")) {
+		t.Errorf("解析结果 = %v，期望 1.1.1.1", ip)
 	}
 }
 

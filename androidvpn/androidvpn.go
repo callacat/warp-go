@@ -18,6 +18,7 @@ import (
 	"log"
 	"net"
 	"net/netip"
+	"strconv"
 	"sync"
 	"time"
 
@@ -50,7 +51,8 @@ type Vpn struct {
 	tun    tun.Tun
 	stack  tun.Stack
 	cfg    Config
-	fd     int // 原始 TUN fd：tun.New 包装前由 Stop 兜底关闭（Java 已 detachFd）
+	dns    *dnsInterceptor // TunnelDNS 非 nil 时创建；nil 表示不拦截 TUN DNS
+	fd     int             // 原始 TUN fd：tun.New 包装前由 Stop 兜底关闭（Java 已 detachFd）
 	ctx    context.Context
 	cancel context.CancelFunc
 
@@ -69,7 +71,11 @@ func New(cfg Config) (*Vpn, error) {
 	if len(cfg.DNSServers) == 0 {
 		cfg.DNSServers = []netip.Addr{netip.MustParseAddr("1.1.1.1")}
 	}
-	return &Vpn{cfg: cfg, fd: cfg.FileDescriptor}, nil
+	var dns *dnsInterceptor
+	if cfg.TunnelDNS != nil {
+		dns = NewDNSInterceptor(cfg.TunnelDNS)
+	}
+	return &Vpn{cfg: cfg, fd: cfg.FileDescriptor, dns: dns}, nil
 }
 
 // Start 启动 TUN 设备与 gVisor 栈，阻塞直到 ctx 取消或 Stop。
@@ -182,8 +188,22 @@ func (v *Vpn) NewConnectionEx(ctx context.Context, conn net.Conn, source, destin
 		// （ParseSocksaddrHostPort 只填 Fqdn），二者互斥——因此无条件传
 		// destination.Addr 即可：IP 字面量目标让 geoip: 规则可命中，域名
 		// 目标退化为零值、仅 host/geosite 规则生效（与修复前行为一致）。
-		action, _ := decideAction(v.cfg.Route, destination.AddrString(), destination.Addr)
-		upstream, err, rejected := resolveAction(action, ctx, destination.String(), v.cfg.TunnelDial, v.cfg.DirectDial)
+		//
+		// DNS 拦截还原（v0.5.24）：IP 字面量目标查 IP→域名映射表，命中则
+		// 用域名走 DialTunnel——域名路径内部再次隧道 DoH 解析，CONNECT 目标
+		// 永远处于边缘网络视图（系统 DNS 的 IP 与边缘视图不同，CONNECT 会
+		// hang 到 deadline；这是 Android 外网不通的根因）。路由判定 host
+		// 同步换成域名，让 host/geosite 规则可命中；geoip 仍看 Addr。
+		host := destination.AddrString()
+		targetAddr := destination.String()
+		if v.dns != nil && destination.Addr.IsValid() {
+			if domain, ok := v.dns.LookupDomain(destination.Addr); ok {
+				host = domain
+				targetAddr = net.JoinHostPort(domain, strconv.Itoa(int(destination.Port)))
+			}
+		}
+		action, _ := decideAction(v.cfg.Route, host, destination.Addr)
+		upstream, err, rejected := resolveAction(action, ctx, targetAddr, v.cfg.TunnelDial, v.cfg.DirectDial)
 		if rejected {
 			log.Printf("[tun] 规则 reject：拒绝 %s → %s", source.AddrString(), destination.String())
 			_ = conn.Close()
@@ -220,9 +240,50 @@ func (v *Vpn) NewConnectionEx(ctx context.Context, conn net.Conn, source, destin
 
 // NewPacketConnectionEx 处理 UDP（gVisor 栈解析后回调）。
 func (v *Vpn) NewPacketConnectionEx(ctx context.Context, conn N.PacketConn, source, destination M.Socksaddr, onClose N.CloseHandlerFunc) {
+	// DNS 拦截（v0.5.24）：TUN 内 DNS 拦截服务器地址的 UDP:53 查询走
+	// HandleQuery（隧道 DoH 解析 + IP→域名映射），不转发物理网络——否则
+	// Android 系统 DNS 解析出的 IP 与 WARP 边缘网络视图不同，CONNECT 该
+	// IP 会 hang 到 deadline（Android 外网不通根因）。其余 UDP 保持直连
+	// （与桌面端"UDP 不走隧道"一致）。
+	if v.dns != nil && destination.Port == 53 && destination.Addr.IsValid() && destination.Addr == DNSInterceptAddr {
+		v.handleDNSQuery(conn, destination, onClose)
+		return
+	}
 	// UDP：当前直接经本机网络栈转发（与桌面端"UDP 不走隧道"一致）。
 	log.Printf("[tun] UDP %s → %s（直连）", source.AddrString(), destination.String())
 	go v.relayUDP(ctx, conn, destination, onClose)
+}
+
+// handleDNSQuery 循环读取 TUN 内 DNS 查询报文并写回拦截响应。解析失败 /
+// 不支持的查询类型 HandleQuery 返回 nil → 静默丢弃（Android 回退到下一个
+// DNS 服务器，行为与非拦截时一致）。
+func (v *Vpn) handleDNSQuery(conn N.PacketConn, destination M.Socksaddr, onClose N.CloseHandlerFunc) {
+	defer func() {
+		_ = conn.Close()
+		if onClose != nil {
+			onClose(nil)
+		}
+	}()
+	for {
+		buffer := buf.NewSize(65535)
+		_, rerr := conn.ReadPacket(buffer)
+		if rerr != nil {
+			buffer.Release()
+			return
+		}
+		resp := v.dns.HandleQuery(buffer.Bytes())
+		buffer.Release()
+		if resp == nil {
+			continue
+		}
+		out := buf.NewSize(len(resp))
+		_, _ = out.Write(resp)
+		if werr := conn.WritePacket(out, destination); werr != nil {
+			out.Release()
+			return
+		}
+		out.Release()
+	}
 }
 
 // relayUDP 把 TUN 上收到的 UDP 数据报经本机栈转发到目标。
