@@ -167,12 +167,32 @@ func TestDNSInterceptorAAAAResolve(t *testing.T) {
 	}
 }
 
-// TestDNSInterceptorResolveFailure 验证解析失败 → nil（丢弃查询）。
+// TestDNSInterceptorResolveFailure 验证解析失败 → SERVFAIL 响应（v0.5.25：
+// 不再静默 drop。drop 让 Android DNS 挂起直到查询超时，或 fallback 到物理
+// DNS（114.114.114.114:53）返回本地视图 IP → 映射 miss → 裸 IP 走隧道
+// 边缘不可达——v0.5.24 真机日志。SERVFAIL 带原 Question，Android 立即回退
+// 下一个 DNS，行为与非拦截时一致）。
 func TestDNSInterceptorResolveFailure(t *testing.T) {
 	d := newTestInterceptor()
 	resp := d.HandleQuery(packAQuery(9, "nxdomain.example.com"))
-	if resp != nil {
-		t.Fatal("解析失败应返回 nil")
+	if resp == nil {
+		t.Fatal("解析失败应返回 SERVFAIL 响应（不应 nil）")
+	}
+	var m dnsmessage.Message
+	if err := m.Unpack(resp); err != nil {
+		t.Fatalf("解包 SERVFAIL 失败：%v", err)
+	}
+	if m.RCode != dnsmessage.RCodeServerFailure {
+		t.Fatalf("SERVFAIL 响应 RCode = %v, want ServerFailure", m.RCode)
+	}
+	if !m.Header.Response {
+		t.Fatal("SERVFAIL 响应应设置 Response 标志")
+	}
+	if m.Header.ID != 9 {
+		t.Fatalf("SERVFAIL 响应 ID = %#x, want 9", m.Header.ID)
+	}
+	if len(m.Questions) != 1 {
+		t.Fatalf("SERVFAIL 应保留原 Question，得到 %d 个", len(m.Questions))
 	}
 }
 

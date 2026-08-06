@@ -140,8 +140,13 @@ func (d *dnsInterceptor) HandleQuery(payload []byte) []byte {
 	ip, err := d.resolve(ctx, host)
 	cancel()
 	if err != nil {
+		// 解析失败 → SERVFAIL 响应（v0.5.25：不再静默 drop）。drop 让
+		// Android DNS 挂起直到查询超时，或 fallback 到物理 DNS
+		// （114.114.114.114:53）返回本地视图 IP → 映射 miss → 裸 IP 走
+		// 隧道边缘不可达（v0.5.24 真机日志）。SERVFAIL 带原 Question，
+		// Android 立即回退下一个 DNS，行为与非拦截时一致。
 		log.Printf("⚠ DNS 拦截：%s 解析失败：%v", host, err)
-		return nil
+		return servfail(q)
 	}
 
 	var answer *dnsmessage.Resource
@@ -175,6 +180,28 @@ func (d *dnsInterceptor) HandleQuery(payload []byte) []byte {
 	wire, err := resp.Pack()
 	if err != nil {
 		log.Printf("⚠ DNS 拦截：封装响应失败：%v", err)
+		return nil
+	}
+	return wire
+}
+
+// servfail 构造一条 SERVFAIL 响应（保留原 Question、ID、OpCode，无 Answer），
+// 让 Android DNS 客户端立即回退下一个服务器而不是等待超时。
+func servfail(q dnsmessage.Message) []byte {
+	resp := dnsmessage.Message{
+		Header: dnsmessage.Header{
+			ID:                 q.Header.ID,
+			Response:           true,
+			OpCode:             q.Header.OpCode,
+			RecursionDesired:   q.Header.RecursionDesired,
+			RecursionAvailable: true,
+			RCode:              dnsmessage.RCodeServerFailure,
+		},
+		Questions: q.Questions,
+	}
+	wire, err := resp.Pack()
+	if err != nil {
+		log.Printf("⚠ DNS 拦截：封装 SERVFAIL 失败：%v", err)
 		return nil
 	}
 	return wire
