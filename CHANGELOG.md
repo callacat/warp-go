@@ -3,6 +3,28 @@
 本项目所有值得记录的变更。格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v0.5.25] - 2026-08-06
+
+### 修复
+
+- **Android v0.5.24 回归：国内 direct 连接全部失败**（真机日志
+  `拨号失败 49.7.252.24:443：lookup obus-cn.dc.heytapmobi.com: canceled`）。
+  根因：v0.5.24 的 IP→域名还原在 `NewConnectionEx` 里**无条件**应用——direct
+  分支也被还原成域名，`net.Dialer` 做物理解析 → 系统 DNS 又进 TUN → 环路
+  canceled。修复：新增 `decideTunnelTarget` 纯函数，**域名还原只用于 proxy
+  分支**（隧道 `DialTunnel` 收到域名内部再次 DoH 解析，CONNECT 目标永远边缘
+  可达——v0.5.24 根因修复的正确路径）；direct 分支保留原始 IP 拨号（该 IP
+  是隧道 DoH 解析出的真实 IP，物理网络同样可达）。3 个回归用例锁定契约：
+  proxy+映射→域名 / direct+映射→原始 IP / proxy 无映射→原始 IP。
+- **Android DNS 拦截解析失败静默丢弃 → 系统挂起/fallback 裸 IP**（v0.5.24
+  真机日志 `DNS 拦截：nebula-api-cn.heytapmobi.com 解析失败：没有 TypeA
+  记录` + `UDP → 114.114.114.114:53（直连）` + `[2001::1]:443 CONNECT 超时`）。
+  根因：隧道 DoH（162.159.36.1）对部分域名无 A/AAAA 记录时 `HandleQuery`
+  返回 nil **drop**——Android DNS 挂起直到查询超时，或 fallback 到物理 DNS
+  （114.114.114.114）返回本地视图 IP → IP→域名映射 miss → 裸 IP 走隧道 →
+  边缘不可达。修复：解析失败返回 **SERVFAIL 响应**（保留原 Question/ID/
+  OpCode，无 Answer），Android 立即回退下一个 DNS，行为与非拦截时一致。
+
 ## [v0.5.24] - 2026-08-05
 
 ### 变更
