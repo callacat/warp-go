@@ -85,6 +85,25 @@ type Config struct {
 	TunnelDNS ResolveFunc
 }
 
+// decideTunnelTarget 决定拨号目标字符串（v0.5.25 修复）。
+//
+// IP→域名还原**只用于 proxy 分支**：隧道 DialTunnel 收到域名时内部再次
+// 隧道 DoH 解析，CONNECT 目标永远边缘可达（v0.5.24 Android 外网根因修复的
+// 正确路径）。direct 分支必须保留原始 IP——v0.5.24 回归根因：无条件还原
+// 域名让 direct 也走 net.Dialer 物理解析，系统 DNS 又进 TUN → 环路 canceled
+// （真机日志 `拨号失败 49.7.252.24:443：lookup obus-cn.dc.heytapmobi.com:
+// canceled`）。该 IP 是隧道 DoH 解析出的真实 IP，物理网络同样可达。
+func decideTunnelTarget(action, origAddr string, mappedHost string) string {
+	if action != "proxy" || mappedHost == "" {
+		return origAddr
+	}
+	_, port, err := net.SplitHostPort(origAddr)
+	if err != nil {
+		return origAddr
+	}
+	return net.JoinHostPort(mappedHost, port)
+}
+
 // rejectErr 是命中 reject 规则时返回给调用方的错误（与 M6 桌面端
 // proxy.errRejected 语义一致：连接被规则拒绝，绝不建连）。
 var rejectErr = errors.New("rejected by route")

@@ -112,6 +112,58 @@ func TestDecideAction(t *testing.T) {
 	}
 }
 
+// TestDecideTunnelTarget 锁定 v0.5.25 的拨号目标契约：IP→域名还原**只用于
+// proxy 分支**；direct 分支必须保留原始 IP 拨号（v0.5.24 回归根因：无条件
+// 还原域名让 direct 也走 net.Dialer 物理解析 → 系统 DNS 又进 TUN → 环路
+// canceled——真机日志 `拨号失败 49.7.252.24:443：lookup
+// obus-cn.dc.heytapmobi.com: canceled`）。
+func TestDecideTunnelTarget(t *testing.T) {
+	origAddr := "49.7.252.24:443"
+	domain := "obus-cn.dc.heytapmobi.com"
+
+	tests := []struct {
+		name       string
+		action     string
+		mappedHost string
+		wantTarget string
+	}{
+		{
+			// proxy + 映射命中 → 用域名（隧道内再次 DoH 解析，CONNECT 目标
+			// 永远边缘可达——v0.5.24 根因修复的正确路径）。
+			name:       "proxy with domain mapping → tunnel dials domain",
+			action:     "proxy",
+			mappedHost: domain,
+			wantTarget: domain + ":443",
+		},
+		{
+			// direct → 保留原始 IP（v0.5.24 回归：direct 还原域名会触发
+			// net.Dialer 物理解析 → 系统 DNS 又进 TUN → 环路 canceled）。
+			// 该 IP 本身是隧道 DoH 解析出的真实 IP，物理网络同样可达。
+			name:       "direct with domain mapping → keeps original IP",
+			action:     "direct",
+			mappedHost: domain,
+			wantTarget: origAddr,
+		},
+		{
+			// 映射 miss（IP 直连/未拦截查询）→ 无条件用原始 IP；proxy 走
+			// 隧道也尽力（边缘可达与否由上层 DialTunnel 处理）。
+			name:       "proxy without mapping → keeps original IP",
+			action:     "proxy",
+			mappedHost: "",
+			wantTarget: origAddr,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			target := decideTunnelTarget(tt.action, origAddr, tt.mappedHost)
+			if target != tt.wantTarget {
+				t.Errorf("decideTunnelTarget(%q) = %q, want %q", tt.action, target, tt.wantTarget)
+			}
+		})
+	}
+}
+
 // TestDecideActionForwardsIP 锁定 NewConnectionEx 的调用契约（T8）：调用方
 // 把真实目标 IP 传给 decideAction 后，必须原样透传给 RouteFunc——geoip:
 // 规则正是靠这个 ip 参数命中 IP 字面量目标。域名目标（ip 为 netip.Addr{}

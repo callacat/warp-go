@@ -18,7 +18,6 @@ import (
 	"log"
 	"net"
 	"net/netip"
-	"strconv"
 	"sync"
 	"time"
 
@@ -196,13 +195,19 @@ func (v *Vpn) NewConnectionEx(ctx context.Context, conn net.Conn, source, destin
 		// 同步换成域名，让 host/geosite 规则可命中；geoip 仍看 Addr。
 		host := destination.AddrString()
 		targetAddr := destination.String()
+		var mappedHost string
 		if v.dns != nil && destination.Addr.IsValid() {
 			if domain, ok := v.dns.LookupDomain(destination.Addr); ok {
 				host = domain
-				targetAddr = net.JoinHostPort(domain, strconv.Itoa(int(destination.Port)))
+				mappedHost = domain
 			}
 		}
 		action, _ := decideAction(v.cfg.Route, host, destination.Addr)
+		// IP→域名还原只用于 proxy 分支：direct 保留原始 IP 拨号（v0.5.24
+		// 回归：direct 还原域名触发 net.Dialer 物理解析 → 系统 DNS 又进 TUN
+		// → 环路 canceled——真机日志 `lookup obus-cn.dc.heytapmobi.com:
+		// canceled`）。该 IP 是隧道 DoH 解析出的真实 IP，物理网络同样可达。
+		targetAddr = decideTunnelTarget(action, targetAddr, mappedHost)
 		upstream, err, rejected := resolveAction(action, ctx, targetAddr, v.cfg.TunnelDial, v.cfg.DirectDial)
 		if rejected {
 			log.Printf("[tun] 规则 reject：拒绝 %s → %s", source.AddrString(), destination.String())
