@@ -356,6 +356,12 @@ jobs:
           grep -qE 'Java_com_wails_app_MainActivity_nativeLogMessage.*C\.jint' androidbridge.go
           grep -qE 'int +nativeSetTimeZone *\(String tz\)' build/android/app/src/main/java/com/wails/app/MainActivity.java
           grep -qE 'Java_com_wails_app_MainActivity_nativeSetTimeZone.*C\.jint' androidbridge.go
+          # debugdiag（v0.5.26）：Go 侧经反向 JNI 调 MainActivity.exportDebugDiag()
+          # 打包 telemetry 到 Download——签名必须与 C preamble 的 GetStaticMethodID
+          # 描述严格一致（§6.8.3）。release 构建无该方法（GetStaticMethodID 返回
+          # nil → androidExportDebugDiag 静默跳过），故此处只断言 Java 侧存在。
+          grep -qE 'static +String +exportDebugDiag *\(' build/android/app/src/main/java/com/wails/app/MainActivity.java
+          grep -qE 'GetStaticMethodID\(env, cls, "exportDebugDiag", "\(\)Ljava/lang/String;"\)' androidbridge.go
 
       # assembleRelease 用仓库内固定的 warp-release.p12 签名（app/build.gradle
       # signingConfigs.release 默认引用该 p12，无需仓库 secrets；仅在设置

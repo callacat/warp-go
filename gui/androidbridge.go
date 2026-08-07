@@ -91,6 +91,17 @@ static jboolean callStaticBooleanMethod(JNIEnv* env, jclass cls, jmethodID mid, 
     return (*env)->CallStaticBooleanMethod(env, cls, mid, (jint)arg);
 }
 
+// exportDebugDiag() → String：把 debugdiag 数据打包到 MediaStore Downloads
+// 并返回 URI（调试版）。非致命方法，未就绪时 androidExportDebugDiag 静默
+// 跳过（不参与 ready 判定）。
+static jmethodID getExportDiagMethod(JNIEnv* env, jclass cls) {
+    return (*env)->GetStaticMethodID(env, cls, "exportDebugDiag", "()Ljava/lang/String;");
+}
+
+static jstring callStaticStringMethod(JNIEnv* env, jclass cls, jmethodID mid) {
+    return (*env)->CallStaticObjectMethod(env, cls, mid);
+}
+
 // jstring → Go string 的 C 侧转换原语。JNIEnv 调用必须留在 C preamble
 // （cgo 不支持 Go 代码里 -> 运算符），与上方 getRequestStartMethod 等一致。
 static const char* jstringToChars(JNIEnv* env, jstring j, jboolean* isCopy) {
@@ -159,6 +170,7 @@ var androidCtl struct {
 	startM       C.jmethodID
 	stopM        C.jmethodID
 	openBrowserM C.jmethodID
+	exportM      C.jmethodID // exportDebugDiag（调试版）；nil = 未缓存/无此方法
 	ready        bool
 }
 
@@ -298,6 +310,8 @@ func Java_com_wails_app_WarpVpnService_nativeStartVpn(env *C.JNIEnv, obj C.jobje
 // cancel 由 rollback（kernel/vpn 异步启动失败时）调用以停止另一组件。
 // 失败时经 androidRuntime.lastErr 上报（GetStatus 展示），并回滚已分配资源。
 func startVpnKernel(ctx context.Context, cancel context.CancelFunc, sandboxDir string, built *builtAndroid, fd int) {
+	// debugdiag：启动时开启调试数据收集（release 构建为 no-op）。
+	androidvpn.DebugSetDir(sandboxDir)
 	if ctx.Err() != nil {
 		failStartCtx(ctx, ctx.Err())
 		return
@@ -397,11 +411,14 @@ func startVpnKernel(ctx context.Context, cancel context.CancelFunc, sandboxDir s
 			androidRuntime.started = false
 			androidRuntime.lastErr = err.Error()
 		}
-		androidRuntime.mu.Unlock()
-		if current {
-			androidNotifyKernelFailed(name + "：" + err.Error())
-		}
+androidRuntime.mu.Unlock()
+	if current {
+		androidNotifyKernelFailed(name + "：" + err.Error())
 	}
+	// debugdiag：装配失败也收尾落盘（release 版为 no-op）。
+	androidvpn.DebugStop()
+	androidExportDebugDiag()
+}
 
 	// 装配完成前的最后一次取消检查：nativeStopVpn 可能已拆除了本实例
 	// （cancel 被调用）。此时不得再写入 androidRuntime（会复活已停止的
@@ -577,6 +594,9 @@ func Java_com_wails_app_WarpVpnService_nativeStopVpn(env *C.JNIEnv, obj C.jobjec
 			log.Printf("⚠ nativeStopVpn：关闭 Kernel 失败：%v", err)
 		}
 	}
+	// debugdiag：停止时收尾落盘并触发 Java 侧导出到 Download（调试版）。
+	androidvpn.DebugStop()
+	androidExportDebugDiag()
 	log.Println("✓ VPN 已停止")
 	return 0
 }
@@ -596,6 +616,7 @@ func Java_com_wails_app_MainActivity_nativeBridgeReady(env *C.JNIEnv, cls C.jcla
 	startM := C.getRequestStartMethod(env, clsRef)
 	stopM := C.getRequestStopMethod(env, clsRef)
 	openBrowserM := C.getOpenBrowserMethod(env, clsRef)
+	exportM := C.getExportDiagMethod(env, clsRef)
 	if unsafe.Pointer(startM) == nil || unsafe.Pointer(stopM) == nil || unsafe.Pointer(openBrowserM) == nil {
 		log.Println("⚠ nativeBridgeReady：找不到 requestStartVpn/requestStopVpn/openExternalBrowser 静态方法")
 		return -1
@@ -605,10 +626,43 @@ func Java_com_wails_app_MainActivity_nativeBridgeReady(env *C.JNIEnv, cls C.jcla
 	androidCtl.startM = startM
 	androidCtl.stopM = stopM
 	androidCtl.openBrowserM = openBrowserM
+	androidCtl.exportM = exportM
 	androidCtl.ready = true
 	androidCtl.mu.Unlock()
 	log.Println("✓ Android 反向 JNI 桥就绪（requestStartVpn/requestStopVpn/openExternalBrowser）")
 	return 0
+}
+
+// androidExportDebugDiag 请求 Java 侧把 debugdiag 数据打包到 MediaStore
+// Downloads 并返回 content URI（调试版）。release 构建无 exportDebugDiag 方
+// 法 → 静默跳过。VPN 停止/装配失败时调用，URI 打到 GUI 日志页供用户取文件。
+func androidExportDebugDiag() string {
+	androidCtl.mu.Lock()
+	cls, mid, ready := androidCtl.cls, androidCtl.exportM, androidCtl.ready
+	androidCtl.mu.Unlock()
+	if !ready || unsafe.Pointer(cls) == nil || unsafe.Pointer(mid) == nil {
+		return ""
+	}
+	var needsDetach C.int
+	env := C.getEnv(&needsDetach)
+	if env == nil {
+		return ""
+	}
+	defer C.releaseEnv(needsDetach)
+	js := C.callStaticStringMethod(env, cls, mid)
+	if unsafe.Pointer(js) == nil {
+		return ""
+	}
+	chars := C.jstringToChars(env, js, nil)
+	if chars == nil {
+		return ""
+	}
+defer C.releaseChars(env, js, chars)
+	uri := C.GoString(chars)
+	if uri != "" {
+		log.Printf("✓ 调试数据已导出：%s", uri)
+	}
+	return uri
 }
 
 // androidOpenExternalBrowser 请求 Java 侧用系统浏览器打开 URL（Android

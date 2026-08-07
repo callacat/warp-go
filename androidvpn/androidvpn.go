@@ -19,6 +19,7 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sagernet/sing-tun"
@@ -233,10 +234,42 @@ func (v *Vpn) NewConnectionEx(ctx context.Context, conn net.Conn, source, destin
 			})
 		}
 		defer closeBoth()
+		t0 := time.Now()
+		var upBytes, downBytes int64
+		var firstDown atomic.Int64 // 0=未到首字节；>0 为会话起点到首字节的毫秒数
 		done := make(chan struct{}, 2)
-		go func() { _, _ = io.Copy(upstream, conn); closeBoth(); done <- struct{}{} }()
-		go func() { _, _ = io.Copy(conn, upstream); closeBoth(); done <- struct{}{} }()
+		relay := func(dst io.Writer, src io.Reader, dir *int64, isDown bool) {
+			defer closeBoth()
+			defer func() { done <- struct{}{} }()
+			buf := make([]byte, 32*1024)
+			for {
+				nr, rerr := src.Read(buf)
+				if nr > 0 {
+					nw, werr := dst.Write(buf[:nr])
+					if nw > 0 {
+						*dir += int64(nw)
+						if isDown && firstDown.Load() == 0 {
+							firstDown.CompareAndSwap(0, time.Since(t0).Milliseconds())
+						}
+					}
+					if werr != nil {
+						return
+					}
+				}
+				if rerr != nil {
+					return
+				}
+			}
+		}
+		go relay(upstream, conn, &upBytes, false)
+		go relay(conn, upstream, &downBytes, true)
 		<-done
+		<-done
+		firstMs := firstDown.Load()
+		if downBytes == 0 {
+			firstMs = -1
+		}
+		logTunnelClosed(host, upBytes, downBytes, int(firstMs), time.Since(t0).Milliseconds(), nil)
 		if onClose != nil {
 			onClose(nil)
 		}
@@ -302,11 +335,12 @@ func (v *Vpn) relayUDP(ctx context.Context, conn N.PacketConn, destination M.Soc
 		return
 	}
 	defer remote.Close()
-	// Android：direct UDP 数据报经本机栈发出，socket 必须豁免出 VPN 路由
+	// Android：直接 UDP 数据报经本机栈发出，socket 必须豁免出 VPN 路由
 	// （protect），否则重新进入 TUN 造成环路风暴（v0.5.14 只 protect 了
 	// QUIC 拨号 socket，UDP relay 未豁免）。
 	protectConn(remote)
 
+	var total atomic.Int64
 	done := make(chan struct{}, 2)
 	go func() {
 		defer func() { done <- struct{}{} }()
@@ -321,6 +355,7 @@ func (v *Vpn) relayUDP(ctx context.Context, conn N.PacketConn, destination M.Soc
 				buffer.Release()
 				return
 			}
+			total.Add(int64(buffer.Len()))
 			buffer.Release()
 		}
 	}()
@@ -337,10 +372,15 @@ func (v *Vpn) relayUDP(ctx context.Context, conn N.PacketConn, destination M.Soc
 				buffer.Release()
 				return
 			}
+			total.Add(int64(buffer.Len()))
 			buffer.Release()
 		}
 	}()
 	<-done
+	<-done
+	// debugdiag：量化 UDP 直连泄漏（QUIC:443 / 非拦截 DNS:53），供"打不开
+	// 外网"分析。
+	logUDPClosed(destination.AddrString(), udpKind(destination.Port), total.Load(), nil)
 	if onClose != nil {
 		onClose(nil)
 	}

@@ -3,6 +3,7 @@ package com.wails.app;
 import android.annotation.SuppressLint;
 import android.content.ActivityNotFoundException;
 import android.content.BroadcastReceiver;
+import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
@@ -32,6 +33,10 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 
 import java.util.TimeZone;
+import java.util.Date;
+import java.text.SimpleDateFormat;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 
 import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
@@ -114,6 +119,68 @@ public class MainActivity extends AppCompatActivity {
             Log.e(TAG, "openExternalBrowser failed: " + url, e);
             nativeLogMessage("error", "打开浏览器失败：" + e.getMessage());
         }
+    }
+
+    /**
+     * Export debugdiag telemetry (getFilesDir()/debugdiag/*.tsv) to the public
+     * Downloads folder as a zip via MediaStore, then log the content URI to the
+     * GUI log page. Called from Go via the reverse-JNI bridge when the VPN stops
+     * (debugdiag-tagged builds only; release builds don't compile the collector).
+     * API 29+ only; on older versions or when there is no data, returns "" and
+     * does nothing. The zip is written on a background thread so the JNI call
+     * returns instantly.
+     */
+    public static String exportDebugDiag() {
+        final MainActivity a = sInstance;
+        if (a == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            return "";
+        }
+        final java.io.File dir = new java.io.File(a.getFilesDir(), "debugdiag");
+        if (!dir.isDirectory()) {
+            return "";
+        }
+        new Thread(() -> {
+            try {
+                java.text.SimpleDateFormat fmt =
+                        new java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US);
+                String name = "warp-go-debugdiag-" + fmt.format(new java.util.Date()) + ".zip";
+                ContentValues cv = new ContentValues();
+                cv.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
+                cv.put(MediaStore.MediaColumns.MIME_TYPE, "application/zip");
+                cv.put(MediaStore.MediaColumns.RELATIVE_PATH, "Download/");
+                Uri uri = a.getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, cv);
+                if (uri == null) {
+                    nativeLogMessage("error", "调试数据导出失败：无法创建 MediaStore 条目");
+                    return;
+                }
+                try (OutputStream os = a.getContentResolver().openOutputStream(uri);
+                     ZipOutputStream zos = new ZipOutputStream(os)) {
+                    java.io.File[] files = dir.listFiles();
+                    if (files == null) {
+                        return;
+                    }
+                    for (java.io.File f : files) {
+                        if (!f.isFile()) {
+                            continue;
+                        }
+                        zos.putNextEntry(new ZipEntry(f.getName()));
+                        try (InputStream in = new java.io.FileInputStream(f)) {
+                            byte[] buf = new byte[8192];
+                            int n;
+                            while ((n = in.read(buf)) > 0) {
+                                zos.write(buf, 0, n);
+                            }
+                        }
+                        zos.closeEntry();
+                    }
+                }
+                nativeLogMessage("info", "调试数据已导出：" + uri);
+            } catch (Exception e) {
+                Log.e(TAG, "exportDebugDiag failed", e);
+                nativeLogMessage("error", "调试数据导出失败：" + e.getMessage());
+            }
+        }).start();
+        return "started";
     }
 
     private static final String TAG = "WailsActivity";

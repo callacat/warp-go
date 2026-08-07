@@ -104,6 +104,21 @@ func decideTunnelTarget(action, origAddr string, mappedHost string) string {
 	return net.JoinHostPort(mappedHost, port)
 }
 
+// udpKind 把 UDP 直连流端口分类为 debugdiag 遥测类别（host-compilable
+// 纯函数）：53 → dns（非拦截 DNS 泄漏），443 → quic（浏览器 HTTP/3 直接
+// 泄漏），其余 → udp。两类泄漏在真机日志可见：
+// `[tun] UDP ...:443（直连）` 与 `[tun] UDP ...:53（直连）`。
+func udpKind(port uint16) string {
+	switch port {
+	case 53:
+		return "dns"
+	case 443:
+		return "quic"
+	default:
+		return "udp"
+	}
+}
+
 // rejectErr 是命中 reject 规则时返回给调用方的错误（与 M6 桌面端
 // proxy.errRejected 语义一致：连接被规则拒绝，绝不建连）。
 var rejectErr = errors.New("rejected by route")

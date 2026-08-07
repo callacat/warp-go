@@ -253,6 +253,12 @@ Android 版是 **Wails v3 Android 壳 + 自写 Java `VpnService`**（不使用 g
 > [!NOTE]
 > Android 版运行时行为已经远程模拟器验收通过（v0.5.17 起，见 [AGENTS.md §6](AGENTS.md#6-构建测试验证命令)）——TUN 建立、consent 流、UI 内一键注册、无 panic。
 
+### Android 调试（debugdiag）
+
+正式的 release 版不包含任何调试代码（**编译期排除**）：`debugdiag` 是一个在 `-tags debugdiag` 下才编译的 build-tag 门控调试数据收集，用来排查"隧道已建立但不出外网"类问题。它只记录三处数据到沙箱 `debugdiag/`：每个关闭 TCP 隧道的上下行字节与首字节耗时（判定 CONNECT 成功但没数据流回）、UDP 直连的 dns/quic/udp 泄漏分类、以及 tun0 的每 2s 吞吐采样。
+
+需要采集时，用 `workflow_dispatch` 触发 `.github/workflows/android-debugdiag.yml`，下载 `warp-android-debugdiag` artifact 的 `app-release.apk`——签名与正式版相同，**可直接覆盖安装而不丢 reg.json**。装好后正常使用，复现问题后**关闭 VPN**，GUI 日志页会显示"调试数据已导出"与 zip 文件 URI；在文件管理器的 `Download/warp-go-debugdiag-*.zip` 找到该文件发给开发者即可。
+
 ## 项目结构
 
 ```

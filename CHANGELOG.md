@@ -3,6 +3,36 @@
 本项目所有值得记录的变更。格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v0.5.26] - 2026-08-07
+
+### 调试设施（debugdiag，`-tags debugdiag` 构建）
+
+- **`build tag` 门控的调试数据收集器**，用于诊断"Android 无法访问外网"但所有 CONNECT
+  隧道均已建立的问题。启用：`-tags debugdiag`；**正式版（CI 用
+  `-tags production,android,with_gvisor`，不带 debugdiag）编译 `androidvpn/
+  debugdiag_stub.go` 的 no-op stub**——零 IO、零内存、零磁盘、零网络，
+  release 构建不携带任何调试代码（`androidvpn/debugdiag.go` 不被编译）。
+- **payload 层字节计数**（`debugdiag/tunnels.tsv`）：每个关闭的 TCP 隧道一行
+  `time seq host upBytes downBytes firstByteMs lifeMs err`——`firstByteMs` =
+  会话开始到首个下行字节的毫秒数（`-1` 表示未收到任何下行数据 = **CONNECT 成功
+  但数据没有流回**，即本特性的关键诊断信号）。
+- **UDP 直连量化**（`debugdiag/udp.tsv`）：每个关闭的 UDP 直连中继一行
+  `time host kind bytes err`，`kind` = `dns`（端口 53 未被拦截的漏直连）|
+  `quic`（端口 443 浏览器 HTTP/3 直连泄漏）| `udp`。
+- **tun0 采样**（`debugdiag/tun0.tsv`）：每 2s 采样一次 tun0 rx/tx 字节计数，
+  每行 `time txBytes deltaTx rxBytes deltaRx`——区分"隧道已建立但 payload 死
+  活"与"完全无流量"。
+- **生命周期**：VPN 启动时 `androidvpn.DebugSetDir(root)`（`<沙箱根>/debugdiag/`，
+  Android = `getFilesDir()/debugdiag`）；VPN 停止/回滚时 `androidvpn.DebugStop()`。
+- **导出**：停止时 Go 经反向 JNI 调 `MainActivity.exportDebugDiag()`，把
+  `debugdiag/` 打 zip 到 MediaStore Downloads 为
+  `warp-go-debugdiag-<timestamp>.zip`（API 29+），URI 打到 GUI 日志页。
+- **CI 构建**：新工作流 `.github/workflows/android-debugdiag.yml`
+  （workflow_dispatch）用 `-tags production,android,with_gvisor,debugdiag` +
+  `assembleRelease` 构建 APK，上传 artifact `warp-android-debugdiag`
+  （versionCode 按 ref 派生，可覆盖安装 v0.5.25+）；沿用 `warp-release.p12`
+  签名——**覆盖安装不丢 reg.json**。
+
 ## [v0.5.25] - 2026-08-06
 
 ### 修复

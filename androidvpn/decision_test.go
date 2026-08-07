@@ -348,3 +348,24 @@ func TestResolveAction(t *testing.T) {
 		})
 	}
 }
+
+// TestUDPKind 锁定 debugdiag UDP 直连流类别：53 → dns（非拦截 DNS 泄漏），
+// 443 → quic（浏览器 HTTP/3 直接泄漏），其余 → udp。
+func TestUDPKind(t *testing.T) {
+	tests := []struct {
+		port uint16
+		want string
+	}{
+		{53, "dns"},
+		{443, "quic"},
+		{123, "udp"},
+		{0, "udp"},
+		{8080, "udp"},
+		{65535, "udp"},
+	}
+	for _, tt := range tests {
+		if got := udpKind(tt.port); got != tt.want {
+			t.Errorf("udpKind(%d) = %q，期望 %q", tt.port, got, tt.want)
+		}
+	}
+}
