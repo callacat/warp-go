@@ -2,10 +2,13 @@ package tunnel
 
 import (
 	"context"
+	"io"
 	"net"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/quic-go/quic-go"
 )
 
 // newTestBundle 构造一个无真实 quic.Conn 的 connBundle——health 判定
@@ -109,5 +112,74 @@ func TestConnectFailureSuccessResetsWindow(t *testing.T) {
 	b.noteCONNECTSuccess()
 	if !b.failureSince.IsZero() || b.failureTargets != nil {
 		t.Fatal("成功 CONNECT 后失败窗口应清空")
+	}
+}
+
+// TestNoteDeadStreamConnectionLevelErrorReconnects 锁定 noteDeadStream 对
+// 连接级错误的处理：QUIC 连接死亡时（非 timeout、非 stream-reset），正在跑
+// 的隧道流必须主动触发重连——这是 15:22:00.461 同毫秒 21 条并发流
+// down:write 死掉（真机打不开外网根因）的修复：此前连接死亡后只有新请求
+// 才触发重连，页面卡"加载中"。
+func TestNoteDeadStreamConnectionLevelErrorReconnects(t *testing.T) {
+	c := newTestMasqueClient(t)
+	b := newTestBundle()
+	c.cur = b
+	// dialFn 注入：重连立即返回一个新 bundle，验证 reconnect 真的被触发。
+	newB := newTestBundle()
+	c.dialFn = func(context.Context) (*connBundle, error) { return newB, nil }
+
+	tc := &tunnelConn{client: c, bundle: b}
+	tc.noteDeadStream(net.ErrClosed) // 连接级错误（socket 被关）
+
+	// 重连是异步的（goroutine），轮询等待 cur 被替换。
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		c.connMu.RLock()
+		cur := c.cur
+		c.connMu.RUnlock()
+		if cur == newB {
+			return // 重连成功，cur 已被新 bundle 替换
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("连接级错误应触发重连：cur 未被新 bundle 替换")
+}
+
+// TestNoteDeadStreamStreamResetNoReconnect 锁定 stream-reset 不触发重连：
+// 单流 reset（如边缘拒绝单个目标）是目标级问题，不应牵连共享连接（与
+// shouldReconnectH3 的注释一致）。
+func TestNoteDeadStreamStreamResetNoReconnect(t *testing.T) {
+	c := newTestMasqueClient(t)
+	b := newTestBundle()
+	c.cur = b
+	tc := &tunnelConn{client: c, bundle: b}
+
+	tc.noteDeadStream(&quic.StreamError{ErrorCode: 1})
+	time.Sleep(50 * time.Millisecond) // 给异步 goroutine 时间（若有）
+
+	c.connMu.RLock()
+	cur := c.cur
+	c.connMu.RUnlock()
+	if cur != b {
+		t.Fatal("stream-reset 不应触发重连：cur 不应被替换")
+	}
+}
+
+// TestNoteDeadStreamEOFNoReconnect 锁定 io.EOF 不触发重连：正常关闭（对端
+// 发 FIN）是干净结束，不应唤醒重连（否则每个正常请求都触发重连风暴）。
+func TestNoteDeadStreamEOFNoReconnect(t *testing.T) {
+	c := newTestMasqueClient(t)
+	b := newTestBundle()
+	c.cur = b
+	tc := &tunnelConn{client: c, bundle: b}
+
+	tc.noteDeadStream(io.EOF)
+	time.Sleep(50 * time.Millisecond)
+
+	c.connMu.RLock()
+	cur := c.cur
+	c.connMu.RUnlock()
+	if cur != b {
+		t.Fatal("EOF 不应触发重连：cur 不应被替换")
 	}
 }

@@ -1071,6 +1071,8 @@ func releaseStream(s *http3.RequestStream) {
 type tunnelConn struct {
 	*streamConn
 	releaseOnce sync.Once
+	client *MasqueClient // 触发重连用（连接死亡时唤醒恢复，不等新请求）
+	bundle *connBundle   // retire 用（幂等：current!=bundle 时 no-op）
 }
 
 // Close 完整释放 H3 流。只关发送侧会让读方向永久阻塞（边缘保持隧道另一侧
@@ -1083,6 +1085,51 @@ func (t *tunnelConn) Close() error {
 		_ = reqStream.Close()
 	})
 	return nil
+}
+
+// Read 委托 streamConn，但在连接级错误（QUIC 连接死亡，非 EOF / 单流 reset）
+// 时异步唤醒重连：正在跑的流在连接被掐后立即触发恢复，而不是干等下一个
+// 新请求（Android TUN 复用流，连接死亡到新请求之间页面卡"加载中"——
+// 15:22:00.461 同毫秒 21 条并发流一起 down:write 的真机证据）。
+func (t *tunnelConn) Read(b []byte) (int, error) {
+	n, err := t.streamConn.Read(b)
+	if err != nil {
+		t.noteDeadStream(err)
+	}
+	return n, err
+}
+
+// Write 委托 streamConn，连接级错误同样唤醒重连（见 Read 注释）。
+func (t *tunnelConn) Write(b []byte) (int, error) {
+	n, err := t.streamConn.Write(b)
+	if err != nil {
+		t.noteDeadStream(err)
+	}
+	return n, err
+}
+
+// noteDeadStream 在连接级错误时触发重连：复用 shouldReconnectH3 的判定
+// （非 timeout、非 stream-reset = 连接级状态坏），异步 retire + reconnect。
+// io.EOF（对端正常 FIN 关闭）与单流 reset 一样不触发——否则每个正常请求
+// 关闭都会唤醒重连风暴。幂等安全：reconnect 的 singleflight 保证并发调用
+// 合并为一次；current != bundle 时 retire/reconnect 均为 no-op（另一
+// goroutine 已替换）。
+func (t *tunnelConn) noteDeadStream(err error) {
+	if t == nil || t.client == nil || t.bundle == nil {
+		return
+	}
+	if err == io.EOF {
+		return // 正常关闭（对端 FIN），非连接死亡
+	}
+	if !shouldReconnectH3(err, nil) {
+		return
+	}
+	go func() {
+		t.client.retireConnection(t.bundle)
+		ctx, cancel := context.WithTimeout(context.Background(), reconnectRetryMax*4)
+		defer cancel()
+		_ = t.client.reconnect(ctx, t.bundle)
+	}()
 }
 
 // 隧道是长命字节流：残留 deadline 会在传输中途掐断它（见 connectThroughEdge
@@ -1118,7 +1165,7 @@ func (c *MasqueClient) DialTunnel(ctx context.Context, targetAddr string) (net.C
 		req.Header.Set("Host", hostHeader+":"+hostPort)
 	}
 
-	reqStream, _, resp, err := c.establishCONNECT(ctx, req, connectExchangeTimeout)
+	reqStream, bundle, resp, err := c.establishCONNECT(ctx, req, connectExchangeTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("H3 CONNECT %s 失败：%w", connectTarget, err)
 	}
@@ -1139,6 +1186,8 @@ func (c *MasqueClient) DialTunnel(ctx context.Context, targetAddr string) (net.C
 			localAddr:     &net.TCPAddr{IP: net.IPv4zero},
 			remoteAddr:    &net.TCPAddr{IP: net.ParseIP(host), Port: port},
 		},
+		client: c,
+		bundle: bundle,
 	}, nil
 }
 
