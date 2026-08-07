@@ -138,7 +138,7 @@ jobs:
           grep -qE 'GetStaticMethodID\(env, cls, "exportDebugDiag", "\(\)Ljava/lang/String;"\)' androidbridge.go
           # debugdiag 收集器必须编译进此变体（否则导出空包）。
           grep -qE 'DebugSetDir' androidbridge.go
-          grep -qE 'func DebugSetDir' ../../androidvpn/debugdiag.go
+          grep -qE 'func DebugSetDir' ../androidvpn/debugdiag.go
 
       - name: 构建 Release APK（debugdiag 签名，可覆盖安装）
         working-directory: gui/build/android
