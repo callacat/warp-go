@@ -237,10 +237,16 @@ func (v *Vpn) NewConnectionEx(ctx context.Context, conn net.Conn, source, destin
 		t0 := time.Now()
 		var upBytes, downBytes int64
 		var firstDown atomic.Int64 // 0=未到首字节；>0 为会话起点到首字节的毫秒数
-		done := make(chan struct{}, 2)
+		type relayResult struct {
+			n   int64
+			err error
+			dir string
+		}
+		done := make(chan relayResult, 2)
 		relay := func(dst io.Writer, src io.Reader, dir *int64, isDown bool) {
+			r := relayResult{dir: map[bool]string{true: "down", false: "up"}[isDown]}
 			defer closeBoth()
-			defer func() { done <- struct{}{} }()
+			defer func() { done <- r }()
 			buf := make([]byte, 32*1024)
 			for {
 				nr, rerr := src.Read(buf)
@@ -248,28 +254,44 @@ func (v *Vpn) NewConnectionEx(ctx context.Context, conn net.Conn, source, destin
 					nw, werr := dst.Write(buf[:nr])
 					if nw > 0 {
 						*dir += int64(nw)
+						r.n += int64(nw)
 						if isDown && firstDown.Load() == 0 {
 							firstDown.CompareAndSwap(0, time.Since(t0).Milliseconds())
 						}
 					}
 					if werr != nil {
+						r.err = werr
 						return
 					}
 				}
 				if rerr != nil {
+					r.err = rerr
 					return
 				}
 			}
 		}
 		go relay(upstream, conn, &upBytes, false)
 		go relay(conn, upstream, &downBytes, true)
-		<-done
-		<-done
-		firstMs := firstDown.Load()
+		r1, r2 := <-done, <-done
+		firstMs := int(firstDown.Load())
 		if downBytes == 0 {
 			firstMs = -1
 		}
-		logTunnelClosed(host, upBytes, downBytes, int(firstMs), time.Since(t0).Milliseconds(), nil)
+		relayErr := r1.err
+		if relayErr == nil {
+			relayErr = r2.err
+		}
+		// 双向都 EOF（正常关闭）→ 记 nil；单方向早退（0 字节）→ 保留错误，
+		// 供区分"边缘断流（read upstream: EOF）"与"客户端放弃（read conn: EOF）"。
+		other := r2
+		if r1.err != nil && r2.err != nil {
+			if r1.err == io.EOF || r2.err == io.EOF {
+				relayErr = fmt.Errorf("%s:%v %s:%v", r1.dir, r1.err, r2.dir, r2.err)
+			}
+			_ = other
+		}
+		logTunnelClosed(host, upBytes, downBytes, firstMs,
+			time.Since(t0).Milliseconds(), relayErr)
 		if onClose != nil {
 			onClose(nil)
 		}
