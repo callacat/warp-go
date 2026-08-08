@@ -135,13 +135,17 @@ func defaultProbeDialer(ctx context.Context, addr net.Addr, tlsCfg *tls.Config, 
 	}
 	addrStr := udpAddr.String()
 
-	// 按地址族绑本地 socket，与 tunnel/masque.go:270 一致：IPv4 候选绑 IPv4zero、
-	// IPv6 候选绑 IPv6zero，确保发包的源地址族正确，避免双栈环境下的选源歧义。
+	// 按地址族绑本地 socket，与 tunnel/masque.go dialAddr 一致：IPv4 候选绑
+	// IPv4zero、IPv6 候选绑 IPv6zero，且用显式 udp4/udp6 而非双栈 "udp"——
+	// "udp" + IPv4-mapped 地址会把 IPv4 目标路由进 IPv6 socket/路由表，
+	// 无可用 IPv6 的主机内核报 ENETUNREACH，而专用 udp4 socket 可通。
+	listenFamily := "udp4"
 	listenAddr := &net.UDPAddr{IP: net.IPv4zero}
 	if udpAddr.IP.To4() == nil {
+		listenFamily = "udp6"
 		listenAddr = &net.UDPAddr{IP: net.IPv6zero}
 	}
-	udpConn, err := net.ListenUDP("udp", listenAddr)
+	udpConn, err := net.ListenUDP(listenFamily, listenAddr)
 	if err != nil {
 		return probeResult{Addr: addrStr}, fmt.Errorf("监听 UDP 失败：%w", err)
 	}

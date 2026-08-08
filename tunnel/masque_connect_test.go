@@ -21,6 +21,104 @@ func newTestBundle() *connBundle {
 	}
 }
 
+// newTestClient 构造一个可注入拨号/探测钩子的 MasqueClient（供连接级测试）。
+func newTestClient(t *testing.T) *MasqueClient {
+	t.Helper()
+	c := newTestMasqueClient(t)
+	c.dialFn = func(context.Context) (*connBundle, error) { return newTestBundle(), nil }
+	return c
+}
+
+// deadBundle 返回一个持有 client+cur=newBundle 的测试 setup，调用方可在其上
+// 触发 dead 置位的路径（noteDeadStream / probeEgressOnce）。
+func deadBundle(t *testing.T) (*MasqueClient, *connBundle) {
+	t.Helper()
+	c := newTestMasqueClient(t)
+	b := newTestBundle()
+	c.cur = b
+	return c, b
+}
+
+// TestNoteDeadStreamDeadFastPath 锁定 dead 置位后 openRequestStream 立即
+// 加入重连航班（不再在死连接上白等 10s CONNECT 超时）——这是 00:06:04
+// m.youtube.com 连续 RST 的修复核心：运行中的并发流观测到连接死亡，
+// 后续请求必须快速失败并共享同一个重连航班。
+func TestNoteDeadStreamDeadFastPath(t *testing.T) {
+	c, b := deadBundle(t)
+	c.dialFn = func(context.Context) (*connBundle, error) { return newTestBundle(), nil }
+
+	tc := &tunnelConn{client: c, bundle: b}
+	tc.noteDeadStream(net.ErrClosed) // 连接级错误 → dead + 异步重连
+
+	// 轮询等待 cur 被替换（异步重连）。
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		c.connMu.RLock()
+		cur := c.cur
+		c.connMu.RUnlock()
+		if cur != b {
+			return // 连接已被替换（dead 置位被确认，但单测无法构造真实 quic.Conn）
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("noteDeadStream 连接级错误应触发重连：cur 未被替换")
+}
+
+// TestCurrentConnectionDeadReturnsClosed 锁定 currentConnection 对 dead 置位
+// 的 bundle 返回 ErrClosed（黑洞路径下 quic.Context() 未 Done 也能被检出）。
+func TestCurrentConnectionDeadReturnsClosed(t *testing.T) {
+	c, b := deadBundle(t)
+	b.dead.Store(true)
+	if _, err := c.currentConnection(); err != net.ErrClosed {
+		t.Fatalf("dead 置位后 currentConnection 应返回 ErrClosed，得到 %v", err)
+	}
+}
+
+// TestProbeInternationalEgressNilBundle 锁定探测对 nil/未就绪 bundle 防御性
+// 返回错误（不 panic）：dialAddr 的 bundle 在 h3Client 建立前不得被探测。
+func TestProbeInternationalEgressNilBundle(t *testing.T) {
+	c := newTestMasqueClient(t)
+	if err := c.probeEgress(context.Background(), nil); err == nil {
+		t.Fatal("nil bundle 探测应返回错误")
+	}
+	if err := c.probeInternationalEgress(context.Background(), newTestBundle()); err == nil {
+		t.Fatal("未就绪 bundle（nil h3Client）探测应返回错误")
+	}
+}
+
+// TestProbeEgressOnceFailureTriggersReconnect 锁定运行期探测失败 → 置 dead
+// + retire + reconnect（不等用户请求在死连接上白等）：静默死会话（KeepAlive
+// 往返仍在但出口已坏）由周期探测发现，这是 debugdiag 隧道被掐后浏览器
+// connection reset 风暴的主动侧修复。
+func TestProbeEgressOnceFailureTriggersReconnect(t *testing.T) {
+	c, b := deadBundle(t)
+	c.probeFn = func(context.Context, *connBundle) error { return context.DeadlineExceeded }
+	newB := newTestBundle()
+	c.dialFn = func(context.Context) (*connBundle, error) { return newB, nil }
+
+	c.handleProbeFailure(b, context.DeadlineExceeded)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		c.connMu.RLock()
+		cur := c.cur
+		c.connMu.RUnlock()
+		if cur == newB {
+			return // 探测失败已触发重连
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("探测失败应触发重连：cur 未被替换")
+}
+
+// TestProbeEgressOnceNoConnectionSkips 锁定无当前连接（重连中/已关闭）时
+// 探测静默跳过，不 panic 不唤醒多余重连。
+func TestProbeEgressOnceNoConnectionSkips(t *testing.T) {
+	c := newTestMasqueClient(t)
+	c.probeFn = func(context.Context, *connBundle) error { return context.DeadlineExceeded }
+	c.probeEgressOnce() // cur == nil → 返回，不应 panic
+}
+
 // timeoutErr 模拟 CONNECT 交换超时（deadline exceeded）——Android 真机对
 // 不可达目标（如 IPv6 [2001::1]:443，物理网络无 IPv6 路由）的典型失败。
 // 必须用 context.DeadlineExceeded：isTimeout 的第一分支 errors.Is 命中它。

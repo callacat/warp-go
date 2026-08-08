@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -119,6 +120,21 @@ const (
 	connectFailureTargets = 2
 	reconnectRetryInitial = 100 * time.Millisecond
 	reconnectRetryMax     = 5 * time.Second
+
+	// 国际出口探测配置：验证边缘节点是否真的能连通境外目标。
+	// 使用 Google 公共 DNS IP (8.8.8.8:443) 作为探测目标——它在边缘网络内必达，
+	// 且不依赖 DNS 解析（避免循环依赖）。
+	probeEgressTarget  = "8.8.8.8:443"
+	probeEgressTimeout = 5 * time.Second
+
+	// egressProbeInterval 是运行期国际出口活性探测周期：每 20s 在共享 QUIC
+	// 连接上做一次到 probeEgressTarget 的 CONNECT。把静默死会话（KeepAlive
+	// 往返仍在、但国际出口已坏或路径被掐）的发现从"下一次用户 CONNECT 超时
+	// （10s×2）"提前到 20s 内——真机 debugdiag：隧道被掐瞬间同一连接上所有
+	// 并发流一起 read ... connection reset by peer（dn=0），浏览器看到
+	// "打不开外网"（v0.5.26 之后的新数据：00:06:04 m.youtube.com 连续 2 条
+	// RST 0 下行）。
+	egressProbeInterval = 20 * time.Second
 )
 
 // connBundle groups everything owned by a single QUIC connection attempt so the
@@ -131,6 +147,15 @@ type connBundle struct {
 	h3Trans   *http3.Transport
 	closeOnce sync.Once
 	healthMu  sync.Mutex
+
+	// dead 标记连接级故障已被观测（noteDeadStream / 运行期探测）：即使
+	// quicConn.Context() 尚未 Done（黑洞路径下 socket 仍在、KeepAlive 往返
+	// 没超时），后续请求也立即加入重连航班而不是在死连接上重试。重建后新
+	// bundle 零值开始；currentConnection 与 openRequestStream 在置位后直接
+	// 返回 net.ErrClosed，消除"死连接上 10s×2 CONNECT 超时"（debugdiag：
+	// 隧道被掐后 m.youtube.com 连续 2 条 read tcp ... connection reset by
+	// peer 且 dn=0——浏览器等满重试窗口才放弃）。
+	dead atomic.Bool
 
 	// A live QUIC path can coexist with a wedged H3 session. Track CONNECT
 	// timeouts in one short window so a single unreachable target doesn't cause
@@ -209,6 +234,10 @@ type MasqueClient struct {
 
 	// dialFn overrides the edge dial in lifecycle tests. Nil in production.
 	dialFn func(context.Context) (*connBundle, error)
+
+	// probeFn overrides the egress probe in tests. Nil in production (meaning
+	// probeInternationalEgress).
+	probeFn func(context.Context, *connBundle) error
 
 	// DNS cache to avoid redundant DoH queries for the same host
 	dnsCache   map[string]dnsCacheEntry
@@ -298,6 +327,7 @@ func NewMasqueClientContext(ctx context.Context, edgeAddrs []string, tlsConfig *
 		bundle, err := c.dial(ctx)
 		if err == nil {
 			c.cur = bundle
+			go c.egressProbeLoop()
 			return c, nil
 		}
 		log.Printf("MASQUE 连接失败（%v），%s 后重试 ...", err, backoff)
@@ -324,8 +354,9 @@ func NewMasqueClientContext(ctx context.Context, edgeAddrs []string, tlsConfig *
 	}
 }
 
-// dial tries each candidate edge address in turn, starting from the one that
-// last worked, and returns the first connection that reaches H3 SETTINGS.
+// dialAddr tries each candidate edge address in turn, starting from the one that
+// last worked, and returns the first connection that reaches H3 SETTINGS AND
+// passes the international egress probe.
 func (c *MasqueClient) dial(ctx context.Context) (*connBundle, error) {
 	var errs []string
 	n := len(c.edgeAddrs)
@@ -335,6 +366,14 @@ func (c *MasqueClient) dial(ctx context.Context) (*connBundle, error) {
 
 		bundle, err := c.dialAddr(ctx, addr)
 		if err == nil {
+			// 国际出口探测：验证该边缘能否连通境外目标。
+			// 避免国内边缘节点国际出口受限/故障（握手成功但境外流量被重置）。
+			if err := c.probeEgress(ctx, bundle); err != nil {
+				log.Printf("边缘 %s 国际出口探测失败（%v），尝试下一个 ...", addr, err)
+				bundle.close("egress probe failed")
+				errs = append(errs, fmt.Sprintf("%s: egress probe failed: %v", addr, err))
+				continue
+			}
 			c.addrIdx = idx
 			return bundle, nil
 		}
@@ -366,6 +405,100 @@ func unroutableFamily(err error) bool {
 		errors.Is(err, syscall.EHOSTUNREACH)
 }
 
+// probeInternationalEgress 在指定 bundle 上做一次到 probeEgressTarget
+// （8.8.8.8:443，WARP 边缘网内必达的境外目标）的 H3 CONNECT 探测，验证该
+// 边缘的国际出口真的可用——握手成功但境外流量被掐（国内边缘节点国际出口
+// 受限/故障）会让后续所有用户 CONNECT 在边缘侧被重置，拨号时探测一次就能
+// 在选边缘阶段排除它们。成功返回 nil（探测流已释放），失败返回错误。
+//
+// 直接在传入 bundle 上开流并做 CONNECT 交换，绝不触碰 openRequestStream /
+// reconnect：初始拨号时 c.cur 尚未安装（currentConnection 返回 ErrClosed），
+// 走 establishCONNECT 会触发 reconnect → runReconnect → dial →
+// probeInternationalEgress 的无限递归。探测只关心"CONNECT 能否建立"，成功
+// 立即 releaseStream 归还边缘并发流配额；失败由调用方决定丢弃 bundle 或
+// 标记 dead。
+func (c *MasqueClient) probeInternationalEgress(ctx context.Context, bundle *connBundle) error {
+	if bundle == nil || bundle.h3Client == nil {
+		return errors.New("国际出口探测：bundle 未就绪")
+	}
+	req := &http.Request{
+		Method: "CONNECT",
+		Host:   probeEgressTarget,
+		URL:    &url.URL{Scheme: "https", Host: probeEgressTarget},
+		Header: make(http.Header),
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+
+	probeCtx, cancel := context.WithTimeout(ctx, probeEgressTimeout)
+	defer cancel()
+	stream, err := bundle.h3Client.OpenRequestStream(probeCtx)
+	if err != nil {
+		return fmt.Errorf("国际出口探测开流失败：%w", err)
+	}
+	defer releaseStream(stream)
+	resp, err := connectThroughEdge(stream, req, connectDeadline(probeCtx, probeEgressTimeout))
+	if err != nil {
+		return fmt.Errorf("国际出口探测 %s 失败：%w", probeEgressTarget, err)
+	}
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("国际出口探测 %s 返回 %d", probeEgressTarget, resp.StatusCode)
+	}
+	return nil
+}
+
+// probeEgress 是国际出口探测的统一入口：生产走 probeInternationalEgress，
+// 测试可注入 probeFn 假实现（egressProbeLoop 与 dial 共用）。
+func (c *MasqueClient) probeEgress(ctx context.Context, bundle *connBundle) error {
+	if c.probeFn != nil {
+		return c.probeFn(ctx, bundle)
+	}
+	return c.probeInternationalEgress(ctx, bundle)
+}
+
+// egressProbeLoop 运行期活性探测：每 egressProbeInterval 做一次
+// probeEgressOnce，把静默死会话（KeepAlive 往返仍在但出口已坏或路径被掐）
+// 的发现从"下一次用户 CONNECT 超时"提前到探测周期内。lifeCtx 取消
+// （Close）即退出。
+func (c *MasqueClient) egressProbeLoop() {
+	ticker := time.NewTicker(egressProbeInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			c.probeEgressOnce()
+		case <-c.lifeCtx.Done():
+			return
+		}
+	}
+}
+
+// probeEgressOnce 对当前连接做一次国际出口探测；失败即置 dead 并唤醒重连
+// 航班——不等用户请求在死连接上白等（debugdiag：隧道被掐后 m.youtube.com
+// 连续 2 条 connection reset by peer、dn=0）。无当前连接（重连中/已关闭）
+// 时跳过。
+func (c *MasqueClient) probeEgressOnce() {
+	bundle, err := c.currentConnection()
+	if err != nil {
+		return // 无当前连接（重连中/已关闭），下轮再探
+	}
+	if err := c.probeEgress(c.lifeCtx, bundle); err != nil {
+		c.handleProbeFailure(bundle, err)
+	}
+}
+
+// handleProbeFailure 处理探测失败：置 dead（黑洞路径下 quic.Context() 未
+// Done 时后继续复用会白等 10s）→ retire → 唤醒重连航班，不等用户请求在
+// 死连接上触发失败。独立成方法便于单测（currentConnection 需要真实
+// quic.Conn，无法在单元测试中构造）。
+func (c *MasqueClient) handleProbeFailure(bundle *connBundle, err error) {
+	log.Printf("运行期出口探测失败（%v），标记连接死亡并重连", err)
+	bundle.dead.Store(true)
+	_ = c.retireConnection(bundle)
+	ctx, cancel := context.WithTimeout(context.Background(), reconnectRetryMax*4)
+	defer cancel()
+	_ = c.reconnect(ctx, bundle)
+}
+
 func (c *MasqueClient) dialAddr(ctx context.Context, edgeAddr string) (*connBundle, error) {
 	log.Printf("QUIC 拨号 %s（SNI=%s）...", edgeAddr, c.tlsConfig.ServerName)
 
@@ -374,12 +507,20 @@ func (c *MasqueClient) dialAddr(ctx context.Context, edgeAddr string) (*connBund
 		return nil, fmt.Errorf("解析边缘地址 %s 失败：%w", edgeAddr, err)
 	}
 
-	// Bind the local socket in the same address family as the edge.
+	// Bind the local socket in the same address family as the edge. Use an
+	// explicit udp4/udp6 so the socket is not a dual-stack one: "udp" + an
+	// IPv4-mapped address routes IPv4 targets through the IPv6 socket and table,
+	// and on hosts without working IPv6 the kernel answers ENETUNREACH — while
+	// a dedicated udp4 socket succeeds. debugdiag: 33 × "write udp [::]:X->
+	// 162.159.198.2:4443: sendmsg: network is unreachable" killed the whole
+	// shared QUIC connection at once (each H3 stream shares one UDP socket).
+	listenFamily := "udp4"
 	listenAddr := &net.UDPAddr{IP: net.IPv4zero}
 	if udpAddr.IP.To4() == nil {
+		listenFamily = "udp6"
 		listenAddr = &net.UDPAddr{IP: net.IPv6zero}
 	}
-	udpConn, err := net.ListenUDP("udp", listenAddr)
+	udpConn, err := net.ListenUDP(listenFamily, listenAddr)
 	if err != nil {
 		return nil, fmt.Errorf("监听 UDP 失败：%w", err)
 	}
@@ -460,6 +601,13 @@ func (c *MasqueClient) currentConnection() (*connBundle, error) {
 		return nil, net.ErrClosed
 	}
 	if c.cur.quicConn == nil || c.cur.h3Client == nil {
+		return nil, net.ErrClosed
+	}
+	// dead 置位 = 连接级故障已被观测（noteDeadStream / 运行期探测）：黑洞
+	// 路径下 quic.Context() 可能仍未 Done，但继续复用只会让每个请求在死
+	// 连接上白等 10s CONNECT 超时。立即判失效，让 openRequestStream 加入
+	// 重连航班。
+	if c.cur.dead.Load() {
 		return nil, net.ErrClosed
 	}
 	// Check if the QUIC connection is still alive — the context is canceled
@@ -1071,8 +1219,8 @@ func releaseStream(s *http3.RequestStream) {
 type tunnelConn struct {
 	*streamConn
 	releaseOnce sync.Once
-	client *MasqueClient // 触发重连用（连接死亡时唤醒恢复，不等新请求）
-	bundle *connBundle   // retire 用（幂等：current!=bundle 时 no-op）
+	client      *MasqueClient // 触发重连用（连接死亡时唤醒恢复，不等新请求）
+	bundle      *connBundle   // retire 用（幂等：current!=bundle 时 no-op）
 }
 
 // Close 完整释放 H3 流。只关发送侧会让读方向永久阻塞（边缘保持隧道另一侧
@@ -1124,6 +1272,10 @@ func (t *tunnelConn) noteDeadStream(err error) {
 	if !shouldReconnectH3(err, nil) {
 		return
 	}
+	// 先置 dead：即使 QUIC 连接在黑洞下 Context() 未 Done，后续并发请求
+	// 也会经 currentConnection 立即加入重连航班，不再在死连接上重试
+	// （v0.5.26 只 retire 本 bundle，重连期间新请求仍会叠在死连接上超时）。
+	t.bundle.dead.Store(true)
 	go func() {
 		t.client.retireConnection(t.bundle)
 		ctx, cancel := context.WithTimeout(context.Background(), reconnectRetryMax*4)
@@ -1214,6 +1366,17 @@ func (c *MasqueClient) establishCONNECT(ctx context.Context, req *http.Request, 
 		releaseStream(stream)
 		if firstErr == nil {
 			firstErr = err
+		}
+		// dead 置位（noteDeadStream / 运行期探测已观测到连接级故障）→ 不再
+		// 在死连接上重试 CONNECT（10s×2），直接 retire + 加入重连航班。
+		// 否则隧道被掐后每个并发请求各白等一次超时才恢复，浏览器在等待
+		// 窗口内全看到 connection reset（debugdiag：dn=0 并发 RST 风暴）。
+		if bundle.dead.Load() {
+			_ = c.retireConnection(bundle)
+			if reconnectErr := c.reconnect(ctx, bundle); reconnectErr != nil {
+				return nil, nil, nil, fmt.Errorf("%v；恢复 HTTP/3 连接失败：%w", err, reconnectErr)
+			}
+			continue
 		}
 		if !bundle.connectFailureRequiresReconnect(err, ctx.Err(), req.Host, packetsBefore) {
 			return nil, nil, nil, err
