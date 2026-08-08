@@ -319,6 +319,7 @@ warp-go/
 7. **Android 验收已转正**（v0.5.17 起）——远程模拟器（LDPlayer `adb connect`)完成 consent / UI 一键注册 / TUN 建立 / 无 panic 验收；`warp=on` 无法在 root 模拟器 shell 内验证（root 流量绕过 VpnService 路由），用 tun0 计数增长替代。历史修复：v0.5.1 修 /system/bin 只读崩溃；v0.5.2 修启动内核失败。构建仍 CI-only（本地无 SDK/NDK/JDK）。
 8. **Android 需手动放入 reg.json**——注册信息不在 UI 内生成，需从桌面端 `-reg` 复制进沙箱 `getFilesDir()` 才能启动 VPN（v0.5.1 起注册写盘已正确落到沙箱，UI 内"一键注册"可用）。
 9. **Android UI 为初版 consent 流**——首启自动弹授权对话框；React 前端按钮触发路径为后续版本。Wails v3 Android 仍 experimental（alpha2.119，已知 bug：onDestroy #5859、bindings 上下文 #5810 等）。
+10. **Android 境外流量打不开（未解决，v0.5.27 起放弃继续修复）**——VPN 能启动、国内流量正常、隧道 CONNECT 全建立，但境外流量周期性被重置/超时。历经 v0.5.13→v0.5.27 共 9 轮修复未果（最新一轮含 udp4/6 socket、快速重连、国际出口探测）。完整证据链与接手方向见 [AGENTS.md §6.5「未解决问题交接」](AGENTS.md#65-已完成里程碑2026-08-01)。
 
 ## 文档
 

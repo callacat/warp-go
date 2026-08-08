@@ -411,3 +411,18 @@ T4 ─▶ T5 ─┘        (T3: decision module)        (T6: exports)  (T10/T11:
 - [x] 文档一致（CHANGELOG v0.5.0、AGENTS.md M7、README Android 节、本计划 §14/reinit §14）——T13a
 
 **收尾说明**：T1–T13 全部完成（代码 12 提交 + CI 修复 4 提交 + 文档 1 提交），v0.5.0 tag 已推送、Actions 全绿、APK/AAB 已发布。真机验收清单见 §11，交付用户。
+
+---
+
+## 16. 后续交接（2026-08-08）：Android 境外流量问题未解决
+
+> 本计划里程碑（T1–T13）完成后，用户真机持续反馈"境外流量打不开"，历经
+> **v0.5.13 → v0.5.27 共 9 轮修复**（M9.5–M9.13，见 AGENTS.md §6.5）仍未解决。
+> 2026-08-08 用户决定**放弃继续修复**。最新一轮（v0.5.27）改动：
+> `tunnel/masque.go` + `scanner/probe.go`（udp4/udp6 地址族、connBundle.dead 标志、
+> probeInternationalEgress 拨号探测、egressProbeLoop 20s 活性探测）+ 5 新单测，
+> 已发布（tag v0.5.27）但**真机复测仍失败**。
+
+**接手者必读**：AGENTS.md §6.5「未解决问题交接（2026-08-08）」——含完整 debugdiag
+证据链、已排除方向、6 个按优先级排序的判别实验（最关键：同网络桌面 CLI/官方
+客户端对照，区分"WARP 服务被 ISP QoS"与"本实现 TUN 栈问题"）。
