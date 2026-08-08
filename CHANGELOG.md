@@ -3,6 +3,37 @@
 本项目所有值得记录的变更。格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### 修复（Android 外网打不开，debugdiag 数据驱动）
+
+- **隧道共享 QUIC 连接反复死亡后恢复慢 → 境外流量 connection reset**（最新
+  debug 包 `tunnels.tsv`：42s 内 3 次批量死亡，`network is unreachable` 33 次
+  全来自 `[::]:X` 双栈 socket 发往 IPv4 边缘 `162.159.198.2:4443`；隧道被掐
+  瞬间同一连接上所有并发境外流 `read tcp <境外IP>:443: connection reset by
+  peer` 且 dn=0，浏览器"打不开外网"）。
+  - `connBundle` 新增 **`dead` 标志**（并发安全）：`noteDeadStream` / 运行期
+    探测观测到连接级故障即置位，`currentConnection` 与 `establishCONNECT`
+    立即把后续请求加入重连航班——**消除死连接上 10s×2 CONNECT 白等**（此前
+    quic.Context() 在黑洞路径下未 Done，新请求仍叠在死连接上反复超时）。
+  - **`dialAddr` socket 地址族收紧**：`net.ListenUDP("udp")`（双栈，`[::]`）
+    改显式 **`udp4`/`udp6`**——"udp" + IPv4-mapped 地址把 IPv4 目标路由进
+    IPv6 路由表，无可用 IPv6 的主机内核报 `ENETUNREACH`（debugdiag 33 次同源）；
+    专用 udp4 socket 正常出网。`scanner/probe.go` 同步。
+- **拨号时国际出口探测**（`probeInternationalEgress`）：候选边缘 H3 SETTINGS
+  就绪后先做一次到 `8.8.8.8:443` 的隧道内 CONNECT，失败即换下一个边缘——
+  排除"握手成功但国际出口被掐"的坏边缘（上一会话遗留的未完成功能，顺带修复
+  编译失败）。探测直接在传入 bundle 上开流，不触碰 reconnect（避免初始拨号
+  `c.cur` 未安装时的无限递归）。
+- **运行期活性探测**（`egressProbeLoop`，20s 周期）：静默死会话（KeepAlive
+  往返仍在但出口已坏/路径被掐）由周期探测发现并主动 retire+重连，恢复从
+  "下一次用户 CONNECT 超时（10s×2）"提前到 20s 内。`probeFn` seam 供单测注入。
+
+### 测试
+
+- 新增 5 个单测：dead 置位快速重连 / currentConnection dead 检出 / 探测
+  nil 守卫 / 探测失败触发重连 / 无连接跳过探测。
+
 ## [v0.5.26] - 2026-08-07
 
 ### 调试设施（debugdiag，`-tags debugdiag` 构建）
