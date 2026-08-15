@@ -181,7 +181,7 @@ jobs:
       - name: 生成 Wails 绑定
         working-directory: gui
         run: |
-          wails3 generate bindings
+          wails3 generate bindings -ts
 
       - name: 构建前端
         working-directory: gui/frontend
@@ -295,7 +295,7 @@ jobs:
       # 标签文件（androidbridge.go/androidconfig.go）。
       - name: 生成 Wails 绑定（Android 标签）
         working-directory: gui
-        run: wails3 generate bindings -f '-tags android' -clean=true
+        run: wails3 generate bindings -ts -f '-tags android' -clean=true
 
       - name: 构建前端
         working-directory: gui/frontend

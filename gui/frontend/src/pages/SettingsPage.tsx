@@ -224,13 +224,6 @@ export default function SettingsPage() {
                 placeholder="https://gh-proxy.org/"
               />
             </Field>
-            <Field label="日志目录" hint="logs 目录（相对执行目录，可选）">
-              <input
-                className={inputCls}
-                value={cfg.logDir}
-                onChange={(e) => set("logDir", e.target.value)}
-              />
-            </Field>
           </div>
         ) : (
           <p className="text-sm text-slate-500 dark:text-slate-400">加载中…</p>

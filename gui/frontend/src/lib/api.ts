@@ -97,7 +97,6 @@ function loadService(): Promise<ServiceAPI | null> {
       try {
         // Wails v3 把 bindings 生成到 frontend/bindings/warp/gui/（带 module 路径）；
         // 之前误用 bindings/gui/ 导致永远命中占位/演示模式。
-        // @ts-expect-error - bindings 是 .js 无 .d.ts（TS7016），运行时由 Wails 桥接
         const mod = (await import("../../bindings/warp/gui/index.js")) as {
           Service?: Record<string, unknown>;
         };
@@ -148,7 +147,6 @@ function mockConfig(): AppConfig {
     geoDir: "geo",
     geoRepo: "MetaCubeX/meta-rules-dat",
     autoUpdateDays: 7,
-    logDir: "logs",
     systemProxy: mockState.sysProxy,
     allowUDP: false,
     downloadProxy: "https://gh-proxy.org/",

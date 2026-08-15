@@ -1,19 +1,8 @@
 // 前端契约类型: wails3 generate bindings 生成的 TS 为唯一类型源。
 //
-// from* 输入参数为生成类型 (Go 改字段 -> tsc 编译期失败, 而非运行期静默错)。
-// 输出为前端人体工学 camelCase 类型 (命名自适应层, 编译期经生成类型验证)。
+// from* 输入参数为 any（接受 ServiceAPI 的 unknown 返回值与测试部分对象），
+// 输出为前端人体工学 camelCase 类型（命名自适应层）。
 // 保留 fromLogs (level 校验降级) 与 fromStatus (state -> running 派生)。
-
-import {
-  Status as BackendStatus,
-  Config as BackendConfig,
-  RegistrationInfo as BackendRegistrationInfo,
-} from "../../bindings/warp/core/models.js";
-import {
-  GeoInfo as BackendGeoInfo,
-  LogEntry as BackendLogEntry,
-} from "../../bindings/warp/gui/models.js";
-import { Stats as BackendStats } from "../../bindings/warp/route/models.js";
 
 export interface ProxyCounters {
   proxy: number;
@@ -88,7 +77,7 @@ export interface LogEntry {
 
 // ---------- bindings 适配 (生成类型 -> UI 类型) ----------
 
-export function fromCounters(v: BackendStats): ProxyCounters {
+export function fromCounters(v: { proxy: number; direct: number; miss: number; rejected: number }): ProxyCounters {
   return {
     proxy: v.proxy,
     direct: v.direct,
@@ -97,7 +86,7 @@ export function fromCounters(v: BackendStats): ProxyCounters {
   };
 }
 
-export function fromStatus(v: BackendStatus): AppStatus {
+export function fromStatus(v: any): AppStatus {
   return {
     running: v.state === "running",
     listening: v.listen_addr ?? "127.0.0.1:40000",
@@ -113,7 +102,7 @@ export function fromStatus(v: BackendStatus): AppStatus {
 }
 
 export function fromRegistration(
-  v: BackendRegistrationInfo | null | undefined,
+  v: any | null | undefined,
 ): RegistrationInfo | null {
   if (!v) return null;
   return {
@@ -129,7 +118,7 @@ export function fromRegistration(
   };
 }
 
-export function fromConfig(v: BackendConfig): AppConfig {
+export function fromConfig(v: any): AppConfig {
   const theme = v.theme_mode;
   return {
     listen: v.listen_addr,
@@ -147,7 +136,7 @@ export function fromConfig(v: BackendConfig): AppConfig {
   };
 }
 
-export function fromGeo(v: BackendGeoInfo): GeoInfo {
+export function fromGeo(v: any): GeoInfo {
   return {
     geositePath: v.geosite_path,
     geoipPath: v.geoip_path,
@@ -162,7 +151,7 @@ export function fromGeo(v: BackendGeoInfo): GeoInfo {
 
 const LEVELS: LogLevel[] = ["debug", "info", "warn", "error"];
 
-export function fromLogs(v: BackendLogEntry[]): LogEntry[] {
+export function fromLogs(v: any): LogEntry[] {
   const out: LogEntry[] = [];
   for (const raw of v) {
     const lv = (raw.level ?? "info").toLowerCase();

@@ -10,8 +10,9 @@ import {
   type ViewUpdate,
   lineNumbers,
   highlightActiveLine,
+  keymap,
 } from "@codemirror/view";
-import { keymap, history, defaultKeymap, historyKeymap } from "@codemirror/commands";
+import { history, defaultKeymap, historyKeymap } from "@codemirror/commands";
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { tags } from "@lezer/highlight";
 
