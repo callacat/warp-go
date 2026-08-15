@@ -1,0 +1,245 @@
+# Android 根因判别实验（阶段 0 自主方案，不依赖东哥）
+# ─────────────────────────────────────────────────────────────────
+# 背景：v0.5.13→v0.5.27 九轮修复未解「境外流量打不开」。按东哥指示，阶段 0
+# 判别不得依赖用户（debugdiag 包 / 手动对照 / 真机复测），改由 CI 自主执行：
+#   - 用代码静态分析缩小假设范围        → Job 1
+#   - 用 CI 拉上游代码查证能力           → Job 2
+#   - 用 CI Android 模拟器构造实验       → Job 3
+#
+# 三个 job 相互独立，workflow_dispatch 触发；inputs.jobs 可单选
+# （留空 = 全部）。判别决策表与用法见 .omo/plans/warp-go-stage0-probe.md。
+name: Android Root-Cause Probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      jobs:
+        description: '运行的判别 job（逗号分隔；留空 = 全部）'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+jobs:
+  # ═══════════════════════════════════════════════════════════════
+  # Job 1：UDP/DNS 泄漏面静态审计（H1/H2 代码面证据，零依赖零成本）
+  # ═══════════════════════════════════════════════════════════════
+  udp-egress-audit:
+    if: ${{ inputs.jobs == '' || contains(inputs.jobs, 'udp-egress-audit') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 枚举 UDP/DNS 直连泄漏面
+        run: python3 .github/workflows/scripts/udp-egress-audit.py
+
+      - name: 上传审计报告
+        uses: actions/upload-artifact@v4
+        with:
+          name: stage0-udp-egress-audit
+          path: stage0-udp-egress-audit.md
+
+  # ═══════════════════════════════════════════════════════════════
+  # Job 2：上游 UDP-in-MASQUE 支持查证（H1 修复路径可行性）
+  #   H1 实锤后两条路：UDP-in-MASQUE（需上游协议支持）或 QUIC 降级 H2 + 文档明示。
+  #   ——查证上游 badafans/warp-go 是否存在 UDP 进隧道实现，决定走哪条。
+  # ═══════════════════════════════════════════════════════════════
+  upstream-udp-support:
+    if: ${{ inputs.jobs == '' || contains(inputs.jobs, 'upstream-udp-support') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 拉取上游 badafans/warp-go 全量主分支
+        run: |
+          git remote add badafans https://github.com/badafans/warp-go.git
+          if git ls-remote --exit-code badafans refs/heads/main >/dev/null 2>&1; then
+            git fetch badafans main
+          else
+            git fetch badafans master:refs/remotes/badafans/main
+          fi
+
+      - name: 查证上游 UDP over MASQUE / UDP 直连实现
+        run: |
+          {
+            echo "# 阶段0 Job2：上游 UDP-in-MASQUE 支持查证"
+            echo
+            echo "## 上游存在 UDP 相关实现的位置（隧道/转发光谱）"
+            git grep -n -i -E 'udp|quic' badafans/main -- 'tunnel/*.go' '*.go' 2>/dev/null | \
+              grep -i -E 'udp.*(proxy|over|tunnel)|relay.*udp|QUICVersion|datagram' | head -30 || true
+            echo
+            echo "## 上游提交历史中是否有 UDP 隧道化改动"
+            git log --oneline badafans/main --grep='udp' -i -20 2>/dev/null || true
+            echo
+            echo "## 结论（人工判定）："
+            echo "- 有 UDP over MASQUE 实现 → H1 可走 UDP-in-MASQUE 修复路径"
+            echo "- 无 → 上游也不支持协议级 UDP 代理，H1 只能 QUIC 降级 H2 + 文档明示"
+          } > stage0-upstream-udp-support.md
+          cat stage0-upstream-udp-support.md
+
+      - name: 上传查证报告
+        uses: actions/upload-artifact@v4
+        with:
+          name: stage0-upstream-udp-support
+          path: stage0-upstream-udp-support.md
+
+  # ═══════════════════════════════════════════════════════════════
+  # Job 3：模拟器数据面验证（替代真机 debugdiag）
+  #   目标（在 CI 模拟器自己的出口网络下）：
+  #     ① 装 debugdiag APK → 建 TUN → 隧道 TCP CONNECT 数据面是否通
+  #     ② 观测 udp.tsv 的 kind=quic / kind=dns 泄漏行（H1/H2 在运行面复现）
+  #     ③ 关 H3（adb 设 QUIC 禁用）前后对比（判别"QUIC 直连是否可用"）
+  #   已知限制：模拟器物理出口 ≠ 东哥手机所在网络，无法复现"用户 ISP 封锁"；
+  #   本 job 定位 = 数据面完整性 + 泄漏面运行观测，与 Job1/2 合成判别证据。
+  #   构建部分复用 android-debugdiag 流程；abiFilters 已含 x86_64 可跑模拟器。
+  #   注：VpnService consent 自动化 / 流量触发脚本首版为框架，触发前在 CI 调参。
+  # ═══════════════════════════════════════════════════════════════
+  emulator-data-plane:
+    if: ${{ inputs.jobs == '' || contains(inputs.jobs, 'emulator-data-plane') }}
+    runs-on: ubuntu-24.04
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      NDK_VERSION: 26.3.11579264
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Linux GUI 构建依赖（wails3 CLI 编译需要）
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-4-dev libwebkitgtk-6.0-dev
+
+      - name: 设置 JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+
+      - name: 设置 Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: 安装 SDK 组件（platform-tools / platforms / build-tools / NDK）
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0" "ndk;${{ env.NDK_VERSION }}" >/dev/null
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/${{ env.NDK_VERSION }}" >> "$GITHUB_ENV"
+
+      - name: 设置 Go 1.26
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.x'
+          check-latest: true
+          cache: true
+
+      - name: 设置 Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: gui/frontend/package-lock.json
+
+      - name: 安装 wails3 CLI
+        run: |
+          go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-alpha2.119
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: 整理 Go 依赖
+        working-directory: gui
+        run: go mod tidy
+
+      - name: 生成 Android overlay
+        working-directory: gui
+        run: wails3 android overlay:gen -out build/android/overlay.json -config build/config.yml
+
+      - name: 生成 Wails 绑定（Android 标签）
+        working-directory: gui
+        run: wails3 generate bindings -f '-tags android' -clean=true
+
+      - name: 构建前端
+        working-directory: gui/frontend
+        run: |
+          npm ci || npm install
+          npm run build
+
+      # 模拟器是 x86_64 镜像：只构建 x86_64 的 c-shared（debugdiag），
+      # 比 arm64+x86_64 双架构省一半时间；app 的 abiFilters 已含 x86_64。
+      - name: 编译 c-shared 库（x86_64，debugdiag）
+        working-directory: gui
+        env:
+          CC: ${{ env.ANDROID_NDK_HOME }}/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android21-clang
+          CGO_ENABLED: '1'
+          GOOS: android
+          GOARCH: amd64
+        run: |
+          VERSION="stage0-probe"
+          mkdir -p build/android/app/src/main/jniLibs/x86_64
+          go build -buildmode=c-shared -overlay build/android/overlay.json \
+            -tags production,android,with_gvisor,debugdiag -trimpath -buildvcs=false \
+            -ldflags="-w -s -X main.version=${VERSION}" \
+            -o build/android/app/src/main/jniLibs/x86_64/libwails.so
+
+      - name: 构建 debugdiag APK
+        working-directory: gui/build/android
+        shell: bash
+        run: |
+          chmod +x ./gradlew
+          ./gradlew assembleRelease --no-daemon
+
+      # 模拟器判别实验主体。consent 用 appops（root 模拟器）预授权，避免 UI 点击：
+      #   - 若 appops 不可用，fallback 到 `adb shell input tap` 点授权弹窗（需按
+      #     模拟器分辨率调坐标，首次在 CI 调参）。
+      # 触发流量：app 内启动 VPN 需先注册（注册走 HTTPS 到 Cloudflare API，模拟器
+      # 出口可达）。注册/启动的 UI 自动化在真实 CI 上按 logcat 校准。
+      - name: 启动模拟器并运行数据面判别
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          force-avd-creation: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
+          disable-animations: true
+          script: |
+            set -euxo pipefail
+            adb install -r gui/build/android/app/build/outputs/apk/release/app-release.apk
+            # VPN consent 预授权（模拟器 root；失败则走 input tap fallback）
+            adb shell appops set com.wails.app ACTIVATE_VPN allow || true
+            # 启动 app，等待首帧
+            adb shell am start -n com.wails.app/.MainActivity
+            sleep 8
+            # 触发注册与启动（首次需在 CI 用 uiautomator dump 校准坐标/文本，
+            # 或临时 adb 调 JNI 导出绕过 UI）——TODO stage0 首次调参点
+            # --- 判别前先开 TLS/HTTP 数据面探测（CONNECT 隧道） ---
+            # TUN 起来后 app 本身即代理全部流量；h3 开关：
+            #   H3 on : 浏览器 QUIC 直连会出现在 udp.tsv kind=quic
+            #   H3 off: 无 quic 泄漏 → 对比数据面
+            # --- 停止 VPN 后从 Download 拉取 debugdiag zip 解析 ---
+            adb shell am force-stop com.wails.app || true
+
+      - name: 解析 debugdiag 并断言（数据面 / QUIC 泄漏 / DNS 泄漏）
+        run: |
+          mkdir -p stage0-emulator
+          # debugdiag zip 在模拟器 Download；用 adb pull 后 unzip、逐文件统计
+          # 断言样例（以实际拉到的文件为准，首次在 CI 校准）：
+          #   tun0.tsv   两个采样点 tx 增长        → 数据面有流量
+          #   udp.tsv    kind=quic 行数            → H1 泄漏观测
+          #   tunnels.tsv firstByteMs=-1 比例       → 隧道数据回传健康度
+          echo "（首版：以 CI 实拉 debugdiag 产物为准，脚本在此扩展解析断言）" \
+            > stage0-emulator/NOTES.md
+
+      - name: 上传模拟器判别产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: stage0-emulator-data-plane
+          path: |
+            stage0-emulator/**
+            gui/build/android/app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: warn
