@@ -369,3 +369,25 @@ func TestUDPKind(t *testing.T) {
 		}
 	}
 }
+
+// TestShouldBlockUDP 锁定 QUIC:443 拦截判定（v0.5.28 阶段5）：只有 443 端口
+// 返回 true（浏览器 HTTP/3 探测），其余 UDP 放行直连。拦截后丢弃包，浏览器
+// 回退 TCP:443 → WARP 隧道。
+func TestShouldBlockUDP(t *testing.T) {
+	tests := []struct {
+		port uint16
+		want bool
+	}{
+		{443, true},   // QUIC:443 → 拦截
+		{53, false},   // DNS → DNS 拦截路径处理，不到这里
+		{80, false},   // HTTP/3 非标准端口 → 放行（极少见）
+		{123, false},  // NTP → 放行
+		{8080, false}, // 其他 → 放行
+		{0, false},    // 非法端口 → 放行
+	}
+	for _, tt := range tests {
+		if got := shouldBlockUDP(tt.port); got != tt.want {
+			t.Errorf("shouldBlockUDP(%d) = %v，期望 %v", tt.port, got, tt.want)
+		}
+	}
+}

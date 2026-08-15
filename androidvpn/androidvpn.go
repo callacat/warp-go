@@ -309,7 +309,26 @@ func (v *Vpn) NewPacketConnectionEx(ctx context.Context, conn N.PacketConn, sour
 		v.handleDNSQuery(conn, destination, onClose)
 		return
 	}
-	// UDP：当前直接经本机网络栈转发（与桌面端"UDP 不走隧道"一致）。
+	// QUIC:443 拦截（v0.5.28 阶段5）：浏览器 HTTP/3（QUIC:443）走 UDP 直连
+	// （relayUDP → 物理网络），运营商封锁 UDP/QUIC 直连 → 浏览器外网打不开。
+	// 上游 warp-svc 只有 ConnectTcpProxy（不支持 CONNECT-UDP / RFC 9298），
+	// UDP 无法走 WARP 隧道。拦截后丢弃 QUIC 包，浏览器自动回退 HTTP/2 over
+	// TCP:443 → NewConnectionEx → WARP 隧道 → 通。
+	//
+	// 这是九轮修复未触碰的 UDP 直连面：v0.5.13→v0.5.27 全在 TCP CONNECT 层
+	// 打转，从没动过 UDP:443 直连。Chrome/Firefox 对 QUIC 失败的标准回退
+	// 行为保证此方案有效（QUIC 探测超时后立即 TCP fallback，延迟约 100-300ms）。
+	if shouldBlockUDP(destination.Port) {
+		log.Printf("[tun] UDP %s → %s:%d（QUIC 拦截，丢弃 → 浏览器回退 TCP）",
+			source.AddrString(), destination.AddrString(), destination.Port)
+		logUDPClosed(destination.AddrString(), "quic-blocked", 0, nil)
+		_ = conn.Close()
+		if onClose != nil {
+			onClose(nil)
+		}
+		return
+	}
+	// 其余 UDP：直接经本机网络栈转发（与桌面端"UDP 不走隧道"一致）。
 	log.Printf("[tun] UDP %s → %s（直连）", source.AddrString(), destination.String())
 	go v.relayUDP(ctx, conn, destination, onClose)
 }

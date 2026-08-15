@@ -5,6 +5,24 @@
 
 ## [Unreleased]
 
+### 修复（Android 外网打不开，阶段 5 — QUIC:443 拦截）
+
+- **UDP:443 (QUIC/HTTP3) 直连泄漏**（v0.5.13→v0.5.27 九轮未解根因）：
+  浏览器 HTTP/3（QUIC:443）走 UDP 直连路径（`relayUDP` → 物理网络），
+  运营商封锁 UDP/QUIC 直连 → 浏览器外网打不开。九轮修复全在 TCP CONNECT
+  层打转（DNS 拦截、IP→域名还原、SERVFAIL 回退），从未触碰 UDP 直连面。
+  上游 warp-svc 只有 `ConnectTcpProxy`，不支持 CONNECT-UDP（RFC 9298），
+  UDP 无法走 WARP 隧道。
+  - **修复**：在 TUN 栈 `NewPacketConnectionEx` 拦截 UDP:443，丢弃包让
+    浏览器回退 HTTP/2 over TCP:443 → `NewConnectionEx` → WARP 隧道 → 通。
+    Chrome/Firefox 对 QUIC 失败的标准回退行为保证此方案有效（QUIC 探测
+    超时后立即 TCP fallback，延迟约 100-300ms）。
+  - 新增 `shouldBlockUDP(port uint16) bool` 纯函数（host-compilable，
+    可单测），`NewPacketConnectionEx` 调用它判定。
+  - DNS:53 拦截路径不受影响（在 QUIC 拦截之前返回）；非 443 UDP 直连
+    不受影响。
+  - **待真机验收**（东哥验收标准：真机打开境外网站 + warp=on）。
+
 ### 重构（契约层，阶段 2）
 
 - **bindings 单源化**：`gui/frontend/src/lib/types.ts` 从手写防御性 normalizer（`unknown` → 猜测字段名）重构为 Wails 生成类型 → UI 类型的编译期安全适配层。删手写 `num()`/`str()` 猜测逻辑，改用生成的 `BackendStatus`/`BackendConfig`/`BackendStats` 等类型——Go 改字段时 `tsc` 编译期失败而非运行期静默错。

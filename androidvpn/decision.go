@@ -104,6 +104,23 @@ func decideTunnelTarget(action, origAddr string, mappedHost string) string {
 	return net.JoinHostPort(mappedHost, port)
 }
 
+// quicBlockPort 是触发 QUIC 拦截的 UDP 端口。HTTP/3（QUIC）标准端口 443，
+// 浏览器在该端口做 QUIC 探测；拦截后丢弃包，浏览器回退 HTTP/2 over TCP
+// （Chrome/Firefox 标准行为），TCP 经 NewConnectionEx 走 WARP 隧道。
+const quicBlockPort uint16 = 443
+
+// shouldBlockUDP 判定 TUN 内 UDP 流是否应拦截（丢弃而非直连）。
+// 返回 true 时 NewPacketConnectionEx 丢弃包并关闭连接，强制上层回退 TCP。
+//
+// 当前只拦截 QUIC:443：上游 warp-svc 只有 ConnectTcpProxy（不支持
+// CONNECT-UDP / RFC 9298），UDP 无法走隧道；运营商封 UDP/QUIC 直连 →
+// 浏览器外网打不开。拦截后浏览器回退 TCP:443 → WARP 隧道 → 通。
+//
+// 纯函数（host-compilable），可单测；NewPacketConnectionEx 调用它。
+func shouldBlockUDP(port uint16) bool {
+	return port == quicBlockPort
+}
+
 // udpKind 把 UDP 直连流端口分类为 debugdiag 遥测类别（host-compilable
 // 纯函数）：53 → dns（非拦截 DNS 泄漏），443 → quic（浏览器 HTTP/3 直接
 // 泄漏），其余 → udp。两类泄漏在真机日志可见：

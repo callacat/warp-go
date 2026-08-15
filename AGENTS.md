@@ -154,7 +154,9 @@ go test ./androidvpn/... ./gui/...                       # 决策逻辑 + androi
 
 ### 未解决问题交接（2026-08-08）：Android 境外流量打不开（历经 v0.5.13→v0.5.27 共 9 轮修复未果）
 
-> **状态**：用户决定放弃继续修复。以下为完整交接信息，供后续 Agent/人类接手。**接手第一步永远是向用户索取最新 debugdiag 包**（v0.5.27 复测时的 `warp-go-debugdiag-*.zip`）——本交接基于 20260808 包，v0.5.27 的新包尚未分析。
+> **状态（2026-08-16 更新）**：阶段5 已实施修复——**QUIC:443 拦截**。根因判定：浏览器 HTTP/3（QUIC:443）走 UDP 直连（`relayUDP` → 物理网络），运营商封 UDP/QUIC 直连 → 外网打不开。九轮修复全在 TCP CONNECT 层，从未触碰 UDP 直连面。修复：在 TUN 栈 `NewPacketConnectionEx` 拦截 UDP:443，丢弃包让浏览器回退 TCP:443 → WARP 隧道。上游 warp-svc 只有 ConnectTcpProxy，不支持 CONNECT-UDP（RFC 9298），UDP 无法走隧道。**待真机验收**（东哥验收标准：真机打开境外网站 + warp=on）。
+>
+> 以下为原交接信息（保留供参考）。
 
 **症状**：Android 版 VPN 能启动、国内流量正常、隧道 CONNECT 全建立，但**境外流量打不开**（浏览器连接被重置/超时）。桌面 CLI（同网络）是否复现未验证。
 
