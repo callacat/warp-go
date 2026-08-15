@@ -99,51 +99,76 @@ jobs:
             exit 1
           }
 
+          # 冲突 issue 创建（预检测发现冲突时共用）：已存在未关闭的冲突 issue 则跳过。
+          # 绝不自动解决冲突，一律留待人工处理。
+          create_conflict_issue() {
+            local upstream="$1" conflicts="$2"
+            gh label create "conflict ⚠️" --description "上游合并冲突，需人工解决" --force >/dev/null 2>&1 || true
+            existing=$(gh issue list --state open --label "conflict ⚠️" --search "sync upstream" --json number --jq '.[0].number // empty' 2>/dev/null || true)
+            if [ -n "$existing" ]; then
+              echo "已存在冲突 issue #${existing}，跳过创建"
+              return 0
+            fi
+            BODY=$(printf '%s\n' \
+              "上游 ${upstream}/warp-go 预检测（merge-tree）发现合并冲突，未创建 PR，需人工处理。" \
+              "" \
+              "冲突文件（从 merge-tree 输出推断）：" \
+              "${conflicts}" \
+              "" \
+              "请本地执行：" \
+              "1. git fetch ${upstream}" \
+              "2. git merge ${upstream}/main" \
+              "3. 解决冲突后推送分支并手动开 PR")
+            gh issue create \
+              --title "⚠️ 上游合并冲突预检测（${upstream}）" \
+              --body "$BODY" \
+              --label "conflict ⚠️" >/dev/null
+          }
+
           # 冲突预检测（merge-tree）：不实际改工作区，先算合并的冲突面。
           # 提前在 PR 之前发现冲突，避免"开 PR 才发现"的往返。
           #   - 上游已是 HEAD 祖先（无新提交）→ 跳过该上游
-          #   - 经典 3 参数形式（git merge-tree <base> <b1> <b2>）：退出码恒 0，
-          #     冲突时输出含冲突标记（<<<<<<< / ======= / >>>>>>>）
+          #   - git ≥ 2.38 用 merge-tree --write-tree（2 参，自动取 merge-base）：
+          #     冲突时退出码 1（0=无冲突，其它=异常），输出带 CONFLICT 行，无歧义。
+          #   - 老版本 git（如 ubuntu 22.04 的 2.34）不支持 --write-tree，回退
+          #     经典 3 参形式（git merge-tree <base> <b1> <b2>）：退出码恒 0，
+          #     冲突时输出带 + 前缀的冲突标记（+<<<<<<< / +======= / +>>>>>>>），
+          #     用修正后的 regex（^\+?）判断。
           precheck_conflict() {
             local upstream="$1"
-            local base out
+            local base out conflicts status GIT_VER
             if git merge-base --is-ancestor "$upstream/main" HEAD 2>/dev/null; then
               echo "  ${upstream} 已包含，跳过预检测"
               return 0
             fi
             base=$(git merge-base HEAD "$upstream/main")
-            out=$(git merge-tree "$base" HEAD "$upstream/main" 2>&1 || true)
-            if [ -z "$out" ]; then
-              echo "  ${upstream} 预检测：无冲突"
-              return 0
+            # 版本门控：git ≥ 2.38（major*100+minor ≥ 238）才支持 merge-tree --write-tree
+            GIT_VER=$(git --version | awk '{print $3}')
+            if awk -v v="$GIT_VER" 'BEGIN{n=split(v,a,"."); exit !(a[1]*100+a[2]>=238)}'; then
+              git merge-tree --write-tree HEAD "$upstream/main" >/tmp/merge-tree-out.$$ 2>&1
+              status=$?
+              if [ "$status" -eq 0 ]; then
+                echo "  ${upstream} 预检测：无冲突"
+                return 0
+              fi
+              if [ "$status" -ne 1 ]; then
+                echo "::warning::${upstream} 预检测：merge-tree 运行异常（rc=${status}），跳过预检测"
+                return 0
+              fi
+              conflicts=$(grep -E '^CONFLICT' /tmp/merge-tree-out.$$ | head -20 || true)
+              echo "::error::${upstream} 预检测发现冲突（提前中止，不创建 PR）"
+              create_conflict_issue "$upstream" "$conflicts"
+              exit 1
             fi
-            # 有冲突标记即视为冲突
-            if ! printf '%s' "$out" | grep -qE '^(<<<<<<<|>>>>>>>)'; then
+            out=$(git merge-tree "$base" HEAD "$upstream/main" 2>&1 || true)
+            # 冲突标记带 + 前缀；无输出或无冲突标记即视为无冲突
+            if [ -z "$out" ] || ! printf '%s' "$out" | grep -qE '^\+?<<<<<<<|^\+?>>>>>>>'; then
               echo "  ${upstream} 预检测：无冲突"
               return 0
             fi
             conflicts=$(printf '%s' "$out" | grep -E '^\+<<<<<<<|^\+=======|^\+>>>>>>>' | head -20 || true)
             echo "::error::${upstream} 预检测发现冲突（提前中止，不创建 PR）"
-            gh label create "conflict ⚠️" --description "上游合并冲突，需人工解决" --force >/dev/null 2>&1 || true
-            existing=$(gh issue list --state open --label "conflict ⚠️" --search "sync upstream" --json number --jq '.[0].number // empty' 2>/dev/null || true)
-            if [ -n "$existing" ]; then
-              echo "已存在冲突 issue #${existing}，跳过创建"
-            else
-              BODY=$(printf '%s\n' \
-                "上游 ${upstream}/warp-go 预检测（merge-tree）发现合并冲突，未创建 PR，需人工处理。" \
-                "" \
-                "冲突文件（从 merge-tree 输出推断，可能有 ± 前缀）：" \
-                "${conflicts}" \
-                "" \
-                "请本地执行：" \
-                "1. git fetch ${upstream}" \
-                "2. git merge ${upstream}/main" \
-                "3. 解决冲突后推送分支并手动开 PR")
-              gh issue create \
-                --title "⚠️ 上游合并冲突预检测（${upstream}）" \
-                --body "$BODY" \
-                --label "conflict ⚠️" >/dev/null
-            fi
+            create_conflict_issue "$upstream" "$conflicts"
             exit 1
           }
 
