@@ -1,0 +1,4 @@
+{"file": ".trellis/tasks/08-15-stage2-contract/research/bindings-single-source.md", "reason": "验收对照：生成 TS 字段名规则、多返回值元组、方法名不转换"}
+{"file": ".trellis/tasks/08-15-stage2-contract/research/stats-json-tag.md", "reason": "验收对照：Go 消费点零影响、fromCounters 简化方案"}
+{"file": ".trellis/tasks/08-15-stage2-contract/research/geobaseurl-dead-field.md", "reason": "验收对照：选项 3+2 改动点清单 + 无连带影响确认"}
+{"file": ".trellis/tasks/08-15-stage2-contract/prd.md", "reason": "验收标准 AC1-AC10"}

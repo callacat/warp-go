@@ -1,0 +1,3 @@
+{"file": ".trellis/tasks/08-15-stage3-tunnel/research/udp-dedup.md", "reason": "tunnel/ 与 proxy/ 双份 UDP/SOCKS5 逐行对比与退役方案"}
+{"file": ".trellis/tasks/08-15-stage3-tunnel/research/masque-split.md", "reason": "masque.go 2219 行拆分方案：函数→文件分配表、跨职责依赖分析"}
+{"file": ".trellis/tasks/08-15-stage3-tunnel/research/geosite-index.md", "reason": "geosite 匹配热路径索引方案 + GEO 换引擎收敛设计"}

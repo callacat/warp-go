@@ -1,0 +1,4 @@
+{"file": ".trellis/tasks/08-15-stage2-contract/research/bindings-single-source.md", "reason": "wails3 generate bindings TS 输出形态（字段名=json tag/无 tag 用 Go 名）、前端改造清单、生成命令"}
+{"file": ".trellis/tasks/08-15-stage2-contract/research/stats-json-tag.md", "reason": "route.Stats 全部消费点清单 + 推荐 tag 命名 + Go 测试零影响验证"}
+{"file": ".trellis/tasks/08-15-stage2-contract/research/geobaseurl-dead-field.md", "reason": "geoBaseURL 端到端断裂链 + 选项 3+2 推荐改动点清单"}
+{"file": ".trellis/tasks/08-15-stage2-contract/design.md", "reason": "设计决策 D1-D6：tag 命名/geoBaseURL 方案/bindings 单源类型化适配器/演示模式检测/saveConfig/register 简化"}

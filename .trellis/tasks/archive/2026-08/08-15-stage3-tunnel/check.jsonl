@@ -1,0 +1,2 @@
+{"file": ".trellis/tasks/08-15-stage3-tunnel/research/udp-dedup.md", "reason": "退役后验证：确认 tunnel 包无悬挂引用被删符号"}
+{"file": ".trellis/tasks/08-15-stage3-tunnel/research/masque-split.md", "reason": "拆分后验证：确认 11 个风险点（双重锁/invalidateDoHBundle 三调用方/noteDeadStream→reconnect 链）"}
