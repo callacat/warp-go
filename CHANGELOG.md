@@ -33,6 +33,37 @@
   往返仍在但出口已坏/路径被掐）由周期探测发现并主动 retire+重连，恢复从
   "下一次用户 CONNECT 超时（10s×2）"提前到 20s 内。`probeFn` seam 供单测注入。
 
+### 修复（CI/发布纪律，版本单源漏出口）
+
+- **sync-upstream 冲突预检测 regex 失效（预检测死代码）**：经典 3 参
+  `git merge-tree` 的冲突标记带 `+` 前缀（`+<<<<<<<` / `+>>>>>>>`），旧 regex
+  `^(<<<<<<<|>>>>>>>)` 永不命中 → 预检测恒判"无冲突"提前 return，冲突文件提取成
+  不可达死代码（真实 `git merge` 守卫仍安全，仅"提前中止、避免开 PR 才发现"的优化
+  失效）。修复：版本门控（git ≥ 2.38）优先用 `git merge-tree --write-tree`（冲突时
+  退出码 1，输出含 `CONFLICT` 行，无歧义）；老版本 git 回退经典 3 参形式并修正 regex
+  为 `^\+?<<<<<<<|^\+?>>>>>>>`。本地构造真实冲突/无冲突 fork 仓库 4 场景
+  （write-tree × 冲突/无冲突、legacy × 冲突/无冲突）验证判定与退出码全部正确。
+- **Windows CLI PE 版本资源恒为陈旧 `0.5.3`（版本单源漏出口）**：根
+  `versioninfo.json` StringFileInfo 写死 `0.5.3`，CI sed 找 `0\.0\.0\.0` 永不命中 →
+  每次 tag 发版 Windows CLI 的资源管理器"详细信息"版本恒 0.5.3（`-X main.version`
+  注入仍正确，仅 PE 资源陈旧）。修复：改回 `0.0.0.0` 占位符（与
+  `gui/versioninfo.json` 一致），恢复 CI sed 命中。
+- **Docker 镜像内二进制恒为 `dev`（版本单源漏出口）**：Dockerfile 构建无
+  `-X main.version` 注入 → GHCR 镜像 `warp -version` 恒 dev。修复：Dockerfile 增加
+  `ARG VERSION=dev` + `-ldflags "-X main.version=${VERSION}"`；docker-ghcr 工作流从
+  `github.ref_name` 提取 tag 版本（main 分支回退 dev）经 build-args 注入。
+
+### 变更（CI 构建缓存与并发）
+
+- **Go/npm 依赖缓存**：build-release（test / build-binary / build-gui /
+  build-android）4 处 setup-go 显式 `cache: true`（依赖模块缓存，go.sum 不变则复用，
+  省每次 tag 全量重编依赖）；build-gui / build-android 与 android-debugdiag 的
+  setup-node 加 `cache: 'npm'` + lock 文件路径。
+- **test job 去掉冗余全量编译**：`go vet ./...` 与 `go test ./...` 已覆盖编译，
+  删除独立的 `go build ./...`（少一遍全量编译）。
+- **构建并发取消**：build-release / docker-ghcr 加 `concurrency` group（按 ref），
+  防 force-push 同 tag 或连续 dispatch 重叠构建；android-debugdiag 同加。
+
 ### 测试
 
 - 新增 5 个单测：dead 置位快速重连 / currentConnection dead 检出 / 探测
