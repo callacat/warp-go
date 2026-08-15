@@ -13,6 +13,11 @@ on:
 permissions:
   contents: write
 
+# 同一 ref（tag）的并发运行互相取消：防 force-push 同 tag 或连续 dispatch 重叠构建
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   BINARY_NAME: warp
 
@@ -28,12 +33,10 @@ jobs:
         with:
           go-version: '1.26.x'
           check-latest: true
+          cache: true # 依赖模块缓存：go.sum 不变则复用 runner 缓存，省全量重编依赖
 
       - name: 静态检查
         run: go vet ./...
-
-      - name: 编译
-        run: go build ./...
 
       # Android 目标编译检查（CGO=0：androidbridge.go 的 JNI cgo 代码被排除，
       # 但 T2 桩 / T4 kernel / androidconfig.go 等 android 标签代码必须可编译）。
@@ -72,6 +75,7 @@ jobs:
         with:
           go-version: '1.26.x'
           check-latest: true
+          cache: true # 依赖模块缓存：go.sum 不变则复用 runner 缓存，省全量重编依赖
 
       - name: 安装 goversioninfo（Windows PE 版本资源生成）
         run: |
@@ -140,11 +144,14 @@ jobs:
         with:
           go-version: '1.26.x'
           check-latest: true
+          cache: true # 依赖模块缓存：go.sum 不变则复用 runner 缓存，省全量重编依赖
 
       - name: 设置 Node 22
         uses: actions/setup-node@v4
         with:
           node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: gui/frontend/package-lock.json
 
       - name: 安装 wails3 CLI
         run: |
@@ -257,11 +264,14 @@ jobs:
         with:
           go-version: '1.26.x'
           check-latest: true
+          cache: true # 依赖模块缓存：go.sum 不变则复用 runner 缓存，省全量重编依赖
 
       - name: 设置 Node 22
         uses: actions/setup-node@v4
         with:
           node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: gui/frontend/package-lock.json
 
       - name: 安装 wails3 CLI
         run: |

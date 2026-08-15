@@ -12,6 +12,10 @@ name: Android DebugDiag Build
 on:
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
 jobs:
   build-android-debugdiag:
     runs-on: ubuntu-24.04
@@ -48,11 +52,14 @@ jobs:
         with:
           go-version: '1.26.x'
           check-latest: true
+          cache: true # 依赖模块缓存：go.sum 不变则复用 runner 缓存
 
       - name: 设置 Node 22
         uses: actions/setup-node@v4
         with:
           node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: gui/frontend/package-lock.json
 
       - name: 安装 wails3 CLI
         run: |
