@@ -11,6 +11,21 @@ import (
 	"github.com/quic-go/quic-go"
 )
 
+// newTestMasqueClient 构造一个无隧道状态的最小客户端：lifeCtx 可取消以便
+// 重连 goroutine 退出，edgeAddrs 为空使隧道拨号必然失败（且不会触碰
+// tlsConfig）。与 NewMasqueClient 的字段初始化保持一致。
+func newTestMasqueClient(t *testing.T) *MasqueClient {
+	t.Helper()
+	lifeCtx, lifeStop := context.WithCancel(context.Background())
+	t.Cleanup(lifeStop)
+	return &MasqueClient{
+		lifeCtx:   lifeCtx,
+		lifeStop:  lifeStop,
+		dnsCache:  make(map[string]dnsCacheEntry),
+		dnsFlight: make(map[string]*dnsFlightResult),
+	}
+}
+
 // newTestBundle 构造一个无真实 quic.Conn 的 connBundle——health 判定
 // （noteProgressingCONNECTFailure）只碰 healthMu/failureSince/failureTargets，
 // 均同包可构造；receivedPackets() 对 nil quicConn 返回 0（等价"交换期间无新包"）。
