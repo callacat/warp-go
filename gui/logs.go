@@ -68,6 +68,15 @@ func (r *ringLogger) Append(line string) {
 	r.mu.Unlock()
 }
 
+// Clear 清空环形缓冲（日志页"清空"按钮调用）。
+func (r *ringLogger) Clear() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.buf = make([]LogEntry, ringCap)
+	r.next = 0
+	r.full = false
+}
+
 // Snapshot 返回最近 n 条（按时间正序）。
 func (r *ringLogger) Snapshot(n int) []LogEntry {
 	r.mu.Lock()

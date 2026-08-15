@@ -398,13 +398,24 @@ func (s *Service) GetGeo() (GeoInfo, error) {
 		info.BaseURL = "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest"
 	}
 
+	var latestMtime time.Time
 	if fi, err := os.Stat(info.GeositePath); err == nil {
 		info.GeositeUpdated = fi.ModTime().Format("2006-01-02 15:04")
+		if fi.ModTime().After(latestMtime) {
+			latestMtime = fi.ModTime()
+		}
 	}
 	if fi, err := os.Stat(info.GeoIPPath); err == nil {
 		info.GeoIPUpdated = fi.ModTime().Format("2006-01-02 15:04")
+		if fi.ModTime().After(latestMtime) {
+			latestMtime = fi.ModTime()
+		}
 	}
-	info.LastChecked = time.Now().Format("2006-01-02 15:04")
+	// LastChecked 用 GEO 文件的最新 mtime 作为"上次检查时间"代理值，
+	// 而非 time.Now()——后者每次调用都返回当前时间，没有信息量。
+	if !latestMtime.IsZero() {
+		info.LastChecked = latestMtime.Format("2006-01-02 15:04")
+	}
 	return info, nil
 }
 
@@ -573,6 +584,12 @@ func (s *Service) GetLogs(limit int) []LogEntry {
 		limit = 200
 	}
 	return ringLog.Snapshot(limit)
+}
+
+// ClearLogs 清空日志环形缓冲（日志页"清空"按钮调用）。
+// 此前前端只清了本地 state，后端缓冲不变——轮询下一帧旧日志又回来。
+func (s *Service) ClearLogs() {
+	ringLog.Clear()
 }
 
 // GetVersion 返回构建版本（前端设置页展示）。版本号经 ldflags 注入，

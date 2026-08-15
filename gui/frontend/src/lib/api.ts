@@ -456,6 +456,19 @@ export async function checkUpdate(): Promise<UpdateInfo> {
   return (raw as UpdateInfo) ?? { current: "", latest: "", has_update: false, url: "", tag: "" };
 }
 
+// clearLogs 清空后端日志环形缓冲（LogsPage "清空" 按钮）。
+export async function clearLogs(): Promise<void> {
+  const svc = await loadService();
+  if (!svc) {
+    mockState.logs = [];
+    return;
+  }
+  // 桌面端有 ClearLogs 绑定；演示/占位模式直接清本地
+  if ("ClearLogs" in svc && typeof (svc as Record<string, unknown>).ClearLogs === "function") {
+    await (svc as Record<string, () => Promise<void>>).ClearLogs();
+  }
+}
+
 // openExternalBrowser 用系统浏览器打开 URL（桌面走默认浏览器，Android 跳
 // 第三方浏览器而非 WebView 内打开）。
 export async function openExternalBrowser(url: string): Promise<void> {

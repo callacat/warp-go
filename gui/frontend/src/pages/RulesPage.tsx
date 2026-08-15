@@ -2,37 +2,59 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Save, RefreshCw, FileText } from "lucide-react";
 import { getRules, saveRules, reloadRules } from "../lib/api";
 import { Button, Card } from "../components/ui";
+import { usePoll } from "../lib/usePoll";
+import { useAsyncAction } from "../lib/useAsyncAction";
+import { createCodeMirrorEditor, type CodeMirrorEditor } from "../lib/codeMirror";
 
 export default function RulesPage() {
   const [text, setText] = useState("");
   const [dirty, setDirty] = useState(false);
-  const [busy, setBusy] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
-  const taRef = useRef<HTMLTextAreaElement>(null);
+  const { busy, error, notice, run, clear } = useAsyncAction();
+  const editorHostRef = useRef<HTMLDivElement>(null);
+  const editorRef = useRef<CodeMirrorEditor | null>(null);
+  const dirtyRef = useRef(false);
 
-  // Load once + auto-refresh every 2s, but never clobber unsaved edits.
-  useEffect(() => {
-    let alive = true;
-    const tick = async () => {
-      if (dirty) return;
+  // 轮询拉取规则：dirty 时不覆盖编辑器
+  const { data: rulesText } = usePoll(
+    async () => {
+      if (dirtyRef.current) return null;
       try {
-        const rules = await getRules();
-        if (alive) {
-          setText(rules);
-          setError(null);
-        }
-      } catch (e) {
-        if (alive) setError(String(e));
+        return await getRules();
+      } catch {
+        return null;
       }
-    };
-    void tick();
-    const id = setInterval(tick, 2000);
+    },
+    2000,
+  );
+
+  // 从轮询数据同步到编辑器（仅非 dirty 时）
+  useEffect(() => {
+    if (rulesText != null && !dirtyRef.current) {
+      setText(rulesText);
+      editorRef.current?.setText(rulesText);
+    }
+  }, [rulesText]);
+
+  // 初始化 CodeMirror 编辑器
+  useEffect(() => {
+    if (!editorHostRef.current) return;
+    const editor = createCodeMirrorEditor(
+      editorHostRef.current,
+      text,
+      (newText) => {
+        setText(newText);
+        dirtyRef.current = true;
+        setDirty(true);
+        clear();
+      },
+    );
+    editorRef.current = editor;
     return () => {
-      alive = false;
-      clearInterval(id);
+      editor.destroy();
+      editorRef.current = null;
     };
-  }, [dirty]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const lines = useMemo(() => text.split("\n"), [text]);
   const ruleCount = useMemo(() => {
@@ -40,40 +62,32 @@ export default function RulesPage() {
     for (const ln of lines) {
       const s = ln.trim();
       if (s === "" || s.startsWith("#")) continue;
-      if (s.startsWith("proxy,") || s.startsWith("direct,")) n++;
+      // 计数所有有效行为行：proxy / direct / REJECT（不区分大小写）
+      if (/^(proxy|direct|reject)\s*,/i.test(s)) n++;
     }
     return n;
   }, [lines]);
 
   const onSave = async () => {
-    setBusy("save");
-    setError(null);
-    setNotice(null);
-    try {
+    const ok = await run("save", async () => {
       await saveRules(text);
+    }, "规则已保存");
+    if (ok !== undefined) {
+      dirtyRef.current = false;
       setDirty(false);
-      setNotice("规则已保存");
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(null);
     }
   };
 
   const onReload = async () => {
-    setBusy("reload");
-    setError(null);
-    setNotice(null);
-    try {
+    const ok = await run("reload", async () => {
       await reloadRules();
       const rules = await getRules();
       setText(rules);
+      editorRef.current?.setText(rules);
+    }, "规则已热重载");
+    if (ok !== undefined) {
+      dirtyRef.current = false;
       setDirty(false);
-      setNotice("规则已热重载");
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(null);
     }
   };
 
@@ -88,29 +102,11 @@ export default function RulesPage() {
           </span>
         }
       >
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-[auto_1fr]">
-          {/* Line numbers */}
-          <div
-            aria-hidden
-            className="hidden select-none overflow-hidden rounded-l-lg border border-r-0 border-slate-300 bg-slate-50 px-2 py-3 text-right font-mono text-xs leading-5 text-slate-400 md:block dark:border-slate-700 dark:bg-slate-800"
-          >
-            {lines.map((_, i) => (
-              <div key={i}>{i + 1}</div>
-            ))}
-          </div>
-          <textarea
-            ref={taRef}
-            value={text}
-            onChange={(e) => {
-              setText(e.target.value);
-              setDirty(true);
-              setNotice(null);
-            }}
-            spellCheck={false}
-            className="min-h-[320px] w-full resize-y rounded-lg border border-slate-300 bg-white px-3 py-2 font-mono text-xs leading-5 text-slate-900 focus:border-orange-500 focus:outline-none focus:ring-1 focus:ring-orange-500/40 md:rounded-l-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
-            placeholder="proxy,geosite:google&#10;direct,geoip:cn&#10;# 空行与 # 开头的行会被忽略"
-          />
-        </div>
+        {/* CodeMirror 编辑器宿主 */}
+        <div
+          ref={editorHostRef}
+          className="min-h-[320px] w-full overflow-hidden rounded-lg border border-slate-300 bg-white dark:border-slate-700 dark:bg-slate-800"
+        />
 
         <div className="mt-4 flex flex-wrap items-center gap-3">
           <Button onClick={onSave} loading={busy === "save"} disabled={!dirty}>
@@ -130,8 +126,9 @@ export default function RulesPage() {
         </div>
         <p className="mt-3 text-xs text-slate-500 dark:text-slate-400">
           语法：每行一条 <code className="font-mono">行为,条件</code>。行为为{" "}
-          <code className="font-mono">proxy</code>（走隧道）或{" "}
-          <code className="font-mono">direct</code>（直连）；条件支持{" "}
+          <code className="font-mono">proxy</code>（走隧道）、
+          <code className="font-mono">direct</code>（直连）或{" "}
+          <code className="font-mono">REJECT</code>（拦截）；条件支持{" "}
           <code className="font-mono">geosite:&lt;name&gt;</code>、
           <code className="font-mono">geoip:&lt;cc&gt;</code>、
           <code className="font-mono">geoip:private</code>、

@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { ScrollText, Trash2 } from "lucide-react";
-import { getLogs, isDemoMode } from "../lib/api";
+import { getLogs, isDemoMode, clearLogs } from "../lib/api";
 import { fromLogs, LogEntry } from "../lib/types";
 import { logsTailChanged } from "../lib/logsTail";
+import { usePoll } from "../lib/usePoll";
 import { Button, Card } from "../components/ui";
 
 const LEVEL_COLOR: Record<LogEntry["level"], string> = {
@@ -13,41 +14,44 @@ const LEVEL_COLOR: Record<LogEntry["level"], string> = {
 };
 
 export default function LogsPage() {
-  const [logs, setLogs] = useState<LogEntry[]>([]);
   const [follow, setFollow] = useState(true);
   const [demo, setDemo] = useState(false);
   const boxRef = useRef<HTMLDivElement>(null);
-  const firstRun = useRef(true);
+
+  const { data: freshLogs } = usePoll(
+    async () => fromLogs(await getLogs(200)),
+    1000,
+  );
+
+  const [logs, setLogs] = useState<LogEntry[]>([]);
 
   useEffect(() => {
     void isDemoMode().then(setDemo);
-    let alive = true;
-    const tick = async () => {
-      try {
-        const entries = fromLogs(await getLogs(200));
-        if (alive) {
-          setLogs((prev) =>
-            logsTailChanged(prev, entries) ? entries : prev,
-          );
-        }
-      } catch {
-        /* transient poll failure: keep previous logs */
-      }
-    };
-    void tick();
-    const id = setInterval(tick, 1000);
-    return () => {
-      alive = false;
-      clearInterval(id);
-    };
   }, []);
+
+  // 从轮询数据更新本地 logs（去重：尾条相同则不更新）
+  useEffect(() => {
+    if (freshLogs) {
+      setLogs((prev) =>
+        logsTailChanged(prev, freshLogs) ? freshLogs : prev,
+      );
+    }
+  }, [freshLogs]);
 
   useEffect(() => {
     if (follow && boxRef.current) {
       boxRef.current.scrollTop = boxRef.current.scrollHeight;
     }
-    firstRun.current = false;
   }, [logs, follow]);
+
+  const onClear = async () => {
+    setLogs([]);
+    try {
+      await clearLogs();
+    } catch {
+      // 后端清空失败不影响前端清空
+    }
+  };
 
   return (
     <div className="space-y-4">
@@ -65,7 +69,7 @@ export default function LogsPage() {
               />
               自动滚动
             </label>
-            <Button variant="ghost" onClick={() => setLogs([])} className="!px-2 !py-1 text-xs">
+            <Button variant="ghost" onClick={onClear} className="!px-2 !py-1 text-xs">
               <Trash2 className="h-3.5 w-3.5" /> 清空
             </Button>
           </div>

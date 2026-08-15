@@ -10,33 +10,8 @@ import {
 } from "../lib/api";
 import { fromConfig, AppConfig, AppStatus } from "../lib/types";
 import { Card, Button, Toggle, StatusPill } from "../components/ui";
-
-function usePoll<T>(fn: () => Promise<T>, ms: number, deps: unknown[] = []) {
-  const [data, setData] = useState<T | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  useEffect(() => {
-    let alive = true;
-    const tick = async () => {
-      try {
-        const v = await fn();
-        if (alive) {
-          setData(v);
-          setError(null);
-        }
-      } catch (e) {
-        if (alive) setError(String(e));
-      }
-    };
-    void tick();
-    const id = setInterval(tick, ms);
-    return () => {
-      alive = false;
-      clearInterval(id);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, deps);
-  return { data, error };
-}
+import { usePoll } from "../lib/usePoll";
+import { useAsyncAction } from "../lib/useAsyncAction";
 
 export default function StatusPage() {
   const [refreshKey, setRefreshKey] = useState(0);
@@ -59,15 +34,13 @@ export default function StatusPage() {
     registration: null,
   };
 
-  const [busy, setBusy] = useState<string | null>(null);
+  const { busy, error: actionError, notice, run } = useAsyncAction();
   const [confirmDeregister, setConfirmDeregister] = useState(false);
   const [confirmTimer, setConfirmTimer] = useState<ReturnType<typeof setTimeout> | null>(null);
   // proxyEnabled 跟随轮询的 status.sysProxyOn（后端每 2s 读真实系统状态）：
   // 外部软件关闭系统代理时开关自动变关（v0.5.7 反馈"其它软件关闭时 GUI
   // 应跟随"）。初始化时读一次兜底（首帧 bridge 未就绪时 status 为 null）。
   const [proxyEnabled, setProxyEnabled] = useState(false);
-  const [actionError, setActionError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
 
   useEffect(() => {
     if (statusRaw) setProxyEnabled(statusRaw.sysProxyOn);
@@ -82,16 +55,10 @@ export default function StatusPage() {
   }, []);
 
   const toggleRunning = async () => {
-    setBusy(status.running ? "stop" : "start");
-    setActionError(null);
-    try {
+    await run(status.running ? "stop" : "start", async () => {
       if (status.running) await stop();
       else await start();
-    } catch (e) {
-      setActionError(String(e));
-    } finally {
-      setBusy(null);
-    }
+    });
   };
 
   const toggleProxy = async (v: boolean) => {
@@ -99,22 +66,21 @@ export default function StatusPage() {
     try {
       await setSystemProxy(v);
     } catch (e) {
-      setActionError(String(e));
+      // run 不适合这里（需要回滚 toggle），手写错误处理
+      run("proxy", async () => { throw e; });
       setProxyEnabled(!v);
     }
   };
 
   const onRegister = async () => {
-    setBusy("register");
-    setActionError(null);
-    try {
-      const res = await register();
-      setNotice(res.existing ? "已存在注册，无需重复操作" : `注册成功（id=${res.id}）`);
+    const res = await run("register", async () => {
+      const r = await register();
+      return r;
+    }, undefined);
+    if (res) {
+      if (res.existing) run("register", async () => {}, "已存在注册，无需重复操作");
+      else run("register", async () => {}, `注册成功（id=${res.id}）`);
       setRefreshKey(k => k + 1);
-    } catch (e) {
-      setActionError(String(e));
-    } finally {
-      setBusy(null);
     }
   };
 
@@ -129,17 +95,10 @@ export default function StatusPage() {
     }
     clearTimeout(confirmTimer ?? undefined);
     setConfirmDeregister(false);
-    setBusy("deregister");
-    setActionError(null);
-    try {
+    await run("deregister", async () => {
       await deregister();
-      setNotice("已注销：本地注册信息已删除");
-      setRefreshKey(k => k + 1);
-    } catch (e) {
-      setActionError(String(e));
-    } finally {
-      setBusy(null);
-    }
+    }, "已注销：本地注册信息已删除");
+    setRefreshKey(k => k + 1);
   };
 
   return (
