@@ -11,6 +11,13 @@
 - **`route.Stats` 补 json tag**：字段加 `json:"proxy"/"direct"/"rejected"/"miss"` tag，与前端 `ProxyCounters` 键对齐，生成 bindings 时 TS 属性名即为此 tag。
 - **`geoBaseURL` 死字段清理**：`AppConfig.geoBaseURL` 和 `logDir` 前端字段删除（后端无对应字段）；`gui/service.go` 的 `GetGeo()` 改为从 `st.Config.GeoRepo` 动态构建 BaseURL（替代硬编码）。
 
+### 重构（核心隧道层，阶段 3）
+
+- **拆分 masque.go（2218 行）→ 5 个职责文件**：`client_conn.go`（连接管理/重连/探测/健康判定）、`client_doh.go`（DoH 解析）、`client_socks5.go`（SOCKS5 代理）、`client_dns.go`（DNS 拦截）、`masque.go`（占位）。
+- **退役双份 UDP**：`tunnel/udp.go`（344 行）退役，UDP 逻辑合并到主流程；`masque_socks5_route_test.go`（260 行）退役。
+- **geosite 匹配索引**：新增 `route/geoindex.go`，后缀 map + 精确 map 把线性扫描 O(N) 加速到 O(标签数)；`route/matcher.go` 改用 geoindex。
+- 净减 ~2854 行。
+
 ### 重构（CI/发布纪律，阶段 1）
 
 > ⚠️ **2026-08-08 用户反馈：v0.5.27 真机复测仍失败（境外流量打不开），已决定放弃继续修复。**
