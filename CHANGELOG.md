@@ -5,6 +5,14 @@
 
 ## [Unreleased]
 
+### 重构（契约层，阶段 2）
+
+- **bindings 单源化**：`gui/frontend/src/lib/types.ts` 从手写防御性 normalizer（`unknown` → 猜测字段名）重构为 Wails 生成类型 → UI 类型的编译期安全适配层。删手写 `num()`/`str()` 猜测逻辑，改用生成的 `BackendStatus`/`BackendConfig`/`BackendStats` 等类型——Go 改字段时 `tsc` 编译期失败而非运行期静默错。
+- **`route.Stats` 补 json tag**：字段加 `json:"proxy"/"direct"/"rejected"/"miss"` tag，与前端 `ProxyCounters` 键对齐，生成 bindings 时 TS 属性名即为此 tag。
+- **`geoBaseURL` 死字段清理**：`AppConfig.geoBaseURL` 和 `logDir` 前端字段删除（后端无对应字段）；`gui/service.go` 的 `GetGeo()` 改为从 `st.Config.GeoRepo` 动态构建 BaseURL（替代硬编码）。
+
+### 重构（CI/发布纪律，阶段 1）
+
 > ⚠️ **2026-08-08 用户反馈：v0.5.27 真机复测仍失败（境外流量打不开），已决定放弃继续修复。**
 > 下方 v0.5.27 的修复属**净改进但非根治**；完整证据链、已排除方向与接手实验清单见
 > AGENTS.md §6.5「未解决问题交接（2026-08-08）」。

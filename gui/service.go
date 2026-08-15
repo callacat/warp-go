@@ -392,7 +392,11 @@ func (s *Service) GetGeo() (GeoInfo, error) {
 	}
 	info.GeositePath = filepath.Join(geoDir, "geosite.dat")
 	info.GeoIPPath = filepath.Join(geoDir, "geoip-lite.dat")
-	info.BaseURL = "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest"
+	if st.Config != nil && st.Config.GeoRepo != "" {
+		info.BaseURL = strings.TrimRight(st.Config.GeoRepo, "/") + "/releases/download/latest"
+	} else {
+		info.BaseURL = "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest"
+	}
 
 	if fi, err := os.Stat(info.GeositePath); err == nil {
 		info.GeositeUpdated = fi.ModTime().Format("2006-01-02 15:04")

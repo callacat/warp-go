@@ -213,13 +213,6 @@ export default function SettingsPage() {
                 onChange={(e) => set("geoRepo", e.target.value)}
               />
             </Field>
-            <Field label="GEO 下载 URL" hint="Release 下载基础地址">
-              <input
-                className={inputCls}
-                value={cfg.geoBaseURL}
-                onChange={(e) => set("geoBaseURL", e.target.value)}
-              />
-            </Field>
             <Field
               label="下载加速前缀"
               hint="GitHub 加速（如 https://gh-proxy.org/），置空关闭"

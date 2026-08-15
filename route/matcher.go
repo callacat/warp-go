@@ -20,13 +20,13 @@ import (
 )
 
 // Stats 是匹配引擎的命中计数快照（GUI 状态展示用）。
-// 字段无 JSON tag：序列化使用 Go 首字母大写字段名（ProxyHits 等），
-// 前端 fromCounters 需按大写键读取（见 gui/frontend/src/lib/types.ts）。
+// json tag 与前端 ProxyCounters 键对齐（proxy/direct/rejected/miss），
+// 生成 bindings 时 TS 属性名即为此 tag（见 frontend/bindings/warp/route/models.ts）。
 type Stats struct {
-	ProxyHits    int64 // 命中 proxy 规则的次数
-	DirectHits   int64 // 命中 direct 规则的次数
-	RejectedHits int64 // 命中 reject 规则的次数（被拦截的连接）
-	Misses       int64 // 未命中任何规则的次数（隐式 direct 兜底）
+	ProxyHits    int64 `json:"proxy"`    // 命中 proxy 规则的次数
+	DirectHits   int64 `json:"direct"`   // 命中 direct 规则的次数
+	RejectedHits int64 `json:"rejected"` // 命中 reject 规则的次数（被拦截的连接）
+	Misses       int64 `json:"miss"`     // 未命中任何规则的次数（隐式 direct 兜底）
 }
 
 // Engine 组合规则 + GEO 数据库，对外提供 Match 分流判定。

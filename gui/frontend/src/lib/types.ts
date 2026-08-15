@@ -1,9 +1,19 @@
-// Shared types for the warp-go GUI frontend.
+// 前端契约类型: wails3 generate bindings 生成的 TS 为唯一类型源。
 //
-// The Go backend contract (gui/service.go) is owned by the parallel task and
-// may still evolve. Every type here comes with a defensive normalizer
-// (`from*`) so the UI never crashes on missing/renamed fields — unknown
-// shapes degrade to safe defaults.
+// from* 输入参数为生成类型 (Go 改字段 -> tsc 编译期失败, 而非运行期静默错)。
+// 输出为前端人体工学 camelCase 类型 (命名自适应层, 编译期经生成类型验证)。
+// 保留 fromLogs (level 校验降级) 与 fromStatus (state -> running 派生)。
+
+import {
+  Status as BackendStatus,
+  Config as BackendConfig,
+  RegistrationInfo as BackendRegistrationInfo,
+} from "../../bindings/warp/core/models.js";
+import {
+  GeoInfo as BackendGeoInfo,
+  LogEntry as BackendLogEntry,
+} from "../../bindings/warp/gui/models.js";
+import { Stats as BackendStats } from "../../bindings/warp/route/models.js";
 
 export interface ProxyCounters {
   proxy: number;
@@ -42,9 +52,7 @@ export interface AppConfig {
   rulesPath: string;
   geoDir: string;
   geoRepo: string;
-  geoBaseURL: string;
   autoUpdateDays: number;
-  logDir: string;
   systemProxy: boolean;
   allowUDP: boolean;
   downloadProxy: string;
@@ -78,134 +86,90 @@ export interface LogEntry {
   msg: string;
 }
 
-// ---------- defensive normalizers ----------
+// ---------- bindings 适配 (生成类型 -> UI 类型) ----------
 
-const num = (v: unknown, d: number): number =>
-  typeof v === "number" && Number.isFinite(v) ? v : d;
-const str = (v: unknown, d: string): string =>
-  typeof v === "string" && v.length > 0 ? v : d;
-
-export function fromCounters(v: unknown): ProxyCounters {
-  const o = (v ?? {}) as Record<string, unknown>;
-  // Go route.Stats 字段无 json tag → 序列化为大写键（ProxyHits 等）；
-  // 兼容小写/演示模式的 camelCase 键。双向读取避免真实模式计数恒为 0。
+export function fromCounters(v: BackendStats): ProxyCounters {
   return {
-    proxy: num(o.proxy, num(o.ProxyHits, 0)),
-    direct: num(o.direct, num(o.DirectHits, 0)),
-    miss: num(o.miss, num(o.Misses, 0)),
-    rejected: num(o.rejected, num(o.RejectedHits, 0)),
+    proxy: v.proxy,
+    direct: v.direct,
+    miss: v.miss,
+    rejected: v.rejected,
   };
 }
 
-export function fromStatus(v: unknown): AppStatus {
-  const o = (v ?? {}) as Record<string, unknown>;
+export function fromStatus(v: BackendStatus): AppStatus {
   return {
-    running: o.running === true || o.state === "running",
-    listening: str(o.listen_addr ?? o.listening, "127.0.0.1:40000"),
-    startedAt:
-      typeof o.start_time === "string"
-        ? o.start_time
-        : typeof o.startedAt === "string"
-          ? o.startedAt
-          : undefined,
-    error:
-      typeof o.last_error === "string"
-        ? o.last_error
-        : typeof o.error === "string"
-          ? o.error
-          : undefined,
-    registered: o.registered === true || o.Registered === true,
-    isAndroid: o.is_android === true,
-    initDone: o.init_done === true || o.InitDone === true,
-    sysProxyOn: o.sys_proxy_on === true || o.SysProxyOn === true,
-    counters: fromCounters(o.stats ?? o.counters),
-    registration: fromRegistration(o.registration),
+    running: v.state === "running",
+    listening: v.listen_addr ?? "127.0.0.1:40000",
+    startedAt: v.start_time,
+    error: v.last_error,
+    registered: v.registered,
+    isAndroid: v.is_android,
+    initDone: v.init_done,
+    sysProxyOn: v.sys_proxy_on,
+    counters: fromCounters(v.stats),
+    registration: fromRegistration(v.registration),
   };
 }
 
-function fromRegistration(v: unknown): RegistrationInfo | null {
-  const o = (v ?? null) as Record<string, unknown> | null;
-  if (!o) return null;
+export function fromRegistration(
+  v: BackendRegistrationInfo | null | undefined,
+): RegistrationInfo | null {
+  if (!v) return null;
   return {
-    id: str(o.id, ""),
-    account: typeof o.account === "string" ? o.account : undefined,
-    keyType: typeof o.key_type === "string" ? o.key_type : undefined,
-    tunnelType: typeof o.tunnel_type === "string" ? o.tunnel_type : undefined,
-    endpointV4: typeof o.endpoint_v4 === "string" ? o.endpoint_v4 : undefined,
-    endpointV6: typeof o.endpoint_v6 === "string" ? o.endpoint_v6 : undefined,
-    endpointPorts: Array.isArray(o.endpoint_ports) ? (o.endpoint_ports as number[]) : undefined,
-    assignedIPv4: typeof o.assigned_ipv4 === "string" ? o.assigned_ipv4 : undefined,
-    assignedIPv6: typeof o.assigned_ipv6 === "string" ? o.assigned_ipv6 : undefined,
+    id: v.id,
+    account: v.account || undefined,
+    keyType: v.key_type || undefined,
+    tunnelType: v.tunnel_type || undefined,
+    endpointV4: v.endpoint_v4 || undefined,
+    endpointV6: v.endpoint_v6 || undefined,
+    endpointPorts: v.endpoint_ports,
+    assignedIPv4: v.assigned_ipv4 || undefined,
+    assignedIPv6: v.assigned_ipv6 || undefined,
   };
 }
 
-export function fromConfig(v: unknown): AppConfig {
-  const o = (v ?? {}) as Record<string, unknown>;
-  // Go core.Config JSON tag 是 snake_case；兼容 camelCase 兜底。
+export function fromConfig(v: BackendConfig): AppConfig {
+  const theme = v.theme_mode;
   return {
-    listen: str(o.listen_addr ?? o.listen, "127.0.0.1:40000"),
-    rulesPath: str(o.rules_path ?? o.rulesPath, "rules.txt"),
-    geoDir: str(o.geo_dir ?? o.geoDir, "geo"),
-    geoRepo: str(o.geo_repo ?? o.geoRepo, "MetaCubeX/meta-rules-dat"),
-    geoBaseURL: str(
-      o.geo_base_url ?? o.geoBaseURL,
-      "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest",
-    ),
-    autoUpdateDays: num(o.geo_auto_update_days ?? o.autoUpdateDays, 7),
-    logDir: str(o.log_dir ?? o.logDir, "logs"),
-    systemProxy: o.enable_system_proxy === true || o.systemProxy === true,
-    allowUDP: o.allow_udp === true || o.allowUDP === true,
-    downloadProxy: str(o.download_proxy ?? o.downloadProxy, "https://gh-proxy.org/"),
-    themeMode: ((o.theme_mode ?? o.themeMode) === "light" || (o.theme_mode ?? o.themeMode) === "dark" || (o.theme_mode ?? o.themeMode) === "system"
-      ? (o.theme_mode ?? o.themeMode)
-      : "system") as "light" | "dark" | "system",
+    listen: v.listen_addr,
+    rulesPath: v.rules_path,
+    geoDir: v.geo_dir,
+    geoRepo: v.geo_repo,
+    autoUpdateDays: v.geo_auto_update_days,
+    systemProxy: v.enable_system_proxy,
+    allowUDP: v.allow_udp,
+    downloadProxy: v.download_proxy,
+    themeMode:
+      theme === "light" || theme === "dark" || theme === "system"
+        ? theme
+        : "system",
   };
 }
 
-export function fromGeo(v: unknown): GeoInfo {
-  const o = (v ?? {}) as Record<string, unknown>;
+export function fromGeo(v: BackendGeoInfo): GeoInfo {
   return {
-    geositePath: str(o.geosite_path ?? o.geositePath, "geo/geosite.dat"),
-    geoipPath: str(o.geoip_path ?? o.geoipPath, "geo/geoip-lite.dat"),
-    geositeUpdated:
-      typeof o.geosite_updated === "string"
-        ? o.geosite_updated
-        : typeof o.geositeUpdated === "string"
-          ? o.geositeUpdated
-          : undefined,
-    geoipUpdated:
-      typeof o.geoip_updated === "string"
-        ? o.geoip_updated
-        : typeof o.geoipUpdated === "string"
-          ? o.geoipUpdated
-          : undefined,
-    repository: str(o.repository, "MetaCubeX/meta-rules-dat"),
-    baseURL: str(
-      o.base_url ?? o.baseURL,
-      "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest",
-    ),
-    autoUpdateDays: num(o.auto_update_days ?? o.autoUpdateDays, 7),
-    lastChecked:
-      typeof o.last_checked === "string"
-        ? o.last_checked
-        : typeof o.lastChecked === "string"
-          ? o.lastChecked
-          : undefined,
+    geositePath: v.geosite_path,
+    geoipPath: v.geoip_path,
+    geositeUpdated: v.geosite_updated,
+    geoipUpdated: v.geoip_updated,
+    repository: v.repository,
+    baseURL: v.base_url,
+    autoUpdateDays: v.auto_update_days,
+    lastChecked: v.last_checked,
   };
 }
 
 const LEVELS: LogLevel[] = ["debug", "info", "warn", "error"];
 
-export function fromLogs(v: unknown): LogEntry[] {
-  if (!Array.isArray(v)) return [];
+export function fromLogs(v: BackendLogEntry[]): LogEntry[] {
   const out: LogEntry[] = [];
   for (const raw of v) {
-    const o = (raw ?? {}) as Record<string, unknown>;
-    const lv = str(o.level, "info").toLowerCase();
+    const lv = (raw.level ?? "info").toLowerCase();
     out.push({
-      time: str(o.time, ""),
+      time: raw.time ?? "",
       level: (LEVELS.includes(lv as LogLevel) ? lv : "info") as LogLevel,
-      msg: str(o.msg, String(raw)),
+      msg: raw.msg ?? "",
     });
   }
   return out;

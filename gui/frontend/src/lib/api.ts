@@ -147,7 +147,6 @@ function mockConfig(): AppConfig {
     rulesPath: "rules.txt",
     geoDir: "geo",
     geoRepo: "MetaCubeX/meta-rules-dat",
-    geoBaseURL: "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest",
     autoUpdateDays: 7,
     logDir: "logs",
     systemProxy: mockState.sysProxy,
