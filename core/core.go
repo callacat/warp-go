@@ -741,11 +741,17 @@ func (s *Server) UpdateGeo(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 	if k != nil {
-		ne, err := route.NewEngine(cfg.RulesPath, cfg.GeoDir)
-		if err != nil {
-			return true, fmt.Errorf("GEO 数据已更新，但重建引擎失败（重启后生效）：%w", err)
+		e := k.engine.get()
+		if e != nil {
+			e.ReloadGeo() // 热加载：保留统计/规则监听，仅替换 GEO 库
+		} else {
+			// 引擎未就绪（理论上不会发生，k != nil 即 engine 已装配）
+			ne, err := route.NewEngine(cfg.RulesPath, cfg.GeoDir)
+			if err != nil {
+				return true, fmt.Errorf("GEO 数据已更新，但重建引擎失败（重启后生效）：%w", err)
+			}
+			k.engine.swap(ne)
 		}
-		k.engine.swap(ne)
 	}
 	return true, nil
 }

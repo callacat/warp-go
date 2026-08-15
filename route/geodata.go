@@ -31,10 +31,10 @@ type GeoSiteDomain struct {
 	Value string                   // 域名模式
 }
 
-// GeoSiteDB 是内存中的 geosite 数据库：分类名（大写）→ 域名规则列表。
+// GeoSiteDB 是内存中的 geosite 数据库：分类名（大写）→ 域名索引。
 type GeoSiteDB struct {
 	mu         sync.RWMutex
-	categories map[string][]GeoSiteDomain
+	categories map[string]*geoIndex
 	path       string // 来源文件（用于状态展示）
 	loadedAt   time.Time
 }
@@ -58,7 +58,7 @@ func geoSiteFromBytes(data []byte, src string) (*GeoSiteDB, error) {
 	}
 
 	db := &GeoSiteDB{
-		categories: make(map[string][]GeoSiteDomain, len(list.Entry)),
+		categories: make(map[string]*geoIndex, len(list.Entry)),
 		path:       src,
 		loadedAt:   time.Now(),
 	}
@@ -77,19 +77,19 @@ func geoSiteFromBytes(data []byte, src string) (*GeoSiteDB, error) {
 			domains = append(domains, GeoSiteDomain{Type: d.Type, Value: strings.ToLower(d.Value)})
 		}
 		if len(domains) > 0 {
-			db.categories[key] = domains
+			db.categories[key] = buildGeoIndex(domains)
 		}
 	}
 	return db, nil
 }
 
-// Lookup 按分类名查询域名规则。类别名大小写不敏感：查询侧归一化为大写后
+// Lookup 按分类名查询域名索引。类别名大小写不敏感：查询侧归一化为大写后
 // 走 map（与库内大写存储一致，等价于 strings.EqualFold 语义，且是 O(1)）。
-func (db *GeoSiteDB) Lookup(name string) ([]GeoSiteDomain, bool) {
+func (db *GeoSiteDB) Lookup(name string) (*geoIndex, bool) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
-	domains, ok := db.categories[strings.ToUpper(name)]
-	return domains, ok
+	idx, ok := db.categories[strings.ToUpper(name)]
+	return idx, ok
 }
 
 // CategoryCount 返回已加载的分类数。

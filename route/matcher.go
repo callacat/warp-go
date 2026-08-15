@@ -11,12 +11,9 @@ package route
 
 import (
 	"net/netip"
-	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
-
-	"github.com/v2fly/v2ray-core/v5/app/router/routercommon"
 )
 
 // Stats 是匹配引擎的命中计数快照（GUI 状态展示用）。
@@ -40,10 +37,6 @@ type Engine struct {
 	geoIP     *GeoIPDB
 
 	stopWatch func() // WatchRulesFile 返回的停止函数，Close 时调用
-
-	// reCache 缓存 geosite 正则条目的编译结果（按模式串）。正则条目在
-	// 数据集中极少（个位数），惰性编译 + sync.Map 避免每次匹配重复编译。
-	reCache sync.Map // map[string]*regexp.Regexp
 
 	statsProxy   atomic.Int64
 	statsDirect  atomic.Int64
@@ -83,11 +76,11 @@ func (e *Engine) Match(host string, ip netip.Addr) (string, Rule, bool) {
 			if geoSite == nil {
 				continue
 			}
-			domains, ok := geoSite.Lookup(r.Value)
+			idx, ok := geoSite.Lookup(r.Value)
 			if !ok {
 				continue
 			}
-			if e.matchGeoSite(domains, lowerHost) {
+			if idx.match(lowerHost) {
 				return e.hit(r)
 			}
 
@@ -131,47 +124,6 @@ func (e *Engine) hit(r Rule) (string, Rule, bool) {
 		e.statsDirect.Add(1)
 	}
 	return r.Action, r, true
-}
-
-// matchGeoSite 对分类内全部域名规则做匹配。host 需已小写。
-func (e *Engine) matchGeoSite(domains []GeoSiteDomain, host string) bool {
-	for _, d := range domains {
-		switch d.Type {
-		case routercommon.Domain_RootDomain: // 根域后缀：域名本身 + 子域
-			if domainSuffixMatch(d.Value, host) {
-				return true
-			}
-		case routercommon.Domain_Full: // 精确
-			if d.Value == host {
-				return true
-			}
-		case routercommon.Domain_Plain: // 子串
-			if strings.Contains(host, d.Value) {
-				return true
-			}
-		case routercommon.Domain_Regex: // 正则（模式在加载期已小写）
-			re := e.compiledRegex(d.Value)
-			if re != nil && re.MatchString(host) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// compiledRegex 返回模式串对应的编译结果；非法正则返回 nil（并缓存 nil，
-// 避免每次匹配都重试编译）。
-func (e *Engine) compiledRegex(pattern string) *regexp.Regexp {
-	if cached, ok := e.reCache.Load(pattern); ok {
-		return cached.(*regexp.Regexp)
-	}
-	re, err := regexp.Compile(pattern)
-	if err != nil {
-		e.reCache.Store(pattern, (*regexp.Regexp)(nil))
-		return nil
-	}
-	e.reCache.Store(pattern, re)
-	return re
 }
 
 // domainSuffixMatch 判断 host 是否等于 suffix 或是其子域（标签边界）。

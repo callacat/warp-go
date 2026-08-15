@@ -113,16 +113,16 @@ func TestLoadGeoSite(t *testing.T) {
 
 	// 大小写不敏感查询
 	for _, name := range []string{"google", "GOOGLE", "Google"} {
-		if domains, ok := db.Lookup(name); !ok || len(domains) != 5 {
-			t.Errorf("Lookup(%q) 应命中 5 条域名，得到 ok=%v len=%d", name, ok, len(domains))
+		if idx, ok := db.Lookup(name); !ok || idx.domainCount() != 5 {
+			t.Errorf("Lookup(%q) 应命中 5 条域名，得到 ok=%v count=%d", name, ok, idx.domainCount())
 		}
 	}
 	if _, ok := db.Lookup("不存在"); ok {
 		t.Error("不存在的类别应未命中")
 	}
 	// PRIVATE 类别名混合大小写存储
-	if domains, ok := db.Lookup("private"); !ok || len(domains) != 2 {
-		t.Errorf("Lookup(private) 应命中 2 条，得到 ok=%v len=%d", ok, len(domains))
+	if idx, ok := db.Lookup("private"); !ok || idx.domainCount() != 2 {
+		t.Errorf("Lookup(private) 应命中 2 条，得到 ok=%v count=%d", ok, idx.domainCount())
 	}
 }
 

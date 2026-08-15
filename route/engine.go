@@ -100,6 +100,16 @@ func (e *Engine) UpdateGeo(ctx context.Context) (bool, error) {
 	return updated, nil
 }
 
+// ReloadGeo 从 geoDir 重新加载 GEO 数据库到内存（热加载）。
+// 保留规则、统计、规则文件监听不变；仅替换 geoSite/geoIP。
+// 下载由调用方完成（Server.UpdateGeo 负责 route.UpdateGeoData），
+// 此方法只做内存替换。调用方需保证 geoDir 中的文件已是最新。
+func (e *Engine) ReloadGeo() {
+	e.mu.Lock()
+	e.loadGeoDBs()
+	e.mu.Unlock()
+}
+
 // Stats 返回命中计数快照（GUI 状态展示用）。
 func (e *Engine) Stats() Stats {
 	return Stats{
