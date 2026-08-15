@@ -22,14 +22,14 @@
         "Comments": "Cloudflare WARP client (MASQUE over QUIC/HTTP-3)",
         "CompanyName": "warp-go",
         "FileDescription": "warp-go - Cloudflare WARP client",
-        "FileVersion": "0.5.3",
+        "FileVersion": "0.0.0.0",
         "InternalName": "warp",
         "LegalCopyright": "",
         "LegalTrademarks": "",
         "OriginalFilename": "warp.exe",
         "PrivateBuild": "",
         "ProductName": "warp-go",
-        "ProductVersion": "0.5.3",
+        "ProductVersion": "0.0.0.0",
         "SpecialBuild": ""
     },
     "VarFileInfo": {

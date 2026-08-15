@@ -15,6 +15,10 @@ permissions:
   contents: read
   packages: write
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   docker:
     runs-on: ubuntu-latest
@@ -49,6 +53,15 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
             type=semver,pattern={{version}}
 
+      - name: 计算镜像内版本号（-X main.version 注入）
+        id: version
+        run: |
+          # tag v0.5.27 → 0.5.27；main 分支（latest）→ dev（与 CLI/GUI 手动触发口径一致）
+          # 版本单一来源 = release tag，镜像内二进制必须可验证，不能恒 dev。
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [ -z "$VERSION" ] || [ "$VERSION" = "main" ]; then VERSION="dev"; fi
+          echo "value=${VERSION}" >> "$GITHUB_OUTPUT"
+
       - name: 构建并推送镜像
         uses: docker/build-push-action@v6
         with:
@@ -57,6 +70,8 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ steps.version.outputs.value }}
 
       - name: 清理过期 workflow 运行记录
         if: always()

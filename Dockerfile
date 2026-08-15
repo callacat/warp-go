@@ -1,11 +1,14 @@
 # ── build stage: 在容器内编译 warp-go（宿主无需 Go 工具链） ──
 FROM golang:1.26-alpine AS build
 WORKDIR /src
+# 版本号由 docker-ghcr 工作流经 build-arg 注入（tag v0.5.x → 0.5.x；main 分支 → dev），
+# 与 CLI/GUI 一致：-X main.version 写入真实版本（此前镜像内恒为 dev，违反版本单源）。
+ARG VERSION=dev
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 # CGO 纯静态：alpine 无 glibc 也能直接跑；-trimpath/-s/-w 去调试信息缩体积
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/warp .
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/warp .
 
 # ── runtime stage: 免特权、无 TUN、无 NET_ADMIN ──
 FROM alpine:latest
