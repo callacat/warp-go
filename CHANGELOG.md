@@ -18,6 +18,13 @@
 - **geosite 匹配索引**：新增 `route/geoindex.go`，后缀 map + 精确 map 把线性扫描 O(N) 加速到 O(标签数)；`route/matcher.go` 改用 geoindex。
 - 净减 ~2854 行。
 
+### 重构（GUI 架构，阶段 4）
+
+- **共享 hooks 消轮询**：新增 `usePoll`（共享轮询，自动清理+alive 守卫）和 `useAsyncAction`（统一 busy/error/notice 三件套），StatusPage/LogsPage/RulesPage 改用共享 hooks 消除重复轮询逻辑。
+- **新增 `codeMirror.ts`**：规则编辑器语法高亮准备。
+- **ClearLogs 修复**：`gui/logs.go` 加 `ringLogger.Clear()`，修复"清空按钮只清前端 state，轮询下一帧旧日志又回来"。
+- **GEO LastChecked 修正**：`gui/service.go` 用 GEO 文件 mtime 替代 `time.Now()`（后者无信息量）。
+
 ### 重构（CI/发布纪律，阶段 1）
 
 > ⚠️ **2026-08-08 用户反馈：v0.5.27 真机复测仍失败（境外流量打不开），已决定放弃继续修复。**
