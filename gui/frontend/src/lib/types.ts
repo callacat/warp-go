@@ -77,27 +77,29 @@ export interface LogEntry {
 
 // ---------- bindings 适配 (生成类型 -> UI 类型) ----------
 
-export function fromCounters(v: { proxy: number; direct: number; miss: number; rejected: number }): ProxyCounters {
+export function fromCounters(v: { proxy: number; direct: number; miss: number; rejected: number } | null | undefined): ProxyCounters {
+  const o = (v ?? {}) as Record<string, number>;
   return {
-    proxy: v.proxy,
-    direct: v.direct,
-    miss: v.miss,
-    rejected: v.rejected,
+    proxy: o.proxy ?? 0,
+    direct: o.direct ?? 0,
+    miss: o.miss ?? 0,
+    rejected: o.rejected ?? 0,
   };
 }
 
 export function fromStatus(v: any): AppStatus {
+  const o = v ?? {};
   return {
-    running: v.state === "running",
-    listening: v.listen_addr ?? "127.0.0.1:40000",
-    startedAt: v.start_time,
-    error: v.last_error,
-    registered: v.registered,
-    isAndroid: v.is_android,
-    initDone: v.init_done,
-    sysProxyOn: v.sys_proxy_on,
-    counters: fromCounters(v.stats),
-    registration: fromRegistration(v.registration),
+    running: o.state === "running",
+    listening: o.listen_addr ?? "127.0.0.1:40000",
+    startedAt: o.start_time,
+    error: o.last_error,
+    registered: o.registered === true,
+    isAndroid: o.is_android === true,
+    initDone: o.init_done === true,
+    sysProxyOn: o.sys_proxy_on === true,
+    counters: fromCounters(o.stats),
+    registration: fromRegistration(o.registration),
   };
 }
 
@@ -119,16 +121,17 @@ export function fromRegistration(
 }
 
 export function fromConfig(v: any): AppConfig {
-  const theme = v.theme_mode;
+  const o = v ?? {};
+  const theme = o.theme_mode;
   return {
-    listen: v.listen_addr,
-    rulesPath: v.rules_path,
-    geoDir: v.geo_dir,
-    geoRepo: v.geo_repo,
-    autoUpdateDays: v.geo_auto_update_days,
-    systemProxy: v.enable_system_proxy,
-    allowUDP: v.allow_udp,
-    downloadProxy: v.download_proxy,
+    listen: o.listen_addr ?? "127.0.0.1:40000",
+    rulesPath: o.rules_path ?? "rules.txt",
+    geoDir: o.geo_dir ?? "geo",
+    geoRepo: o.geo_repo ?? "MetaCubeX/meta-rules-dat",
+    autoUpdateDays: o.geo_auto_update_days ?? 7,
+    systemProxy: o.enable_system_proxy === true,
+    allowUDP: o.allow_udp === true,
+    downloadProxy: o.download_proxy ?? "https://gh-proxy.org/",
     themeMode:
       theme === "light" || theme === "dark" || theme === "system"
         ? theme
@@ -137,28 +140,31 @@ export function fromConfig(v: any): AppConfig {
 }
 
 export function fromGeo(v: any): GeoInfo {
+  const o = v ?? {};
   return {
-    geositePath: v.geosite_path,
-    geoipPath: v.geoip_path,
-    geositeUpdated: v.geosite_updated,
-    geoipUpdated: v.geoip_updated,
-    repository: v.repository,
-    baseURL: v.base_url,
-    autoUpdateDays: v.auto_update_days,
-    lastChecked: v.last_checked,
+    geositePath: o.geosite_path ?? "geo/geosite.dat",
+    geoipPath: o.geoip_path ?? "geo/geoip-lite.dat",
+    geositeUpdated: o.geosite_updated,
+    geoipUpdated: o.geoip_updated,
+    repository: o.repository ?? "MetaCubeX/meta-rules-dat",
+    baseURL: o.base_url ?? "",
+    autoUpdateDays: o.auto_update_days ?? 7,
+    lastChecked: o.last_checked,
   };
 }
 
 const LEVELS: LogLevel[] = ["debug", "info", "warn", "error"];
 
 export function fromLogs(v: any): LogEntry[] {
+  if (!Array.isArray(v)) return [];
   const out: LogEntry[] = [];
   for (const raw of v) {
-    const lv = (raw.level ?? "info").toLowerCase();
+    const o = raw ?? {};
+    const lv = (o.level ?? "info").toLowerCase();
     out.push({
-      time: raw.time ?? "",
+      time: o.time ?? "",
       level: (LEVELS.includes(lv as LogLevel) ? lv : "info") as LogLevel,
-      msg: raw.msg ?? "",
+      msg: o.msg ?? "",
     });
   }
   return out;
