@@ -188,7 +188,7 @@ public class WarpVpnService extends VpnService {
         ParcelFileDescriptor pfd;
         try {
             pfd = builder.establish();
-        } catch (IllegalArgumentException | SecurityException e) {
+        } catch (IllegalArgumentException | IllegalStateException | SecurityException e) {
             Log.e(TAG, "establish() failed", e);
             MainActivity.nativeLogMessage("error", "VPN 建立失败：" + e.getMessage());
             stopSelf();
