@@ -24,6 +24,7 @@ import (
 // emits 20-byte source connection IDs. With quic-go's 4-byte default the WARP
 // edge intermittently answers with PROTOCOL_VIOLATION and drops the connection.
 const connectionIDLength = 20
+
 // socketProtector, when non-nil, is invoked with the raw fd of every UDP socket
 // the tunnel dials with, right after creation and before any packet is sent.
 // Android uses it to call VpnService.protect(fd): once VpnService.establish()
@@ -39,9 +40,11 @@ var socketProtector func(fd int) error
 func SetSocketProtector(fn func(fd int) error) {
 	socketProtector = fn
 }
+
 // perAddrDialTimeout bounds a single edge address attempt so an unreachable
 // port falls through to the next candidate quickly.
 const perAddrDialTimeout = 2 * time.Second
+
 // relayDrainGrace bounds how long a tunnel waits for the response direction
 // after the client has half-closed. Generous enough for the legitimate
 // send-then-read pattern, short enough that a stream abandoned by a dead client
@@ -80,6 +83,13 @@ const (
 	// "打不开外网"（v0.5.26 之后的新数据：00:06:04 m.youtube.com 连续 2 条
 	// RST 0 下行）。
 	egressProbeInterval = 20 * time.Second
+
+	// probeFailureThreshold 是运行期探测连续失败后判定连接死亡的阈值：手机
+	// 网络 UDP 抖动 / 边缘偶发慢响应会让单次探测 CONNECT 超时，而拆线瞬间
+	// 所有在途流一起 use of closed network connection（debugdiag：多个健康
+	// 下载被一次探测的瞬时错误连坐）。真实黑洞仍有 CONNECT 失败窗口兜底，
+	// 恢复延迟从 20s 增到约 40s，但不再为每次毛刺殉葬整连接。
+	probeFailureThreshold = 2
 )
 
 // connBundle groups everything owned by a single QUIC connection attempt so the
@@ -109,6 +119,19 @@ type connBundle struct {
 	// never reached the threshold for browser-style retries on one host).
 	failureSince   time.Time
 	failureTargets map[string]int
+
+	// probeFailures 是连续的国际出口探测失败次数（healthMu 保护）。单次探测
+	// 失败可能是手机网络 UDP 抖动 / 边缘偶发慢响应，立即拆共享连接会把所有
+	// 在途流一起拖死（debugdiag：批量死亡均为本地拆线的 use of closed
+	// network connection）。连续 probeFailureThreshold 次才判定连接死亡。
+	probeFailures int
+
+	// streamFailureSince / streamFailureCount 是非连接级流错误的观察窗（与
+	// CONNECT 失败窗口同语义，独立计数避免互相污染）：单条流的抖动（如边缘
+	// 对单个目标 reset）不立即 retire，窗口内累计 connectFailureTargets 次
+	// 才判定共享连接死亡。
+	streamFailureSince time.Time
+	streamFailureCount int
 }
 
 // close abortively tears down the bundle. Safe on a nil receiver, concurrent
@@ -118,6 +141,11 @@ func (b *connBundle) close(reason string) {
 		return
 	}
 	b.closeOnce.Do(func() {
+		// 记录拆线原因：这是判定"谁先动手"的第一证据（探针阈值 / 失败窗口 /
+		// 换代 / 用户关闭各有独立 reason 字符串），此前全部静默丢弃——批量
+		// 死亡时只能看到 use of closed network connection，无法归因是运营商
+		// 掐线还是本地误拆。
+		log.Printf("QUIC 隧道连接关闭：%s", reason)
 		// Close the socket and Transport before touching higher layers. This is
 		// intentionally an abortive close: quic.Conn.CloseWithError waits for the
 		// connection run loop, which is exactly the component that may be wedged
@@ -415,9 +443,43 @@ func (c *MasqueClient) probeEgressOnce() {
 	if err != nil {
 		return // 无当前连接（重连中/已关闭），下轮再探
 	}
-	if err := c.probeEgress(c.lifeCtx, bundle); err != nil {
-		c.handleProbeFailure(bundle, err)
+	c.probeEgressOn(bundle)
+}
+
+// probeEgressOn 对指定 bundle 做一次国际出口探测，并按连续失败阈值决定是否
+// retire：单次失败（手机网络 UDP 抖动 / 边缘偶发慢响应）只记数不拆共享连接
+// （见 probeFailureThreshold 注释——探针与用户流共用同一 QUIC 连接，一次瞬时
+// 毛刺拆线会把所有在途下载一起拖死），连续 probeFailureThreshold 次失败才
+// retire+reconnect，不等用户请求在死连接上白等（v0.5.27 的恢复目的保留）。
+// 独立成方法便于单测：probeEgressOnce 的 currentConnection 需要真实
+// quic.Conn，无法在单测中构造（与 handleProbeFailure 独立成方法的理由相同）。
+func (c *MasqueClient) probeEgressOn(bundle *connBundle) {
+	perr := c.probeEgress(c.lifeCtx, bundle)
+	if perr != nil {
+		if bundle.noteProbeFailure() < probeFailureThreshold {
+			log.Printf("运行期出口探测瞬时失败（%v），连续 %d 次失败后判定连接死亡并重连",
+				perr, probeFailureThreshold)
+			return
+		}
+		c.handleProbeFailure(bundle, perr)
+		return
 	}
+	bundle.noteProbeSuccess()
+}
+
+// noteProbeFailure 记录一次探测失败，返回当前连续失败次数。
+func (b *connBundle) noteProbeFailure() int {
+	b.healthMu.Lock()
+	defer b.healthMu.Unlock()
+	b.probeFailures++
+	return b.probeFailures
+}
+
+// noteProbeSuccess 清空连续探测失败计数。
+func (b *connBundle) noteProbeSuccess() {
+	b.healthMu.Lock()
+	b.probeFailures = 0
+	b.healthMu.Unlock()
 }
 
 // handleProbeFailure 处理探测失败：置 dead（黑洞路径下 quic.Context() 未
@@ -775,9 +837,20 @@ func (b *connBundle) connectFailureRequiresReconnect(err, callerErr error, targe
 	if !shouldReconnectH3(err, callerErr) {
 		return false
 	}
-	if !isTimeout(err) {
+	// 可辨别的连接级错误（quic TransportError/IdleTimeout/ApplicationError
+	// /StatelessReset）→ 连接本身已死，立即重连（v0.5.27 快速恢复语义）。
+	if isConnectionLevelError(err) {
 		return true
 	}
+	// 裸 net.ErrClosed：共享连接已被他人 retire/换代/关闭，本条 CONNECT 只是
+	// 被拖累——不重复决策，也不计入观察窗（批量死亡时每一条并发流都读到它，
+	// 逐条计数会污染窗口）。
+	if errors.Is(err, net.ErrClosed) {
+		return false
+	}
+	// 其余（超时、对端 reset 等）可能只是单个目标不可达：单次不拆共享连接
+	// （v0.5.21 教训），窗口内累计 connectFailureTargets 次才判定路径黑洞
+	// （v0.5.23 语义——浏览器对同一站点的并发重试不会被 distinct 去重抹掉）。
 	return b.noteProgressingCONNECTFailure(target, time.Now())
 }
 
@@ -805,6 +878,22 @@ func (b *connBundle) noteProgressingCONNECTFailure(target string, now time.Time)
 		total += n
 	}
 	return total >= connectFailureTargets
+}
+
+// noteStreamFailure 记录一条非连接级流错误；窗口内（connectFailureWindow）
+// 累计 connectFailureTargets 次返回 true（调用方据此判定共享连接死亡并
+// retire）。与 CONNECT 失败窗口分开计数：流错误与 CONNECT 失败是独立信号，
+// 混在一起会互相污染阈值。窗口靠超时自然衰减（无成功路径重置——读路径每
+// 包触发的重置会把锁打进热路径）。
+func (b *connBundle) noteStreamFailure() bool {
+	b.healthMu.Lock()
+	defer b.healthMu.Unlock()
+	if b.streamFailureSince.IsZero() || time.Since(b.streamFailureSince) > connectFailureWindow {
+		b.streamFailureSince = time.Now()
+		b.streamFailureCount = 0
+	}
+	b.streamFailureCount++
+	return b.streamFailureCount >= connectFailureTargets
 }
 
 func (b *connBundle) noteCONNECTSuccess() {

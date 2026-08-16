@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -63,7 +64,7 @@ func TestNoteDeadStreamDeadFastPath(t *testing.T) {
 	c.dialFn = func(context.Context) (*connBundle, error) { return newTestBundle(), nil }
 
 	tc := &tunnelConn{client: c, bundle: b}
-	tc.noteDeadStream(net.ErrClosed) // 连接级错误 → dead + 异步重连
+	tc.noteDeadStream(connectionLevelErr()) // 连接级错误 → dead + 异步重连
 
 	// 轮询等待 cur 被替换（异步重连）。
 	deadline := time.Now().Add(3 * time.Second)
@@ -139,8 +140,20 @@ func TestProbeEgressOnceNoConnectionSkips(t *testing.T) {
 // 必须用 context.DeadlineExceeded：isTimeout 的第一分支 errors.Is 命中它。
 func timeoutErr() error { return context.DeadlineExceeded }
 
-// closedErr 模拟连接级错误（socket 被关）——应触发立即重连。
+// connectionLevelErr 模拟 QUIC 连接本身死亡（TransportError）——native QUIC
+// 层真正的连接级错误，应触发立即重连。此前测试用 net.ErrClosed 充当该角色，
+// 但裸 net.ErrClosed 现在语义是"连接已被他人淘汰"（见 isConnectionLevelError），
+// 改用类型化的 TransportError 保持"连接级错误立即重连"的测试意图。
+func connectionLevelErr() error {
+	return &quic.TransportError{ErrorCode: quic.ProtocolViolation}
+}
+
+// closedErr 模拟他人已 retire/换代后的信号（裸 net.ErrClosed）——不应触发
+// 或累计任何重连决策。
 func closedErr() error { return net.ErrClosed }
+
+// resetErr 模拟边缘对单个目标的重置（非连接级）——应走观察窗，不单次拆线。
+func resetErr() error { return &net.OpError{Op: "read", Net: "udp", Err: syscall.ECONNRESET} }
 
 // TestConnectFailureSingleTargetTimeoutKeepsSharedConnection 是 v0.5.21 回归：
 // 单个目标 CONNECT 超时 + 交换期间无新包，不得判定"路径黑洞"而淘汰共享连接
@@ -183,12 +196,40 @@ func TestConnectFailureDistinctTargetsWindow(t *testing.T) {
 	}
 }
 
-// TestConnectFailureNonTimeoutErrorReconnects 验证非超时连接级错误仍立即重连
-// （socket 被关 = 连接级故障，必须重建）。
-func TestConnectFailureNonTimeoutErrorReconnects(t *testing.T) {
+// TestConnectFailureConnectionLevelErrorReconnects 验证可辨别的连接级错误
+// （quic TransportError）仍立即重连——连接本身已死必须重建，不得走观察窗。
+func TestConnectFailureConnectionLevelErrorReconnects(t *testing.T) {
 	b := newTestBundle()
-	if !b.connectFailureRequiresReconnect(closedErr(), nil, "x:443", 0) {
-		t.Fatal("非超时连接级错误应立即重连：期望 true")
+	if !b.connectFailureRequiresReconnect(connectionLevelErr(), nil, "x:443", 0) {
+		t.Fatal("连接级错误（TransportError）应立即重连：期望 true")
+	}
+}
+
+// TestConnectFailureNetErrClosedNoRetire 验证裸 net.ErrClosed 不触发也不累计
+// 重连：它是他人已 retire/换代拆线的信号，本条 CONNECT 只是被拖累，重复决策
+// 只会在批量死亡时污染观察窗。
+func TestConnectFailureNetErrClosedNoRetire(t *testing.T) {
+	b := newTestBundle()
+	if b.connectFailureRequiresReconnect(closedErr(), nil, "x:443", 0) {
+		t.Fatal("net.ErrClosed（已被他人淘汰）不应触发重连：期望 false")
+	}
+	if b.connectFailureRequiresReconnect(closedErr(), nil, "x:443", 0) {
+		t.Fatal("net.ErrClosed 不应计入观察窗：期望 false")
+	}
+}
+
+// TestConnectFailureNonTimeoutResetWindowed 验证非超时的单目标重置（如边缘
+// 对某个不可达目标立即 reset CONNECT）不再单次拆毁共享连接——改为观察窗
+// 累计，窗口内第 2 次才触发。这是 Android 上"映射 miss 裸 IP 目标被边缘
+// 立即重置 → 整条共享连接被拖死 → 所有并发健康流一起 use of closed
+// network connection"的直接修复。
+func TestConnectFailureNonTimeoutResetWindowed(t *testing.T) {
+	b := newTestBundle()
+	if b.connectFailureRequiresReconnect(resetErr(), nil, "x:443", 0) {
+		t.Fatal("单个目标重置第 1 次不应立即重连：期望 false")
+	}
+	if !b.connectFailureRequiresReconnect(resetErr(), nil, "x:443", 0) {
+		t.Fatal("窗口内第 2 次目标重置应触发重连：期望 true")
 	}
 }
 
@@ -242,7 +283,7 @@ func TestNoteDeadStreamConnectionLevelErrorReconnects(t *testing.T) {
 	c.dialFn = func(context.Context) (*connBundle, error) { return newB, nil }
 
 	tc := &tunnelConn{client: c, bundle: b}
-	tc.noteDeadStream(net.ErrClosed) // 连接级错误（socket 被关）
+	tc.noteDeadStream(connectionLevelErr()) // 连接级错误（QUIC 连接本身死亡）
 
 	// 重连是异步的（goroutine），轮询等待 cur 被替换。
 	deadline := time.Now().Add(3 * time.Second)
@@ -294,5 +335,120 @@ func TestNoteDeadStreamEOFNoReconnect(t *testing.T) {
 	c.connMu.RUnlock()
 	if cur != b {
 		t.Fatal("EOF 不应触发重连：cur 不应被替换")
+	}
+}
+
+// TestNoteDeadStreamNetErrClosedNoReconnect 锁定裸 net.ErrClosed 不触发重连：
+// 它是共享连接已被他人 retire/换代/关闭的信号（探针阈值、CONNECT 失败窗口、
+// 换代 close 都会走到 bundle.close），本条流只是被拖累——批量死亡时每一条
+// 并发流都读到 use of closed network connection，若各自再跑一遍 retire/
+// reconnect 只剩噪声。恢复由先动手的那条路径完成。
+func TestNoteDeadStreamNetErrClosedNoReconnect(t *testing.T) {
+	c, b := deadBundle(t)
+	newB := newTestBundle()
+	c.dialFn = func(context.Context) (*connBundle, error) { return newB, nil }
+	tc := &tunnelConn{client: c, bundle: b}
+
+	tc.noteDeadStream(closedErr())
+	time.Sleep(50 * time.Millisecond) // 给异步 goroutine 时间（若有）
+
+	c.connMu.RLock()
+	cur := c.cur
+	c.connMu.RUnlock()
+	if cur != b {
+		t.Fatal("net.ErrClosed（已被他人淘汰）不应触发重连：cur 不应被替换")
+	}
+}
+
+// TestNoteDeadStreamAmbiguousErrorWindowed 锁定非连接级流错误走观察窗：单条
+// 流被边缘重置（resetErr）第 1 次只计数不拆共享连接，窗口内第 2 次才判定
+// 连接死亡——一条流被边缘重置不该拆毁共享连接拖死所有健康并发流
+// （debugdiag：批量死亡全部源于本地拆线）。
+func TestNoteDeadStreamAmbiguousErrorWindowed(t *testing.T) {
+	c, b := deadBundle(t)
+	newB := newTestBundle()
+	c.dialFn = func(context.Context) (*connBundle, error) { return newB, nil }
+	tc := &tunnelConn{client: c, bundle: b}
+
+	tc.noteDeadStream(resetErr()) // 第 1 次：仅记窗
+	time.Sleep(50 * time.Millisecond)
+	c.connMu.RLock()
+	cur := c.cur
+	c.connMu.RUnlock()
+	if cur != b {
+		t.Fatal("非连接级流错误第 1 次不应拆共享连接：cur 不应被替换")
+	}
+
+	tc.noteDeadStream(resetErr()) // 第 2 次：观察窗达标 → retire + 重连
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		c.connMu.RLock()
+		cur := c.cur
+		c.connMu.RUnlock()
+		if cur == newB {
+			return // 观察窗达标已触发重连
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("观察窗内第 2 次非连接级流错误应触发重连：cur 未被替换")
+}
+
+// TestProbeEgressOnceSingleFailureKeepsConnection 锁定运行期探测单次失败不拆
+// 共享连接：手机网络 UDP 抖动 / 边缘偶发慢响应会让探测 CONNECT 超时，而拆线
+// 瞬间所有在途流一起 use of closed network connection（debugdiag：多个健康
+// 下载被一次探测的瞬时错误连坐）。连续 probeFailureThreshold 次才 retire。
+func TestProbeEgressOnceSingleFailureKeepsConnection(t *testing.T) {
+	c, b := deadBundle(t)
+	c.probeFn = func(context.Context, *connBundle) error { return context.DeadlineExceeded }
+	newB := newTestBundle()
+	c.dialFn = func(context.Context) (*connBundle, error) { return newB, nil }
+
+	c.probeEgressOn(b) // 第 1 次失败：仅记数，不拆共享连接
+	time.Sleep(50 * time.Millisecond)
+	c.connMu.RLock()
+	cur := c.cur
+	c.connMu.RUnlock()
+	if cur != b {
+		t.Fatal("单次探测失败不应拆共享连接：cur 不应被替换")
+	}
+
+	c.probeEgressOn(b) // 第 2 次失败：达到阈值 → retire + 重连
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		c.connMu.RLock()
+		cur := c.cur
+		c.connMu.RUnlock()
+		if cur == newB {
+			return // 连续两次探测失败已触发重连
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("连续两次探测失败应触发重连：cur 未被替换")
+}
+
+// TestProbeEgressOnceSuccessResetsFailures 锁定探测成功清空连续失败计数：一次
+// 成功后单次失败不累积到阈值（否则历史毛刺会永久污染判定）。
+func TestProbeEgressOnceSuccessResetsFailures(t *testing.T) {
+	c, b := deadBundle(t)
+	calls := 0
+	c.probeFn = func(context.Context, *connBundle) error {
+		calls++
+		if calls == 1 {
+			return context.DeadlineExceeded
+		}
+		return nil
+	}
+	newB := newTestBundle()
+	c.dialFn = func(context.Context) (*connBundle, error) { return newB, nil }
+
+	c.probeEgressOn(b) // 失败 1 次
+	c.probeEgressOn(b) // 成功 → 计数清零
+	c.probeEgressOn(b) // 再失败 1 次 → 仍不达阈值（1/2）
+	time.Sleep(50 * time.Millisecond)
+	c.connMu.RLock()
+	cur := c.cur
+	c.connMu.RUnlock()
+	if cur != b {
+		t.Fatal("探测成功清零后单次失败不应拆共享连接：cur 不应被替换")
 	}
 }

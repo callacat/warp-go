@@ -5,6 +5,36 @@
 
 ## [Unreleased]
 
+### 修复（Android 外网打不开，阶段 6 — 隧道重连自伤）
+
+- **共享 QUIC 连接被自身健康逻辑反复拆毁 → 境外流批量殉葬**（debugdiag
+  20260816 数据驱动）：`tunnels.tsv` 72s 内 8 条本地 UDP socket 代际（间隔
+  3s/14s/10s/12s/10s/1.8s/10s），每轮死亡把当时所有在途境外流一起拖死——
+  错误签名统一为 `down:quic: transport closed: ... use of closed network
+  connection`（本地 `bundle.close()` 拆线的产物，不是运营商掐线）。
+  触发源：运行期出口探针单次失败即 `retire`（20s 周期，零容忍）、单条流
+  非连接级错误即 `noteDeadStream` 拆整连接、单目标 CONNECT 非超时失败即
+  立即重连——手机网络 UDP 抖动 / 边缘对映射 miss 裸 IP 目标的立即重置，
+  任一条都足以把几十条健康并发流一起掐死，且重连后同一抖动再触发，永不收敛。
+  - **修复**：拆线判定全部窗口化 + 类别化——
+    - **运行期探针**：连续 `probeFailureThreshold`(2) 次失败才 `retire`，
+      单次毛刺不再拆共享连接（真实黑洞仍有 CONNECT 失败窗口兜底）。
+    - **`noteDeadStream`**：新增 `isConnectionLevelError` 类别判定——quic
+      `TransportError`/`IdleTimeoutError`/`ApplicationError`/`StatelessResetError`
+      （连接本身已死）仍立即重连；裸 `net.ErrClosed`（共享连接已被他人
+      retire/换代/关闭，本条流只是被拖累）跳过，不再让每一条垂死流各触发
+      一轮恢复；其余（对端 reset 等单目标/单流问题）走新观察窗
+      `noteStreamFailure`，窗口内累计 2 次才判定连接死亡。
+    - **`connectFailureRequiresReconnect`**：非超时非连接级错误（如边缘对
+      单个目标立即 reset）由"单次即重连"改为计入 CONNECT 观察窗；裸
+      `net.ErrClosed` 不再计入窗口。
+    - **可观测性**：`connBundle.close(reason)` 补日志 `QUIC 隧道连接关闭：<reason>`
+      （此前拆线原因全部静默丢弃，批量死亡无法归因是谁先动手）。
+  - 新增/更新 10 项单测（探针阈值、`net.ErrClosed` 语义、非连接级错误观察窗、
+    TransportError 立即重连等），`go build ./...` / `go test ./...` 全绿。
+  - **待真机验收**（东哥验收标准：真机打开境外网站 + warp=on+debugdiag 批量
+    死亡消失）。
+
 ### 修复（Android 外网打不开，阶段 5 — QUIC:443 拦截）
 
 - **UDP:443 (QUIC/HTTP3) 直连泄漏**（v0.5.13→v0.5.27 九轮未解根因）：

@@ -99,6 +99,25 @@ func (t *tunnelConn) noteDeadStream(err error) {
 	if !shouldReconnectH3(err, nil) {
 		return
 	}
+	switch {
+	case isConnectionLevelError(err):
+		// QUIC 连接本身已死（TransportError/IdleTimeout/...）：立即置 dead
+		// 并重连（v0.5.27 快速恢复，不等新请求）。
+	case errors.Is(err, net.ErrClosed):
+		// 共享连接已被他人 retire/换代/关闭：本条流只是被拖累。批量死亡时
+		// 每一条并发流都读到 use of closed network connection，若各自再触发
+		// 一轮 retire/reconnect 只剩噪声——retire 单飞且幂等，但没必要也不该
+		// 由垂死流来唤醒恢复（恢复已由先动手的那条路径完成）。
+		return
+	default:
+		// 其余（对端 reset、未知 net 错误等）可能是单目标/单流问题：走观察
+		// 窗，窗口内累计 connectFailureTargets 次才判定连接死亡——一条流被
+		// 边缘重置不该拆毁共享连接、拖死所有健康并发流（debugdiag：批量
+		// 死亡全部源于本地拆线）。
+		if !t.bundle.noteStreamFailure() {
+			return
+		}
+	}
 	// 先置 dead：即使 QUIC 连接在黑洞下 Context() 未 Done，后续并发请求
 	// 也会经 currentConnection 立即加入重连航班，不再在死连接上重试
 	// （v0.5.26 只 retire 本 bundle，重连期间新请求仍会叠在死连接上超时）。
@@ -234,6 +253,36 @@ func (c *MasqueClient) establishCONNECT(ctx context.Context, req *http.Request, 
 		}
 	}
 	return nil, nil, nil, firstErr
+}
+
+// isConnectionLevelError 判定错误是否代表共享 QUIC 连接本身已死，而非单个
+// 目标/单条流的问题。可辨别的连接级错误（quic TransportError/IdleTimeout/
+// ApplicationError/StatelessReset）直接判定整连接死亡。native QUIC 层把这些
+// 错误都 Unwrap 成 net.ErrClosed 的一部分，所以必须先按具体类型匹配——否则
+// 会把真正的连接级死亡误判成"已被他人淘汰"而跳过重连。剩余裸 net.ErrClosed
+// 才是"连接已被他人 retire/换代/关闭"的信号，不需要（也不应该）重复触发
+// retire/reconnect。
+func isConnectionLevelError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var te *quic.TransportError
+	if errors.As(err, &te) {
+		return true
+	}
+	var app *quic.ApplicationError
+	if errors.As(err, &app) {
+		return true
+	}
+	var idle *quic.IdleTimeoutError
+	if errors.As(err, &idle) {
+		return true
+	}
+	var sr *quic.StatelessResetError
+	if errors.As(err, &sr) {
+		return true
+	}
+	return false
 }
 
 // shouldReconnectH3 distinguishes a dead shared transport from a target-level

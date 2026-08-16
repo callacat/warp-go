@@ -154,7 +154,7 @@ go test ./androidvpn/... ./gui/...                       # 决策逻辑 + androi
 
 ### 未解决问题交接（2026-08-08）：Android 境外流量打不开（历经 v0.5.13→v0.5.27 共 9 轮修复未果）
 
-> **状态（2026-08-16 更新）**：阶段5 已实施修复——**QUIC:443 拦截**。根因判定：浏览器 HTTP/3（QUIC:443）走 UDP 直连（`relayUDP` → 物理网络），运营商封 UDP/QUIC 直连 → 外网打不开。九轮修复全在 TCP CONNECT 层，从未触碰 UDP 直连面。修复：在 TUN 栈 `NewPacketConnectionEx` 拦截 UDP:443，丢弃包让浏览器回退 TCP:443 → WARP 隧道。上游 warp-svc 只有 ConnectTcpProxy，不支持 CONNECT-UDP（RFC 9298），UDP 无法走隧道。**待真机验收**（东哥验收标准：真机打开境外网站 + warp=on）。
+> **状态（2026-08-16 更新）**：阶段6 已实施修复——**隧道重连自伤**。新 debugdiag 数据（72s 8 条 socket 代际、全部 `use of closed network connection` 本地拆线）锁定：共享 QUIC 连接被自身健康逻辑反复 retire，拖死所有在途并发流——探针单次失败即拆、单流非连接级错误即拆、单目标 CONNECT 非超时失败即拆，Android 上触发面（映射 miss 裸 IP 目标 + GMS/浏览器多并发流）远大于桌面，故桌面正常 Android 打不开。修复（`tunnel/client_conn.go` + `client_socks5.go`）：探针连续 2 次失败才 retire；`isConnectionLevelError` 类别化——真实连接级错误立即重连、裸 `net.ErrClosed` 跳过（他人已拆线）、其余走观察窗累计 2 次；`bundle.close` 补 reason 日志便于下次 debugdiag 归因。10 项单测 + 全量测试绿。**待真机验收**（东哥验收标准：真机打开境外网站 + warp=on + 批量死亡消失）。<br>阶段5 修复 — **QUIC:443 拦截**：浏览器 HTTP/3（QUIC:443）走 UDP 直连（`relayUDP` → 物理网络），运营商封 UDP/QUIC 直连 → 外网打不开。修复：在 TUN 栈 `NewPacketConnectionEx` 拦截 UDP:443，丢弃包让浏览器回退 TCP:443 → WARP 隧道（上游 warp-svc 只有 ConnectTcpProxy，不支持 CONNECT-UDP / RFC 9298，UDP 无法走隧道）。
 >
 > 以下为原交接信息（保留供参考）。
 
