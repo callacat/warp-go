@@ -274,14 +274,16 @@ func Java_com_wails_app_WarpVpnService_nativeStartVpn(env *C.JNIEnv, obj C.jobje
 	// 经 JNI 注入。优先级：Java 注入 > config.json 的 physical_dns
 	// （androidconfig.go 已填）> 公共 DNS 兜底（NewDNSInterceptor）。空串/
 	// 全非法时保留 config.json 值或兜底，不覆盖。
-	if dnsList != nil {
-		if cstr := C.jstringToChars(env, dnsList, nil); cstr != nil {
-			parsed := parsePhysicalDNSCSV(C.GoString(cstr))
-			C.releaseChars(env, dnsList, cstr)
-			if len(parsed) > 0 {
-				built.vpnCfg.PhysicalDNS = parsed
-				log.Printf("✓ 物理 DNS 注入：%v", parsed)
-			}
+	//
+	// 注意：不能写 dnsList != nil —— C.jstring 在 android 构建下是定义类型
+	// （非指针），不可与 untyped nil 比较（CI 实测 invalid operation）。
+	// jstringToChars 对 NULL jstring 内部返回 NULL，cstr != nil 已兜底。
+	if cstr := C.jstringToChars(env, dnsList, nil); cstr != nil {
+		parsed := parsePhysicalDNSCSV(C.GoString(cstr))
+		C.releaseChars(env, dnsList, cstr)
+		if len(parsed) > 0 {
+			built.vpnCfg.PhysicalDNS = parsed
+			log.Printf("✓ 物理 DNS 注入：%v", parsed)
 		}
 	}
 
