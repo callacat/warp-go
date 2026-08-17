@@ -635,6 +635,38 @@ func (c *MasqueClient) currentConnection() (*connBundle, error) {
 	return c.cur, nil
 }
 
+// EnsureServiceable 报告共享 QUIC 连接当前是否立即可用（纯状态检查，无网络
+// IO）。不可用（已判死 / 正在重建 / 未建立 / 已关闭）时确保后台重建航班已
+// 启动并返回 false——连接池（core.poolDialer）用它做健康优先轮询：新请求
+// 立即转向健康兄弟成员，被跳过的成员在后台自愈后回到轮询。单连接场景不
+// 调用本方法（池单成员时透传），请求仍走原 openRequestStream → reconnect
+// 阻塞等待语义，行为不变。
+func (c *MasqueClient) EnsureServiceable() bool {
+	if _, err := c.currentConnection(); err != nil {
+		c.ensureBackgroundReconnect()
+		return false
+	}
+	return true
+}
+
+// ensureBackgroundReconnect 确保重建航班已启动（幂等、非阻塞），与
+// reconnect() 共用航班管理：已有航班则 no-op；航班完成清空字段后下次调用
+// 重新拉起。被池跳过的死成员靠它持续自愈，不必等用户请求撞上死连接才
+// 触发重连。
+func (c *MasqueClient) ensureBackgroundReconnect() {
+	if c.isClosed() {
+		return
+	}
+	c.reconnectMu.Lock()
+	defer c.reconnectMu.Unlock()
+	if c.reconnectFlight != nil {
+		return
+	}
+	flight := &reconnectFlight{done: make(chan struct{})}
+	c.reconnectFlight = flight
+	go c.runReconnect(flight)
+}
+
 // openRequestStream opens an H3 request stream and returns the bundle that owns
 // it. Keeping that identity is important: a failure on an old stream must never
 // retire a connection another goroutine has already installed.

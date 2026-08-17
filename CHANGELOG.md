@@ -5,6 +5,34 @@
 
 ## [Unreleased]
 
+### 修复（Android 外网打不开，阶段 9 — 连接池死成员阻塞慢解析）
+
+- **连接池轮询命中死成员 → DialTunnel/ResolveDNS 阻塞等待其重连，解析/首包
+  慢**（真机 debugdiag 驱动，东哥 2026-08-17 实测反馈「部分网站解析半天打不开」）：
+  连接池（阶段 8b）把 DialTunnel 与 ResolveDNS 轮询均分到 2 条 QUIC 连接。
+  手机网络抖动/边缘掐线时某条连接被判死并进入后台重连（runReconnect 指数
+  退避 100ms→5s），而 `openRequestStream`/`establishCONNECT` 对 dead 成员的
+  默认行为是 join 重连航班**等待其完成**——池轮询到死成员的那一半请求
+  （含 TUN DNS 拦截的每一次 DoH 查询）全被单个死成员拖到重连完成，真机表现
+  为「解析半天」。debugdiag 铁证：5.4 分钟会话 416 条 TCP 隧道 0 条正常关闭，
+  196 条在 ~10 次「同一毫秒 7-24 条集体 use of closed network connection」
+  风暴中死亡（每次 = 一条 QUIC 传输拆线连坐全部在途流）；firstByte p50=446ms、
+  p90=658ms，84 条从未收到首字节。
+  - **修复（连接池健康优先轮询）**：`tunnel/client_conn.go` 新增
+    `MasqueClient.EnsureServiceable()`（纯状态检查：不健康时**非阻塞**确保
+    后台重建航班已启动并返回 false）；`core/pool.go` 的 `poolDialer` 轮询时
+    跳过不可用成员、把请求交给立即可用的兄弟成员，被跳过成员后台自愈后
+    重新入轮。全部成员都不可用（整网断）时回退首选成员正常拨号（join 航班
+    等待，与单连接语义一致，保证总能等回连接）。**不推翻连接池叠加方案**：
+    多连接按连接限速叠加的吞吐收益保留（真机 4M/s 实测），只消除死成员阻塞
+    的延迟代价。
+  - 新增 `TestPoolSkipsUnhealthy*`（死成员跳过 / 健康成员承接 / 全死回退 /
+    自愈回轮）+ `TestEnsureServiceable*`（不健康触发后台自愈 / 已关闭安全
+    false），`go build ./...` / `go test ./...` 全绿。
+  - **待真机验收**：重测「解析慢」站点（Google/YouTube 系）应明显加速；
+    QUIC 拦截（UDP:443 丢弃回退 TCP，约 100-300ms/首次导航/域名）为阶段 5
+    起的设计取舍，若仍觉慢可后续加 ICMP port-unreachable 快速失败（另立任务）。
+
 ### 修复（Android 外网打不开，阶段 8 — 大响应/流媒体卡死，MTU 收窄）
 
 - **小请求通、大流卡死 → 路径 MTU 黑洞 + QUIC 上行包越界**（真机 Device A

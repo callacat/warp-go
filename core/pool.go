@@ -20,14 +20,27 @@ type poolDialer struct {
 	next  atomic.Uint64
 }
 
+// serviceProbe 是连接池健康优先轮询的可选接口。实现 EnsureServiceable 的
+// 成员（*tunnel.MasqueClient）在池中被优先分配给立即可用的成员；不可用
+// 成员（已判死 / 正在重建 / 未建立）被跳过并在后台自愈，避免新请求在其
+// 重连航班上阻塞（openRequestStream/establishCONNECT 对 dead 成员默认 join
+// 航班等待——池把请求轮询均分到各成员时，死成员会把一半流量拖慢到重连
+// 完成，真机表现为「解析半天打不开」）。
+type serviceProbe interface {
+	EnsureServiceable() bool
+}
+
 // newPoolDialer 用一批拨号器构造连接池；len(dials)==1 时 DialTunnel 直接
 // 透传，不引入任何轮询开销或语义变化。
 func newPoolDialer(dials []dialer) *poolDialer {
 	return &poolDialer{dials: dials}
 }
 
-// DialTunnel 轮询选一个拨号器；该拨号器失败（如连接正在重连、目标不可达）
-// 时按顺序尝试其余拨号器，全部失败返回最后一个错误。ctx 取消立即停。
+// DialTunnel 健康优先轮询：跳过当前不可用（正在重连 / 已判死）的成员，把
+// 请求交给立即可用的成员；不可用成员由 EnsureServiceable 在后台自愈，恢复
+// 后回到轮询。某成员拨号失败仍按顺序尝试其余成员。全部成员都不可用时退回
+// 首选成员的正常拨号——其内部 join 重建航班并等待，与单连接重连语义一致，
+// 保证总能等回连接。ctx 取消立即停。
 func (p *poolDialer) DialTunnel(ctx context.Context, targetAddr string) (net.Conn, error) {
 	n := len(p.dials)
 	if n == 0 {
@@ -37,9 +50,14 @@ func (p *poolDialer) DialTunnel(ctx context.Context, targetAddr string) (net.Con
 		return p.dials[0].DialTunnel(ctx, targetAddr)
 	}
 	idx := int(p.next.Add(1)-1) % n
+	dialed := false
 	var lastErr error
 	for i := 0; i < n; i++ {
 		d := p.dials[(idx+i)%n]
+		if hp, ok := d.(serviceProbe); ok && !hp.EnsureServiceable() {
+			continue
+		}
+		dialed = true
 		conn, err := d.DialTunnel(ctx, targetAddr)
 		if err == nil {
 			return conn, nil
@@ -49,10 +67,16 @@ func (p *poolDialer) DialTunnel(ctx context.Context, targetAddr string) (net.Con
 			break
 		}
 	}
+	if !dialed {
+		return p.dials[idx%n].DialTunnel(ctx, targetAddr)
+	}
+	if lastErr == nil && ctx != nil && ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 	return nil, lastErr
 }
 
-// ResolveDNS 同 DialTunnel 的轮询 + 失败换下一条语义。
+// ResolveDNS 同 DialTunnel 的健康优先轮询 + 失败换下一条语义。
 func (p *poolDialer) ResolveDNS(ctx context.Context, host string) (net.IP, error) {
 	n := len(p.dials)
 	if n == 0 {
@@ -62,9 +86,14 @@ func (p *poolDialer) ResolveDNS(ctx context.Context, host string) (net.IP, error
 		return p.dials[0].ResolveDNS(ctx, host)
 	}
 	idx := int(p.next.Add(1)-1) % n
+	resolved := false
 	var lastErr error
 	for i := 0; i < n; i++ {
 		d := p.dials[(idx+i)%n]
+		if hp, ok := d.(serviceProbe); ok && !hp.EnsureServiceable() {
+			continue
+		}
+		resolved = true
 		ip, err := d.ResolveDNS(ctx, host)
 		if err == nil {
 			return ip, nil
@@ -73,6 +102,12 @@ func (p *poolDialer) ResolveDNS(ctx context.Context, host string) (net.IP, error
 		if ctx != nil && ctx.Err() != nil {
 			break
 		}
+	}
+	if !resolved {
+		return p.dials[idx%n].ResolveDNS(ctx, host)
+	}
+	if lastErr == nil && ctx != nil && ctx.Err() != nil {
+		return nil, ctx.Err()
 	}
 	return nil, lastErr
 }

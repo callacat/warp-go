@@ -142,6 +142,119 @@ func TestPoolSinglePassthrough(t *testing.T) {
 	}
 }
 
+// healthStubDialer 包装 stubDialer，实现 serviceProbe（EnsureServiceable），
+// 用于验证池的健康优先轮询。未实现 serviceProbe 的 stubDialer 保持原语义。
+type healthStubDialer struct {
+	stubDialer
+	healthy     atomic.Bool
+	ensureCalls atomic.Int64
+}
+
+func (h *healthStubDialer) EnsureServiceable() bool {
+	h.ensureCalls.Add(1)
+	return h.healthy.Load()
+}
+
+// TestPoolSkipsUnhealthyDialTunnel 验证死成员被跳过：不拨号、检查其健康状态，
+// 请求落到健康成员。
+func TestPoolSkipsUnhealthyDialTunnel(t *testing.T) {
+	dead := &healthStubDialer{stubDialer: stubDialer{name: "dead"}}
+	dead.healthy.Store(false)
+	alive := &healthStubDialer{stubDialer: stubDialer{name: "alive"}}
+	alive.healthy.Store(true)
+	p := newPoolDialer([]dialer{dead, alive})
+	p.next.Store(0)
+
+	if _, err := p.DialTunnel(context.Background(), "x:443"); err != nil {
+		t.Fatalf("DialTunnel 应成功：%v", err)
+	}
+	if dead.stubDialer.dialCount() != 0 {
+		t.Fatalf("死成员不应被拨号，实际 %d", dead.stubDialer.dialCount())
+	}
+	if dead.ensureCalls.Load() != 1 {
+		t.Fatalf("死成员应被检查健康 1 次（触发后台自愈），实际 %d", dead.ensureCalls.Load())
+	}
+	if alive.stubDialer.dialCount() != 1 {
+		t.Fatalf("健康成员应承接 1 次，实际 %d", alive.stubDialer.dialCount())
+	}
+}
+
+// TestPoolSkipsUnhealthyResolveDNS 验证 ResolveDNS 同样跳过死成员。
+func TestPoolSkipsUnhealthyResolveDNS(t *testing.T) {
+	dead := &healthStubDialer{stubDialer: stubDialer{name: "dead"}}
+	dead.healthy.Store(false)
+	alive := &healthStubDialer{stubDialer: stubDialer{name: "alive"}}
+	alive.healthy.Store(true)
+	p := newPoolDialer([]dialer{dead, alive})
+	p.next.Store(0)
+
+	if _, err := p.ResolveDNS(context.Background(), "example.com"); err != nil {
+		t.Fatalf("ResolveDNS 应成功：%v", err)
+	}
+	if dead.stubDialer.resolves.Load() != 0 {
+		t.Fatalf("死成员不应解析，实际 %d", dead.stubDialer.resolves.Load())
+	}
+	if alive.stubDialer.resolves.Load() != 1 {
+		t.Fatalf("健康成员应承接 1 次，实际 %d", alive.stubDialer.resolves.Load())
+	}
+}
+
+// TestPoolAllUnhealthyFallsBack 验证全部成员不可用时回退首选成员正常拨号
+// （其内部 join 重建航班并等待，等价单连接语义），保证请求不被吞掉。
+func TestPoolAllUnhealthyFallsBack(t *testing.T) {
+	a := &healthStubDialer{stubDialer: stubDialer{name: "a", err: errors.New("a 不可用")}}
+	a.healthy.Store(false)
+	b := &healthStubDialer{stubDialer: stubDialer{name: "b", err: errors.New("b 不可用")}}
+	b.healthy.Store(false)
+	p := newPoolDialer([]dialer{a, b})
+	p.next.Store(0)
+
+	_, err := p.DialTunnel(context.Background(), "x:443")
+	if err == nil {
+		t.Fatal("全部不可用时应返回错误")
+	}
+	if a.stubDialer.dialCount() != 1 {
+		t.Fatalf("回退应拨号首选 a 一次，实际 %d", a.stubDialer.dialCount())
+	}
+	if b.stubDialer.dialCount() != 0 {
+		t.Fatalf("b 不应被拨号，实际 %d", b.stubDialer.dialCount())
+	}
+}
+
+// TestPoolUnhealthyHealsBack 验证死成员自愈后重新入轮询（健康恢复 → 重新
+// 被分配）。两次调用各落到一个成员，死成员自愈后不再被跳过。
+func TestPoolUnhealthyHealsBack(t *testing.T) {
+	d0 := &healthStubDialer{stubDialer: stubDialer{name: "d0"}}
+	d0.healthy.Store(true)
+	d1 := &healthStubDialer{stubDialer: stubDialer{name: "d1"}}
+	d1.healthy.Store(true)
+	p := newPoolDialer([]dialer{d0, d1})
+
+	// d1 先死一次：round 0（next→d0）d0 承接；round 1（next→d1）跳过 d1 → d0
+	d1.healthy.Store(false)
+	p.next.Store(0)
+	if _, err := p.DialTunnel(context.Background(), "x:443"); err != nil {
+		t.Fatalf("第 1 次失败：%v", err)
+	}
+	if d1.stubDialer.dialCount() != 0 {
+		t.Fatalf("死成员 d1 不应被拨号，实际 %d", d1.stubDialer.dialCount())
+	}
+
+	// d1 自愈：next=2（%2=0）→ d0；next=3（%2=1）→ d1 现在健康，正常承接
+	d1.healthy.Store(true)
+	p.next.Store(2)
+	if _, err := p.DialTunnel(context.Background(), "x:443"); err != nil {
+		t.Fatalf("第 2 次失败：%v", err)
+	}
+	p.next.Store(3)
+	if _, err := p.DialTunnel(context.Background(), "x:443"); err != nil {
+		t.Fatalf("第 3 次失败：%v", err)
+	}
+	if d1.stubDialer.dialCount() != 1 {
+		t.Fatalf("自愈后 d1 应重新承接 1 次，实际 %d", d1.stubDialer.dialCount())
+	}
+}
+
 // TestPoolCloseAll 验证 Close 关闭全部拨号器。
 func TestPoolCloseAll(t *testing.T) {
 	var fs [3]stubDialer

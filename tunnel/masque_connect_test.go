@@ -90,6 +90,40 @@ func TestCurrentConnectionDeadReturnsClosed(t *testing.T) {
 	}
 }
 
+// TestEnsureServiceableUnhealthyPokesReconnect 验证不可用连接（dead 置位）
+// EnsureServiceable 返回 false，且后台重建航班被拉起（cur 被异步替换——
+// 非阻塞自愈，供连接池跳过该成员期间恢复服务）。
+func TestEnsureServiceableUnhealthyPokesReconnect(t *testing.T) {
+	c, b := deadBundle(t)
+	c.dialFn = func(context.Context) (*connBundle, error) { return newTestBundle(), nil }
+	b.dead.Store(true)
+
+	if c.EnsureServiceable() {
+		t.Fatal("dead 连接应返回 false")
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		c.connMu.RLock()
+		cur := c.cur
+		c.connMu.RUnlock()
+		if cur != b {
+			return // 后台航班已替换 cur
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("EnsureServiceable 应触发后台重连：cur 未被替换")
+}
+
+// TestEnsureServiceableClosedFalse 验证已关闭客户端返回 false 且不 panic
+// （池轮询在全关时安全跳过，回退正常拨号路径）。
+func TestEnsureServiceableClosedFalse(t *testing.T) {
+	c := newTestMasqueClient(t)
+	c.closed = true
+	if c.EnsureServiceable() {
+		t.Fatal("已关闭客户端应返回 false")
+	}
+}
+
 // TestProbeInternationalEgressNilBundle 锁定探测对 nil/未就绪 bundle 防御性
 // 返回错误（不 panic）：dialAddr 的 bundle 在 h3Client 建立前不得被探测。
 func TestProbeInternationalEgressNilBundle(t *testing.T) {
