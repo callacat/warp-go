@@ -5,6 +5,26 @@
 
 ## [Unreleased]
 
+### 修复（Android 外网打不开，阶段 8 — 大响应/流媒体卡死，MTU 收窄）
+
+- **小请求通、大流卡死 → 路径 MTU 黑洞 + QUIC 上行包越界**（真机 Device A
+  实测驱动：curl 小请求 200，YouTube 标题能载视频不载、linux.do 转圈——
+  即大响应/流式传输失败。真机 ping 实测物理路径 MTU≈1478（ICMP 1450 负载
+  全通、1460 全丢），1500 的 TUN MTU 下 gVisor 推导 MSS=1460、直连 UDP 中继
+  可回传 ≤1480 字节数据报，均越过 1478 上限撞 DF 静默丢包）。
+  - **修复 1（QUIC 上行包钳制）**：`tunnel/client_conn.go` 共享 QUIC 连接
+    `InitialPacketSize` 1350→1200（本端报文恒 ≤1228，任何 ≥1232 MTU 路径安全），
+    `DisablePathMTUDiscovery=true` 杜绝 PMTUD 把包探到 quic-go 通告上限 1452
+    （1452+28=1480 越过 1478 仍触发 DF 丢包）。下行仍受边缘自身 1350 上限
+    约束，记录在案。
+  - **修复 2（TUN MTU 收窄）**：`androidvpn`/GUI/Java 全链路 TUN MTU
+    1500→1400（`DefaultMTU` 单一常量，Java `setMtu(1400)` 同步）——gVisor
+    MSS=1360、UDP 中继 ≤1400，全部收进 1478 实测上限留余量。
+  - 新增 `TestQuicConfig*`（包尺寸/流控窗口/路径 MTU 上限断言）+ `TestDefaultMTU`
+    （1400 契约 + MSS < 1450 + MTU < 1478），`go build ./...` / `go test ./...`
+    全绿。
+  - **待真机验收**（东哥验收标准：真机浏览器打开 YouTube/linux.do 大流不卡）。
+
 ### 修复（Android 外网打不开，阶段 7 — IPv6 裸 IP CONNECT 洞）
 
 - **AAAA 查询泄漏物理 DNS → 本地视图 v6 IP → 裸 v6 走隧道 CONNECT 挂死**
