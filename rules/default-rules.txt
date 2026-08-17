@@ -1,6 +1,8 @@
 # warp-go 默认路由规则（每行一条，格式: 行为,条件）
 # 行为: proxy = 走 WARP 隧道；direct = 本地直连；reject = 拒绝连接（拦截广告）
 # 规则按序匹配，先命中者生效；全部未命中时兜底 direct。
+# 兜底声明（可选）: default:direct 表示"全部规则未命中时"的行为，规则文件
+# 优先于代码硬编码；未声明时由程序决定（桌面直连 / Android 隧道兜底）。
 REJECT,geosite:category-ads-all
 direct,geosite:private
 direct,geoip:private

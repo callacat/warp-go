@@ -174,7 +174,6 @@ func (v *Vpn) PrepareConnection(network string, source, destination M.Socksaddr,
 
 // NewConnectionEx 处理 TCP 连接（gVisor 栈解析后回调）。
 func (v *Vpn) NewConnectionEx(ctx context.Context, conn net.Conn, source, destination M.Socksaddr, onClose N.CloseHandlerFunc) {
-	log.Printf("[tun] TCP %s → %s", source.AddrString(), destination.String())
 	go func() {
 		var upstream net.Conn
 		var err error
@@ -204,6 +203,11 @@ func (v *Vpn) NewConnectionEx(ctx context.Context, conn net.Conn, source, destin
 			}
 		}
 		action, _ := decideAction(v.cfg.Route, host, destination.Addr)
+		// 日志打还原后的域名（若有）与判定 action，供分流可观测：此前只打
+		// 原始 IP，无法判断国内流量是否命中 direct（v0.5.28 反馈"日志全 IP"）。
+		// DNS 映射 miss 时 host 就是 IP 字面量，回退展示地址即可。
+		log.Printf("[tun] TCP %s → %s（%s，action=%s）",
+			source.AddrString(), destination.String(), host, action)
 		// IP→域名还原只用于 proxy 分支：direct 保留原始 IP 拨号（v0.5.24
 		// 回归：direct 还原域名触发 net.Dialer 物理解析 → 系统 DNS 又进 TUN
 		// → 环路 canceled——真机日志 `lookup obus-cn.dc.heytapmobi.com:

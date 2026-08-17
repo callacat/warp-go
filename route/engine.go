@@ -34,8 +34,9 @@ func NewEngine(rulesPath, geoDir string) (*Engine, error) {
 	e := &Engine{
 		rulesPath: rulesPath,
 		geoDir:    geoDir,
-		rules:     rules,
 	}
+	// applyRules 统一提取 `default:` 兜底声明（初始加载与热重载同一路径）。
+	e.applyRules(rules)
 
 	e.mu.Lock()
 	e.loadGeoDBs()
@@ -78,10 +79,19 @@ func (e *Engine) Reload() error {
 	return nil
 }
 
-// applyRules 在写锁下替换规则列表。
+// applyRules 在写锁下替换规则列表并提取 `default:` 兜底声明
+// （规则集中的第一条 KindDefault 条目；无声明时 fallback 为空）。
 func (e *Engine) applyRules(rules []Rule) {
+	fallback := ""
+	for _, r := range rules {
+		if r.Kind == KindDefault {
+			fallback = r.Action
+			break
+		}
+	}
 	e.mu.Lock()
 	e.rules = rules
+	e.fallback = fallback
 	e.mu.Unlock()
 }
 

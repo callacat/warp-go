@@ -285,3 +285,37 @@ func TestWatchRulesFile(t *testing.T) {
 	case <-time.After(80 * time.Millisecond):
 	}
 }
+
+// TestParseRulesDefault 验证 `default:<action>` 兜底声明行的解析（东哥要求：
+// 规则文件显式声明未命中兜底，优先于代码硬编码，代码仅作无声明时回退）。
+func TestParseRulesDefault(t *testing.T) {
+	rules, err := ParseRules("proxy,geosite:google\ndefault: direct\n")
+	if err != nil {
+		t.Fatalf("ParseRules 应接受 default 行：%v", err)
+	}
+	if len(rules) != 2 {
+		t.Fatalf("规则数 = %d，期望 2（1 条规则 + 1 条 default）：%+v", len(rules), rules)
+	}
+	if rules[1] != (Rule{Action: "direct", Kind: "default", Value: ""}) {
+		t.Errorf("default 行应解析为 {direct,default,}，得到 %+v", rules[1])
+	}
+
+	// 大小写不敏感 + 冒号后空格容忍 + reject 也可作兜底。
+	rules, err = ParseRules("DEFAULT: REJECT\n")
+	if err != nil {
+		t.Fatalf("ParseRules 应接受大写 DEFAULT + 空格：%v", err)
+	}
+	if len(rules) != 1 || rules[0].Action != "reject" || rules[0].Kind != "default" {
+		t.Errorf("default 大小写/空格处理错误：%+v", rules)
+	}
+
+	// 重复声明报错。
+	if _, err := ParseRules("default:direct\ndefault:proxy\n"); err == nil {
+		t.Fatal("default 重复声明应报错")
+	}
+
+	// 非法行为报错。
+	if _, err := ParseRules("default:banana\n"); err == nil {
+		t.Fatal("default 非法行为应报错")
+	}
+}

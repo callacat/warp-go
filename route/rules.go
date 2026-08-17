@@ -10,6 +10,12 @@ package route
 //	direct,geoip:cn
 //	domain:example.com → 走 direct 兜底（行为缺省不合法，必须显式给出）
 //
+// 可选兜底声明（至多一条）：
+//
+//	default:direct   全部规则未命中时使用该行为（proxy/direct/reject）
+//	                 ——规则文件优先于代码硬编码的兜底；未声明时由调用方
+//	                 （桌面隐式 direct / Android 隧道兜底 proxy）决定。
+//
 // 条件支持四类：
 //
 //	geosite:<name>  匹配 geosite 分类的域名（后缀匹配，含子域）
@@ -41,6 +47,9 @@ const (
 	KindGeoSite = "geosite" // 域名分类匹配
 	KindGeoIP   = "geoip"   // IP 段匹配
 	KindDomain  = "domain"  // 域名后缀匹配
+	// KindDefault 是无条件的兜底声明（`default:<action>` 行），没有匹配
+	// 条件：Match 全部未命中时返回其 Action。不参与逐条匹配（无 case 跳过）。
+	KindDefault = "default"
 )
 
 // Rule 是单条分流规则：行为 + 条件。
@@ -60,6 +69,9 @@ type Rule struct {
 // geolocation-!cn 是 geosite.dat 中的字面类别名（`!` 烘焙进数据，非取反语法）。
 const DefaultRules = `# 默认路由规则（每行一条，格式: 行为,条件）
 # 行为: proxy = 走 WARP 隧道；direct = 本地直连；reject = 拒绝连接（拦截广告）
+# 兜底声明（可选）: default:direct 表示"全部规则未命中时"的行为；未声明时
+# 由程序决定（桌面直连 / Android 隧道兜底）。国内网络或 GEO 库未就绪时可用
+# default: direct 让未命中流量直连（见 CHANGELOG 阶段 11）。
 REJECT,geosite:category-ads-all
 direct,geosite:private
 direct,geoip:private
@@ -80,6 +92,7 @@ var (
 // ParseRules 解析规则文本。空行与 `#` 开头的注释行被忽略；每行格式
 // `行为,条件`，行为必须是 proxy/direct，条件必须是 geosite:<name> /
 // geoip:<cc> / geoip:lan / geoip:private / domain:<suffix> 之一。
+// 另有 `default:<action>` 兜底声明行（至多一条，见 KindDefault）。
 // 非法行返回错误，错误信息带行号（从 1 起）。
 func ParseRules(rulesText string) ([]Rule, error) {
 	var rules []Rule
@@ -88,6 +101,23 @@ func ParseRules(rulesText string) ([]Rule, error) {
 		lineNo := i + 1
 		line := strings.TrimSpace(raw)
 		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		// `default:<action>` 兜底声明：无条件的行为行（default 没有匹配条件），
+		// 全部规则未命中时生效。规则文件优先于代码硬编码的兜底（Android
+		// 未命中→隧道 proxy）；未声明时调用方按各自语义回退。
+		if rest, found := strings.CutPrefix(strings.ToLower(line), "default:"); found {
+			action := strings.ToLower(strings.TrimSpace(rest))
+			if !validActions[action] {
+				return nil, fmt.Errorf("第 %d 行 default 行为 %q 非法（仅支持 proxy/direct/reject）", lineNo, rest)
+			}
+			for _, r := range rules {
+				if r.Kind == KindDefault {
+					return nil, fmt.Errorf("第 %d 行：default 只能声明一次（已有 %s）", lineNo, r.Action)
+				}
+			}
+			rules = append(rules, Rule{Action: action, Kind: KindDefault, Value: ""})
 			continue
 		}
 

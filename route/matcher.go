@@ -7,7 +7,8 @@ package route
 //   - host 是 IP 字面量时只应用 geoip 类规则
 //   - host 是域名时 geosite / domain 规则直接匹配（无需 DNS）；
 //     geoip 类规则仅在调用方提供已解析的 ip 时参与
-//   - 全部未命中 → 兜底 direct（matched=false）
+//   - 全部未命中 → 规则文件声明 `default:` 则按其行为（matched=true），
+//     否则兜底 direct（matched=false，调用方决定）
 
 import (
 	"net/netip"
@@ -33,8 +34,12 @@ type Engine struct {
 	rulesPath string // 规则文件路径（热重载源）
 	geoDir    string // GEO 数据库目录
 	rules     []Rule
-	geoSite   *GeoSiteDB
-	geoIP     *GeoIPDB
+	// fallback 是 `default:<action>` 行声明的兜底行为（空 = 未声明）。
+	// 未命中任何规则时返回它（matched=true）；未声明时返回 ("direct", false)，
+	// 由调用方决定（桌面隐式 direct / Android 隧道 proxy）。
+	fallback string
+	geoSite  *GeoSiteDB
+	geoIP    *GeoIPDB
 
 	stopWatch func() // WatchRulesFile 返回的停止函数，Close 时调用
 
@@ -50,7 +55,8 @@ type Engine struct {
 //	ip:   目标已解析的地址；未解析时传 netip.Addr{}（geoip 规则将被跳过）
 //
 // 返回 (action, rule, matched)：命中时 matched=true 且返回对应规则；
-// 未命中返回 (direct, Rule{}, false)。
+// 全部未命中且规则文件声明了 `default:` → 返回其行为（matched=true）；
+// 否则返回 (direct, Rule{}, false)，由调用方决定兜底。
 func (e *Engine) Match(host string, ip netip.Addr) (string, Rule, bool) {
 	host = strings.TrimSuffix(host, ".")
 
@@ -65,6 +71,7 @@ func (e *Engine) Match(host string, ip netip.Addr) (string, Rule, bool) {
 	rules := e.rules
 	geoSite := e.geoSite
 	geoIP := e.geoIP
+	fallback := e.fallback
 	e.mu.RUnlock()
 
 	for _, r := range rules {
@@ -109,7 +116,13 @@ func (e *Engine) Match(host string, ip netip.Addr) (string, Rule, bool) {
 		}
 	}
 
+	// 未命中：规则文件显式声明了 `default:` 兜底 → 规则文件优先于代码硬编码
+	// （Android 未命中→隧道 proxy 的 hardcode 仅作未声明时的回退）。命中计数
+	// 仍按 miss 统计（fallback 本质是"未被规则覆盖"的流量）。
 	e.statsMiss.Add(1)
+	if fallback != "" {
+		return fallback, Rule{Action: fallback, Kind: KindDefault}, true
+	}
 	return ActionDirect, Rule{}, false
 }
 

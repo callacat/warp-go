@@ -362,3 +362,29 @@ func TestEngineStatsReject(t *testing.T) {
 		t.Errorf("Misses = %d，期望 1", st.Misses)
 	}
 }
+
+// TestMatchDefaultFallback 锁定 `default:` 兜底声明语义：规则文件显式声明
+// 的兜底优先于调用方代码硬编码（东哥 v0.5.28 要求）。未命中时返回声明行为
+// 且 matched=true；命中规则仍优先于 default。
+func TestMatchDefaultFallback(t *testing.T) {
+	e := newTestEngine(t, "proxy,geosite:google\ndefault:direct\n")
+	if act, _, matched := e.Match("unmatched.example", netip.Addr{}); !matched || act != "direct" {
+		t.Fatalf("声明 default:direct 后未命中应返回 direct+matched=true，得到 (%s, %v)", act, matched)
+	}
+	if act, _, matched := e.Match("www.google.com", netip.Addr{}); !matched || act != "proxy" {
+		t.Fatalf("命中规则应优先于 default，得到 (%s, %v)", act, matched)
+	}
+
+	e2 := newTestEngine(t, "proxy,geosite:google\ndefault:proxy\n")
+	if act, _, matched := e2.Match("unmatched.example", netip.Addr{}); !matched || act != "proxy" {
+		t.Fatalf("声明 default:proxy 后未命中应返回 proxy+matched=true，得到 (%s, %v)", act, matched)
+	}
+}
+
+// TestMatchDefaultRejectFallback 验证 reject 也可作兜底（拦截未匹配流量）。
+func TestMatchDefaultRejectFallback(t *testing.T) {
+	e := newTestEngine(t, "default:reject\n")
+	if act, _, matched := e.Match("anything.example", netip.Addr{}); !matched || act != "reject" {
+		t.Fatalf("default:reject 未命中应返回 reject+matched=true，得到 (%s, %v)", act, matched)
+	}
+}

@@ -3,6 +3,44 @@
 本项目所有值得记录的变更。格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v0.5.29] - Unreleased
+
+### 修复（国内网站解析慢，阶段 11 — GEO 分流失效：APK 未打包 GEO 库 + 静默降级）
+
+- **国内网站解析/首包速度与国外差不多，GEO 分流疑似无效**（v0.5.28 正式版真机，
+  东哥 2026-08-17 反馈「国内网站解析特别慢」「日志全 IP」）：根因是 **APK 从未打包
+  GEO 数据库，且首次启动从 GitHub（MetaCubeX/meta-rules-dat releases）下载在国产
+  网络下失败/未完成 → `geoip-lite.dat`/`geosite.dat` 缺失 → `route.Engine` 静默降级
+  （`geoSite`/`geoIP`=nil，engine.go 只打 warning）→ 默认规则里的
+  `direct,geoip:cn`/`direct,geosite:cn` 永不命中（matcher.go:106/76）→ 国内流量在
+  `decideAction` 未命中兜底走 `("proxy", true)` 隧道（v0.5.18 语义，miss 必须 proxy）
+  → 国内站点全部绕道 WARP，速度与国外相当。
+  - **实证**：APK 内只有 `assets/dexopt/*`，无 geo/ 目录；仓库
+    `gui/build/android/app/src/main/` 下 assets 目录不存在；GEO 唯一获取途径 =
+    GUI 启动异步 `InitDefaults` 从 GitHub 下载，失败只记 `⚠ 初始 GEO 下载失败` 继续。
+  - **修复 1（东哥要求）：规则文件支持显式 `default:<action>` 兜底声明**。
+    `route/rules.go` 解析 `default:direct|proxy|reject`（至多一条），
+    `route/matcher.go` `Engine` 提取为 fallback——全部规则未命中且已声明时返回声明
+    行为（matched=true），**规则文件优先于代码硬编码**；未声明时保持原语义
+    （Android miss→隧道 proxy / 桌面隐式 direct），代码 hardcode 仅作无声明时的回退。
+    默认模板不写 default 行（不改默认行为），注释说明语法。
+  - **修复 2（根因）：APK 打包 GEO 资产，开箱即用**。CI 构建前下载
+    `geosite.dat`/`geoip-lite.dat` 到 `gui/build/android/app/src/main/assets/geo/`
+    打进 APK（android-debugdiag.yml + build-release.yml）；`WarpVpnService` 首次
+    启动（`nativeStartVpn` 前）把 assets 复制到 `getFilesDir()/geo`（= Go 侧
+    GeoDir），仅在文件缺失时复制、不覆盖用户手动 UpdateGeo 的新版本。GitHub 下载
+    仍作更新路径，assets 复制失败不致命（运行期下载兜底）。
+  - **修复 3（可观测性）：日志打印还原域名与判定结果**。`androidvpn.go`
+    `NewConnectionEx` 的 `[tun] TCP` 行由原始 IP 改为
+    `src → dst（还原域名，action=proxy|direct|reject）`，DNS 拦截还原失败时回退
+    IP 字面量——东哥可直接从日志判断国内流量是否命中 direct。
+  - 新增 `TestParseRulesDefault`（default 行解析/大小写/重复/非法）、
+    `TestMatchDefaultFallback`（声明后未命中返回其行为且 matched=true）、
+    `TestMatchDefaultRejectFallback`（reject 兜底），`go build ./...` /
+    `go test ./...` 全绿。
+  - **待真机验收**：国内站点（B站/百度/淘宝等）应明显加速（直连）；日志可见
+    `action=direct`。若仍需"未命中全直连"可用规则文件声明 `default: direct`。
+
 ## [v0.5.28] - 2026-08-17
 
 ### 修复（Android 外网打不开，阶段 10 — 连接退役风暴误杀在途流）

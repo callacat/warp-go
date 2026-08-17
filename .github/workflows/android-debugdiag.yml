@@ -84,6 +84,27 @@ jobs:
           npm ci || npm install
           npm run build
 
+      # 下载 GEO 数据库打包进 APK（assets/geo）。运行期 WarpVpnService 首次
+      # 启动把它复制到沙箱 geo 目录，否则 geoip:cn/geosite:cn 因 GEO 库缺失
+      # 静默失效、国内流量全走隧道（v0.5.28 真机反馈）。GitHub runner 访问
+      # releases 快；失败不阻塞构建——运行期 InitDefaults 下载兜底。
+      - name: 下载 GEO 数据库打包进 APK（assets/geo）
+        working-directory: gui/build/android/app/src/main
+        run: |
+          mkdir -p assets/geo
+          for f in geosite.dat geoip-lite.dat; do
+            [ -s "assets/geo/$f" ] && continue
+            if curl -fL --retry 3 --connect-timeout 20 \
+              -o "assets/geo/$f" \
+              "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/$f"; then
+              echo "✓ 已下载 $f"
+            else
+              echo "⚠ $f 下载失败（APK 将不含 GEO，运行期首次下载兜底）"
+              rm -f "assets/geo/$f"
+            fi
+          done
+          ls -la assets/geo/ 2>/dev/null || true
+
       # debugdiag tag：与正式版唯一的差别——启用 androidvpn/debugdiag.go
       # （release 编译 debugdiag_stub.go no-op）。
       - name: 编译 c-shared 库（arm64-v8a，debugdiag）

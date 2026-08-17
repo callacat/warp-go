@@ -160,6 +160,13 @@ public class WarpVpnService extends VpnService {
 
         startForeground();
 
+        // 确保 GEO 数据库就位：APK 打包了 assets/geo 下的 geosite.dat /
+        // geoip-lite.dat（CI 构建前下载），首次启动复制到 getFilesDir()/geo
+        // （= Go 侧 GeoDir）。否则国内直连分流（geoip:cn/geosite:cn）因 GEO 库
+        // 缺失静默失效、全部流量走隧道（v0.5.28 真机反馈"国内网站解析慢"）。
+        // 必须在 nativeStartVpn（Go 侧 NewEngine 加载 GEO）之前完成。
+        copyGeoAssetsIfMissing();
+
         String ipv4 = intent != null ? intent.getStringExtra(EXTRA_ASSIGNED_IPV4) : null;
         String ipv6 = intent != null ? intent.getStringExtra(EXTRA_ASSIGNED_IPV6) : null;
         // startVpnService 不传 extras（MainActivity 不解析 reg.json），从
@@ -310,6 +317,56 @@ public class WarpVpnService extends VpnService {
             Log.w(TAG, "readAssignedAddrs failed", e);
         }
         return out;
+    }
+
+    /**
+     * Copy the bundled GEO databases ({@code assets/geo/geosite.dat} and
+     * {@code assets/geo/geoip-lite.dat}) into the sandbox geo dir
+     * ({@code getFilesDir()/geo}, the Go side's GeoDir) on first start.
+     *
+     * The APK ships these assets so CN-direct routing (geoip:cn / geosite:cn)
+     * works out of the box even when the initial GitHub download fails on a
+     * mainland network. Files already present are left untouched so a newer
+     * version written by a manual UpdateGeo is never overwritten. Failures
+     * (asset missing on old builds, IO error) are non-fatal: the runtime
+     * InitDefaults download path still acts as the fallback.
+     */
+    private void copyGeoAssetsIfMissing() {
+        try {
+            android.content.res.AssetManager am = getAssets();
+            java.io.File geoDir = new java.io.File(getFilesDir(), "geo");
+            for (String name : new String[]{"geosite.dat", "geoip-lite.dat"}) {
+                java.io.File dst = new java.io.File(geoDir, name);
+                if (dst.exists()) {
+                    continue; // 已有（用户更新过/上次已复制）→ 保留
+                }
+                try {
+                    java.io.InputStream in = am.open("geo/" + name);
+                    try {
+                        if (!geoDir.exists()) {
+                            geoDir.mkdirs();
+                        }
+                        java.io.FileOutputStream out = new java.io.FileOutputStream(dst);
+                        try {
+                            byte[] buf = new byte[8192];
+                            int n;
+                            while ((n = in.read(buf)) > 0) {
+                                out.write(buf, 0, n);
+                            }
+                        } finally {
+                            out.close();
+                        }
+                        Log.i(TAG, "已从 APK assets 复制 GEO 数据 geo/" + name);
+                    } finally {
+                        in.close();
+                    }
+                } catch (java.io.FileNotFoundException e) {
+                    // APK 未打包（老版本/构建未下载）→ 静默，运行期下载兜底。
+                }
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "copyGeoAssetsIfMissing failed", e);
+        }
     }
 
     @Override
