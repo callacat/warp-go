@@ -174,7 +174,9 @@ public class WarpVpnService extends VpnService {
 
         VpnService.Builder builder = new VpnService.Builder();
         builder.setSession("warp-go");
-        builder.setMtu(1500);
+        // 与 Go 侧 androidvpn.DefaultMTU（1400）保持一致（v0.5.31：真机实测
+        // 物理路径 MTU≈1478，1500 的 TUN MTU 会让 MSS/UDP 中继越过 DF 黑洞）。
+        builder.setMtu(1400);
         builder.setBlocking(true);
         builder.addRoute("0.0.0.0", 0);
         builder.addRoute("::", 0);

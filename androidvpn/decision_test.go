@@ -460,3 +460,20 @@ func TestShouldRejectBareV6(t *testing.T) {
 		})
 	}
 }
+
+// TestDefaultMTU 锁定 v0.5.31 的 TUN MTU 收窄：默认 1400（低于真机实测
+// 路径 MTU 1478，让 gVisor MSS=1360、UDP 中继 ≤1400 全部落在 DF 黑洞之下），
+// 且与 Java 侧 WarpVpnService.Builder.setMtu(1400) 的契约一致。
+func TestDefaultMTU(t *testing.T) {
+	if DefaultMTU != 1400 {
+		t.Fatalf("DefaultMTU = %d，期望 1400", DefaultMTU)
+	}
+	// 接口 MTU 1400 → gVisor 推导 MSS = MTU-40 = 1360，必须低于实测路径
+	// 负载上限 1450，留出 IP/UDP 头的余量。
+	if mss := int(DefaultMTU) - 40; mss >= 1450 {
+		t.Fatalf("MSS %d 已越过实测路径负载上限 1450", mss)
+	}
+	if DefaultMTU >= 1478 {
+		t.Fatalf("MTU %d 已越过实测路径 MTU 1478", DefaultMTU)
+	}
+}

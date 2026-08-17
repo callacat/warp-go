@@ -66,7 +66,7 @@ func New(cfg Config) (*Vpn, error) {
 		return nil, errors.New("无效的 TUN fd")
 	}
 	if cfg.MTU == 0 {
-		cfg.MTU = 1500
+		cfg.MTU = DefaultMTU
 	}
 	if len(cfg.DNSServers) == 0 {
 		cfg.DNSServers = []netip.Addr{netip.MustParseAddr("1.1.1.1")}

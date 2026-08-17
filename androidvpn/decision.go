@@ -58,11 +58,19 @@ type TunnelDial func(ctx context.Context, targetAddr string) (net.Conn, error)
 // DirectDial 建立到目标的本地直连（nil 时用 net.Dialer）。
 type DirectDial func(ctx context.Context, targetAddr string) (net.Conn, error)
 
+// DefaultMTU 是 TUN 设备的默认 MTU（1400）。与 Java 侧
+// WarpVpnService.Builder.setMtu 保持一致；见 Config.MTU 注释。
+const DefaultMTU uint32 = 1400
+
 // Config 配置 TUN 服务。
 type Config struct {
 	// FileDescriptor 是 Java VpnService.Builder.establish() 的 TUN fd。
 	FileDescriptor int
-	// MTU 默认 1500；由 Java 侧传入（与 VpnService.Builder.setMtu 一致）。
+	// MTU 默认 DefaultMTU；由 Java 侧传入（与 VpnService.Builder.setMtu 一致）。
+	// v0.5.31 从 1500 收窄到 1400：真机实测物理路径 MTU≈1478（ICMP 1450 负载
+	// 全通、1460 全丢），1500 MTU 下 gVisor MSS=1460、直连 UDP 中继可回传
+	// ≤1480 字节数据报都会撞 DF 黑洞；1400 让 MSS=1360、UDP 中继 ≤1400，全部
+	// 落在 1478 上限内留有余量。
 	MTU uint32
 	// Inet4Address / Inet6Address 是分配给 TUN 网卡的隧道内地址
 	// （来自注册信息 assigned_ipv4/assigned_ipv6）。

@@ -61,7 +61,7 @@ func buildAndroidConfig(sandboxDir string, fd int) (*builtAndroid, error) {
 
 	vpnCfg := androidvpn.Config{
 		FileDescriptor: fd,
-		MTU:            1500,
+		MTU:            androidvpn.DefaultMTU,
 		DNSServers:     []netip.Addr{netip.MustParseAddr("1.1.1.1")},
 	}
 	if v4, ok := parseAssignedAddr(regData.AssignedIPv4); ok {
