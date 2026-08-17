@@ -209,6 +209,21 @@ func (v *Vpn) NewConnectionEx(ctx context.Context, conn net.Conn, source, destin
 		// → 环路 canceled——真机日志 `lookup obus-cn.dc.heytapmobi.com:
 		// canceled`）。该 IP 是隧道 DoH 解析出的真实 IP，物理网络同样可达。
 		targetAddr = decideTunnelTarget(action, targetAddr, mappedHost)
+		// 裸 IPv6 目标快速拒绝（v0.5.29 洞 B）：proxy 分支的裸 IPv6 字面量
+		// （IP→域名映射 miss，非隧道 DNS 解析结果）只存在于本地视图，WARP
+		// 边缘 CONNECT 不可达——A15 双栈 hang 到 deadline（firstByteMs=-1），
+		// A14 边缘快拒。本地立即 RST（connection refused）让客户端 Happy
+		// Eyeballs 快速回退 v4（隧道 DNS 解析出的 v4 一定可达）。隧道 DNS
+		// 解析出的 v6（映射命中，mappedHost 非空）不受影响。
+		if shouldRejectBareV6(action, destination.Addr, mappedHost) {
+			log.Printf("[tun] 裸 IPv6 目标（映射 miss，边缘不可达）快速拒绝 %s → %s",
+				source.AddrString(), destination.String())
+			_ = conn.Close()
+			if onClose != nil {
+				onClose(errBareV6Proxy)
+			}
+			return
+		}
 		upstream, err, rejected := resolveAction(action, ctx, targetAddr, v.cfg.TunnelDial, v.cfg.DirectDial)
 		if rejected {
 			log.Printf("[tun] 规则 reject：拒绝 %s → %s", source.AddrString(), destination.String())

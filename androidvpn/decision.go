@@ -140,6 +140,23 @@ func udpKind(port uint16) string {
 // proxy.errRejected 语义一致：连接被规则拒绝，绝不建连）。
 var rejectErr = errors.New("rejected by route")
 
+// errBareV6Proxy 标记 proxy 分支的裸 IPv6 目标被本地快速拒绝：IP→域名映射
+// miss（该 IP 从未经隧道 DNS 解析，只有本地视图可见），CONNECT 到 WARP
+// 边缘不可达——A15 双栈 hang 到 deadline（firstByteMs=-1），A14 边缘快拒。
+// 本地拒绝让客户端立即收到 connection refused → Happy Eyeballs 回退 v4。
+var errBareV6Proxy = errors.New("bare IPv6 target not reachable via tunnel")
+
+// shouldRejectBareV6 判定 proxy 分支的裸 IPv6 字面量目标是否应本地快速拒绝
+// （v0.5.29 洞 B 兜底）。Dns 拦截已让 AAAA 查询不再泄漏到物理 DNS
+// （dns.go noData 空应答），但已缓存的污染 v6 / 应用自带解析器 / 硬编码
+// v6 IP 仍会产生裸 v6 流：隧道 DNS 解析出的 v6（映射命中，mappedHost 非空）
+// 边缘可达、放行；其余裸 v6 在边缘不可达，本地立即拒连而不是挂到 deadline，
+// 让客户端快速回退 v4。direct/reject 分支不在此判定内（reject 由路由规则
+// 决定、direct 走本地直连）；v4 与域名目标（Addr 零值）一律放行。
+func shouldRejectBareV6(action string, ip netip.Addr, mappedHost string) bool {
+	return action == "proxy" && mappedHost == "" && ip.Is6() && !ip.Is4In6()
+}
+
 // resolveAction 把判定结果解析为上游连接：proxy → TunnelDial；
 // direct → DirectDial（nil 时 net.Dialer）；reject → (nil, rejectErr, true)
 // 绝不拨号。second=true 表示 reject 命中，调用方必须立即关闭连接。

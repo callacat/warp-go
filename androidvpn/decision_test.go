@@ -391,3 +391,72 @@ func TestShouldBlockUDP(t *testing.T) {
 		}
 	}
 }
+
+// TestShouldRejectBareV6 锁定裸 IPv6 快速拒绝判定（v0.5.29 洞 B）：proxy 分支
+// 的裸 IPv6 字面量（IP→域名映射 miss）→ 拒绝（边缘不可达，本地快拒避免挂死）；
+// 隧道 DNS 解析出的 v6（映射命中，mappedHost 非空）→ 放行（边缘可达）；
+// v4 / 域名目标（Addr 零值）/ direct / reject 一律放行。
+func TestShouldRejectBareV6(t *testing.T) {
+	v6 := netip.MustParseAddr("2606:4700::6810:7b60")
+	v4 := netip.MustParseAddr("104.16.123.96")
+	tests := []struct {
+		name       string
+		action     string
+		ip         netip.Addr
+		mappedHost string
+		want       bool
+	}{
+		{
+			// Device A 的坏签名：AAAA 泄漏的本地视图 v6 → 映射 miss → 裸 v6
+			// proxy 分支。此前 A15 hang 到 deadline（firstByteMs=-1），现在
+			// 本地快速拒绝 → 客户端回退 v4。
+			name:   "proxy + 裸 v6（映射 miss）→ 拒绝",
+			action: "proxy",
+			ip:     v6,
+			want:   true,
+		},
+		{
+			// 隧道 DNS 解析出的 v6（v6-only 主机）：remember 记录了映射 →
+			// mappedHost 非空 → 走域名 DialTunnel，边缘可达，必须放行（拒绝会
+			// 误杀 v6-only 站点）。
+			name:       "proxy + 隧道解析的 v6（映射命中）→ 放行",
+			action:     "proxy",
+			ip:         v6,
+			mappedHost: "www.cloudflare.com",
+		},
+		{
+			// direct 分支走本地直连（物理网络可能可达 v6），不在此判定范围。
+			name:   "direct + 裸 v6 → 放行（走本地直连）",
+			action: "direct",
+			ip:     v6,
+		},
+		{
+			// 裸 v4 是正常路径（未拦截查询 / 应用自带解析器的 v4 大多可达），
+			// 拒绝会大面积打断现有流量。
+			name:   "proxy + v4 → 放行",
+			action: "proxy",
+			ip:     v4,
+		},
+		{
+			// 域名目标：sing Socksaddr.Addr 零值 → Is6()=false，放行。
+			name:   "proxy + 域名目标（Addr 零值）→ 放行",
+			action: "proxy",
+			ip:     netip.Addr{},
+		},
+		{
+			// reject 由路由规则决定（resolveAction 返回 rejectErr），不应被
+			// 裸 v6 判定改写成 errBareV6Proxy。
+			name:   "reject + 裸 v6 → 放行（reject 语义由路由规则保证）",
+			action: "reject",
+			ip:     v6,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldRejectBareV6(tt.action, tt.ip, tt.mappedHost); got != tt.want {
+				t.Errorf("shouldRejectBareV6(%q, %v, %q) = %v，期望 %v",
+					tt.action, tt.ip, tt.mappedHost, got, tt.want)
+			}
+		})
+	}
+}

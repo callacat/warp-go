@@ -5,6 +5,32 @@
 
 ## [Unreleased]
 
+### 修复（Android 外网打不开，阶段 7 — IPv6 裸 IP CONNECT 洞）
+
+- **AAAA 查询泄漏物理 DNS → 本地视图 v6 IP → 裸 v6 走隧道 CONNECT 挂死**
+  （Device A/B debugdiag 对照驱动）：TUN DNS 拦截对 AAAA 查询拿到 v4 时
+  `return nil` 丢弃查询 → Android DNS 客户端超时后回退物理 DNS，拿到**本地
+  视图** v6 IP（如被封锁/污染的 `2606:4700::6810:7b60`）→ IP→域名映射 miss
+  （该 IP 从未经隧道 DoH 解析）→ proxy 分支裸 v6 IP 走隧道
+  （`client_dns.go` L43-47 直通）→ WARP 边缘不可达——Device A（A15 双栈）
+  CONNECT hang 到 deadline（`firstByteMs=-1` 行 v6=23），Device B（A14）
+  边缘快拒（connection refused，v4 回退掩盖）。b99bcd1 已净除共享 QUIC 风暴，
+  此为剩余第一嫌疑。
+  - **修复 1（防泄漏，治本）**：`dns.go` 地址族不匹配分支（AAA 查询拿到 v4）
+    由 `return nil` 改为回 **NOERROR 空应答**（新增 `noData`，权威声明"该类型
+    无记录"）。Android 认定无 AAAA、不再回退物理 DNS，直接用 A 查询的 v4 IP
+    （隧道 DNS 解析出，边缘必然可达）。
+  - **修复 2（快拒兜底，治标）**：`decision.go` 新增 `shouldRejectBareV6`
+    纯函数 + `errBareV6Proxy`：proxy 分支的裸 IPv6 字面量（映射 miss）本地
+    立即 RST 拒绝，不再发 CONNECT 到边缘——把 A15 的挂死/边缘快拒统一成
+    本地瞬时 connection refused，客户端 Happy Eyeballs 快速回退 v4。兜住修复 1
+    作用域外的残余（已缓存的污染 v6、应用自带解析器/硬编码 v6 IP、映射过期）。
+    隧道 DNS 解析出的 v6（映射命中）走域名不受影响。
+  - 新增 `TestDNSInterceptorAAAANoV6Leak`、`TestShouldRejectBareV6`，更新
+    `TestDNSInterceptorQueryTypeFilter`，`go build ./...` / `go test ./...` 全绿。
+  - **待真机验收**（东哥验收标准：真机打开境外网站 + debugdiag 无 v6 裸 IP
+    挂死/快拒行）。
+
 ### 修复（Android 外网打不开，阶段 6 — 隧道重连自伤）
 
 - **共享 QUIC 连接被自身健康逻辑反复拆毁 → 境外流批量殉葬**（debugdiag

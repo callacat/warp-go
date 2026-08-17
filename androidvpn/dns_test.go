@@ -42,12 +42,21 @@ func newTestInterceptor() *dnsInterceptor {
 
 // packAQuery 构造一条 A 查询报文。
 func packAQuery(id uint16, host string) []byte {
+	return packQuery(id, host, dnsmessage.TypeA)
+}
+
+// packAAAAQuery 构造一条 AAAA 查询报文。
+func packAAAAQuery(id uint16, host string) []byte {
+	return packQuery(id, host, dnsmessage.TypeAAAA)
+}
+
+func packQuery(id uint16, host string, typ dnsmessage.Type) []byte {
 	name, _ := dnsmessage.NewName(host + ".")
 	q := dnsmessage.Message{
 		Header: dnsmessage.Header{ID: id, RecursionDesired: true},
 		Questions: []dnsmessage.Question{{
 			Name:  name,
-			Type:  dnsmessage.TypeA,
+			Type:  typ,
 			Class: dnsmessage.ClassINET,
 		}},
 	}
@@ -94,8 +103,9 @@ func TestDNSInterceptorAAQuery(t *testing.T) {
 	}
 }
 
-// TestDNSInterceptorQueryTypeFilter 验证查询类型过滤：MX 查询不处理；
-// AAAA 查询但解析器只回 v4 时不返回（空应答，Android 回退下一个 DNS）。
+// TestDNSInterceptorQueryTypeFilter 验证查询类型过滤：MX 查询不处理
+// （返回 nil）；AAAA 查询但解析器只回 v4 时返回 NOERROR 空应答（不再
+// nil/丢弃，详见 TestDNSInterceptorAAAANoV6Leak）。
 func TestDNSInterceptorQueryTypeFilter(t *testing.T) {
 	d := newTestInterceptor()
 
@@ -113,19 +123,47 @@ func TestDNSInterceptorQueryTypeFilter(t *testing.T) {
 	if got := d.HandleQuery(mxWire); got != nil {
 		t.Fatal("MX 查询不应处理（返回 nil）")
 	}
+}
 
-	// AAAA 查询但 resolve 只回 v4 → nil（不构造不匹配的 AAAA 应答）
-	aaaaQ := dnsmessage.Message{
-		Header: dnsmessage.Header{ID: 2, RecursionDesired: true},
-		Questions: []dnsmessage.Question{{
-			Name:  name,
-			Type:  dnsmessage.TypeAAAA,
-			Class: dnsmessage.ClassINET,
-		}},
+// TestDNSInterceptorAAAANoV6Leak 验证 AAAA 查询拿到 v4 时返回 NOERROR 空应答
+// 而非 nil/丢弃（v0.5.29 防泄漏）：丢弃让 Android DNS 客户端超时后回退物理
+// DNS → 本地视图 v6 IP → IP→域名映射 miss → 裸 v6 IP 走隧道挂死（A15 双栈）。
+// 空应答（"无 AAAA 记录"）让 Android 不再回退，直接用 A 查询的 v4 IP（隧道
+// DNS 解析出，边缘可达）。
+func TestDNSInterceptorAAAANoV6Leak(t *testing.T) {
+	d := newTestInterceptor()
+	// Android 对 getaddrinfo 并行发 A + AAAA；A 查询先到（记录 v4 → 域名映射）
+	if resp := d.HandleQuery(packAQuery(3, "www.example.com")); resp == nil {
+		t.Fatal("A 查询应返回响应")
 	}
-	aaaaWire, _ := aaaaQ.Pack()
-	if got := d.HandleQuery(aaaaWire); got != nil {
-		t.Fatal("AAAA 查询解析到 v4 应返回 nil（地址族不匹配）")
+	// AAAA 查询：解析器只回 v4 → NOERROR 空应答，不是 nil
+	resp := d.HandleQuery(packAAAAQuery(4, "www.example.com"))
+	if resp == nil {
+		t.Fatal("AAAA 查询解析到 v4 应返回 NOERROR 空应答（不应 nil/丢弃）")
+	}
+	var m dnsmessage.Message
+	if err := m.Unpack(resp); err != nil {
+		t.Fatalf("解包 NOERROR 空应答失败：%v", err)
+	}
+	if m.Header.ID != 4 {
+		t.Fatalf("响应 ID = %#x, want 4", m.Header.ID)
+	}
+	if !m.Header.Response {
+		t.Fatal("响应标志未设置")
+	}
+	if m.RCode != dnsmessage.RCodeSuccess {
+		t.Fatalf("NOERROR 空应答 RCode = %v, want RCodeSuccess(0)", m.RCode)
+	}
+	if len(m.Answers) != 0 {
+		t.Fatalf("空应答应无 Answer，得到 %d 条", len(m.Answers))
+	}
+	if len(m.Questions) != 1 {
+		t.Fatalf("空应答应保留原 Question，得到 %d 个", len(m.Questions))
+	}
+	// 并行 A 查询记录的 v4 映射仍可用（客户端用 v4 连 → 还原域名走隧道）
+	domain, ok := d.LookupDomain(netip.MustParseAddr("57.145.12.1"))
+	if !ok || domain != "www.example.com" {
+		t.Fatalf("A 查询的 v4 映射应存在，得到 %s/%v", domain, ok)
 	}
 }
 

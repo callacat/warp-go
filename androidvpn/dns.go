@@ -109,8 +109,10 @@ func (d *dnsInterceptor) remember(ip netip.Addr, domain string) {
 // 解析失败等——调用方应静默 drop，让上层回退）。
 //
 // 只处理 A/AAAA + INET 单查询；其余（PTR、MX、ANY 等）与多查询报文直接
-// 返回 nil。解析结果按查询类型过滤：A 查询只回 IPv4，AAAA 只回 IPv6
-// （resolveDNS 返回 A 优先，AAAA-only 主机的 v4 结果不回 AAAA 应答）。
+// 返回 nil。解析结果按查询类型过滤：A 查询只回 IPv4，AAAA 只回 IPv6。
+// 地址族不匹配（resolveDNS 返回 A 优先，AAAA 查询很可能拿到 v4）回
+// NOERROR 空应答（权威"该类型无记录"），不再丢弃——丢弃会让 Android DNS
+// 客户端超时后回退物理 DNS，拿到本地视图 v6 IP（v0.5.24 根因的 v6 形态）。
 func (d *dnsInterceptor) HandleQuery(payload []byte) []byte {
 	if d.resolve == nil {
 		return nil
@@ -156,12 +158,13 @@ func (d *dnsInterceptor) HandleQuery(payload []byte) []byte {
 	case wantV6 && ip.To4() == nil:
 		answer = d.answer(question.Name, dnsmessage.TypeAAAA, ip.To16())
 	default:
-		// 查询类型与解析结果地址族不匹配（如 AAAA 查询拿到 v4）：空应答，
-		// 让 Android 回退到下一个 DNS。
-		return nil
-	}
-	if answer == nil {
-		return nil
+		// 查询类型与解析结果地址族不匹配（如 AAAA 查询拿到 v4）：回 NOERROR
+		// 空应答（权威"该类型无记录"），而不是 nil/丢弃。丢弃让 Android DNS
+		// 客户端超时后回退物理 DNS → 本地视图 v6 IP → IP→域名映射 miss → 裸
+		// v6 IP 走隧道 CONNECT 边缘不可达（A15 双栈挂死 firstByteMs=-1）。
+		// 空应答让 Android 立即认定无此类型记录：AAAA 查询回"无 AAAA"不再
+		// 泄漏到物理 DNS，直接用 A 查询的 v4 IP（隧道 DNS 解析出，边缘可达）。
+		return noData(q)
 	}
 
 	d.remember(addrFromIP(ip), host)
@@ -180,6 +183,30 @@ func (d *dnsInterceptor) HandleQuery(payload []byte) []byte {
 	wire, err := resp.Pack()
 	if err != nil {
 		log.Printf("⚠ DNS 拦截：封装响应失败：%v", err)
+		return nil
+	}
+	return wire
+}
+
+// noData 构造一条 NOERROR 空应答（保留原 Question、ID、OpCode，无 Answer），
+// 权威声明"该查询类型无记录"。与 servfail 的区别：servfail 表示解析失败，
+// Android 会回退下一个 DNS；noData 表示查询成功但地址族不匹配（如 AAAA 查询
+// 拿到 v4），Android 认定无该类型记录、不回退——防止 v6 泄漏到本地视图
+// （v0.5.24 根因的 v6 形态）。
+func noData(q dnsmessage.Message) []byte {
+	resp := dnsmessage.Message{
+		Header: dnsmessage.Header{
+			ID:                 q.Header.ID,
+			Response:           true,
+			OpCode:             q.Header.OpCode,
+			RecursionDesired:   q.Header.RecursionDesired,
+			RecursionAvailable: true,
+		},
+		Questions: q.Questions,
+	}
+	wire, err := resp.Pack()
+	if err != nil {
+		log.Printf("⚠ DNS 拦截：封装 NOERROR 空应答失败：%v", err)
 		return nil
 	}
 	return wire
