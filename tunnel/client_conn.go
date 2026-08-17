@@ -781,7 +781,11 @@ func (c *MasqueClient) runReconnect(flight *reconnectFlight) {
 	}
 
 	var err error
-	backoff := reconnectRetryInitial
+	// 首次重试立即发起（backoff=0），失败后才从 reconnectRetryInitial 指数
+	// 退避：拆线瞬间新连接尽快就位，缩短风暴窗口内导航的等待时间（debugdiag：
+	// 退役→重建窗口内浏览器超时 refused 全聚在此时段）。singleflight 保证
+	// 同一时刻只有一个 dial，不会退避归零引发拨号风暴。
+	backoff := time.Duration(0)
 	for {
 		var bundle *connBundle
 		bundle, err = dial(c.lifeCtx)
@@ -828,7 +832,9 @@ func (c *MasqueClient) runReconnect(flight *reconnectFlight) {
 		if c.lifeCtx.Err() != nil {
 			break
 		}
-		if backoff < reconnectRetryMax {
+		if backoff == 0 {
+			backoff = reconnectRetryInitial
+		} else if backoff < reconnectRetryMax {
 			backoff *= 2
 			if backoff > reconnectRetryMax {
 				backoff = reconnectRetryMax
@@ -902,6 +908,16 @@ func (b *connBundle) connectFailureRequiresReconnect(err, callerErr error, targe
 	// 其余（超时、对端 reset 等）可能只是单个目标不可达：单次不拆共享连接
 	// （v0.5.21 教训），窗口内累计 connectFailureTargets 次才判定路径黑洞
 	// （v0.5.23 语义——浏览器对同一站点的并发重试不会被 distinct 去重抹掉）。
+	//
+	// CONNECT 交换期间连接仍在收到新 QUIC 包（receivedPackets 增加）=
+	// QUIC 路径本身健康，本次失败纯属目标/单流问题——不累计观察窗、不拆共享
+	// 连接。真机 debugdiag（v0.5.31+）：手机网络对个别目标（IPv6、慢节点、
+	// 边缘拒绝）CONNECT 超时/RST 是常态，纯计数 2 次就把整条共享连接连同
+	// 其上所有在途流一起误杀（79% 被拆流正在正常传输，life p90=22s）。黑洞
+	// 交换期间收不到任何包，判定不受影响。
+	if b.receivedPackets() > packetsBefore {
+		return false
+	}
 	return b.noteProgressingCONNECTFailure(target, time.Now())
 }
 

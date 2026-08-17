@@ -2,7 +2,13 @@ package tunnel
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"io"
+	"math/big"
 	"net"
 	"sync"
 	"syscall"
@@ -264,6 +270,104 @@ func TestConnectFailureNonTimeoutResetWindowed(t *testing.T) {
 	}
 	if !b.connectFailureRequiresReconnect(resetErr(), nil, "x:443", 0) {
 		t.Fatal("窗口内第 2 次目标重置应触发重连：期望 true")
+	}
+}
+
+// dialQUICPair 建立一条本机 UDP 上的真实 QUIC 连接（自签 TLS），返回客户端
+// 连接与清理函数。握手至少交换若干 QUIC 包 → ConnectionStats().PacketsReceived
+// ≥1，供"CONNECT 交换期间连接在收包"判定使用。quic.Conn 是 struct 无法 mock，
+// 只能真实建立。
+func dialQUICPair(t *testing.T) (client *quic.Conn, cleanup func()) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("生成测试密钥失败：%v", err)
+	}
+	tmpl := x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		IPAddresses:  []net.IP{net.IPv4(127, 0, 0, 1)},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, &tmpl, &tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("生成测试证书失败：%v", err)
+	}
+	pool := x509.NewCertPool()
+	if cert, err := x509.ParseCertificate(der); err == nil {
+		pool.AddCert(cert)
+	}
+	serverTLS := &tls.Config{
+		Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key}},
+		NextProtos:   []string{"h3-test"},
+	}
+	clientTLS := &tls.Config{RootCAs: pool, ServerName: "127.0.0.1", NextProtos: []string{"h3-test"}}
+
+	// 服务端与客户端各自独立 UDP socket + Transport（一个 Transport 只服务一条
+	// PacketConn，Listen 与 Dial 分离更接近真实网络路径）。
+	uc, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("监听 UDP 失败：%v", err)
+	}
+	trSrv := &quic.Transport{Conn: uc}
+	ln, err := trSrv.Listen(serverTLS, nil)
+	if err != nil {
+		t.Fatalf("QUIC Listen 失败：%v", err)
+	}
+
+	uc2, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("监听客户端 UDP 失败：%v", err)
+	}
+	trCli := &quic.Transport{Conn: uc2}
+	conn, err := trCli.Dial(context.Background(),
+		&net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: uc.LocalAddr().(*net.UDPAddr).Port},
+		clientTLS, nil)
+	if err != nil {
+		t.Fatalf("QUIC Dial 失败：%v", err)
+	}
+	cleanup = func() {
+		_ = conn.CloseWithError(0, "")
+		_ = ln.Close()
+		_ = trSrv.Close()
+		_ = uc.Close()
+		_ = trCli.Close()
+		_ = uc2.Close()
+	}
+	return conn, cleanup
+}
+
+// TestConnectFailurePacketsDuringExchangeKeepsConnection 锁定 CONNECT 失败但
+// 交换期间连接仍在收包（receivedPackets 增加）时不记观察窗、不拆共享连接：
+// QUIC 路径健康，失败纯属目标/单流问题。真机 debugdiag（v0.5.31+）：手机网络
+// 对个别目标 CONNECT 超时/RST 是常态，纯计数 2 次就把整条共享连接连同其上
+// 所有在途流一起误杀（79% 被拆流正在正常传输，life p90=22s）——退役风暴根因。
+func TestConnectFailurePacketsDuringExchangeKeepsConnection(t *testing.T) {
+	conn, cleanup := dialQUICPair(t)
+	defer cleanup()
+	b := newTestBundle()
+	b.quicConn = conn
+	// 握手后 PacketsReceived≥1；packetsBefore=0 → 交换期间有新包 → 不记窗不拆。
+	if b.connectFailureRequiresReconnect(timeoutErr(), nil, "x:443", 0) {
+		t.Fatal("交换期间连接在收包不应记观察窗：期望 false")
+	}
+	// 快照=当前包数：连接空闲无新包 → 走观察窗（黑洞语义），第 1 次仍只记窗。
+	cur := b.receivedPackets()
+	if b.connectFailureRequiresReconnect(timeoutErr(), nil, "x:443", cur) {
+		t.Fatal("空闲连接无新包第 1 次失败应只记窗（1/2）：期望 false")
+	}
+}
+
+// TestConnectFailureNoPacketsDuringExchangeCountsWindow 锁定黑洞语义保留：
+// 无 QUIC 连接（拨号前/已关，receivedPackets=0）时失败仍按观察窗累计，窗内
+// 2 次拆线（v0.5.23 恢复语义不受影响）。
+func TestConnectFailureNoPacketsDuringExchangeCountsWindow(t *testing.T) {
+	b := newTestBundle() // quicConn=nil → receivedPackets()=0
+	if b.connectFailureRequiresReconnect(timeoutErr(), nil, "x:443", 0) {
+		t.Fatal("第 1 次失败应只记窗（1/2）：期望 false")
+	}
+	if !b.connectFailureRequiresReconnect(timeoutErr(), nil, "x:443", 0) {
+		t.Fatal("窗内第 2 次失败应触发拆线：期望 true")
 	}
 }
 

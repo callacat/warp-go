@@ -5,6 +5,39 @@
 
 ## [Unreleased]
 
+### 修复（Android 外网打不开，阶段 10 — 连接退役风暴误杀在途流）
+
+- **池成员连接被本地主动退役过频，每次退役连坐全部在途流 → 很多网站打不开**
+  （真机 debugdiag 第二轮，东哥 2026-08-17 实测「YouTube 快了一点但许多网站
+  还是打不开」）：da5115c 健康跳过缓解了「死成员阻塞解析」，但 6.25 分钟
+  会话里仍有 59 条 QUIC 连接被本地 retire/reconnect 主动拆线（平均 ~6 秒拆
+  一条），每条连接承载 4-23 条流**同毫秒全部连坐**（`use of closed network
+  connection` / `quic: transport closed` 均为本地 `bundle.close()` 后流 IO
+  失败，非远端错误）；394 条被拆流中 **79% 正在正常传输**（down>0、life
+  p50=2.6s / p90=22.7s），说明退役是误杀健康流而非流自然死亡。
+  - **根因（退役误判）**：`connectFailureRequiresReconnect` 携带
+    `packetsBefore`（CONNECT 交换前 `receivedPackets()` 快照）参数但**从未
+    使用**——「交换期间连接仍在新收 QUIC 包 = 路径健康」判定被丢。手机网络上
+    个别目标（IPv6、慢节点、边缘拒绝）CONNECT 超时/RST 是常态，纯计数在
+    30s 窗口累计 2 次即 retire 整条共享连接；退役→重建窗口（指数退避
+    100ms→5s + 握手）内新导航 slow/failed → 浏览器超时 → `connection
+    refused` 41 条（全部聚在退役风暴时段）。退役→失败→记窗→再退役形成
+    自激循环。
+  - **修复 1（恢复健康判定，核心）**：`tunnel/client_conn.go` 的
+    `connectFailureRequiresReconnect` 在记观察窗前检查
+    `b.receivedPackets() > packetsBefore`——交换期间连接在收包则本次失败
+    纯属目标/单流问题，**不累计观察窗、不拆共享连接**；黑洞（连接真死，
+    交换期间无任何新包）仍按观察窗累计拆线，v0.5.23 恢复语义保留。
+  - **修复 2（首试立即重连）**：`runReconnect` 首次重试退避 100ms→0（失败后
+    才从 100ms 指数退避），拆线后新连接尽快就位，缩短风暴窗口内导航等待。
+    singleflight 保证不产生拨号风暴。
+  - 新增 `TestConnectFailurePacketsDuringExchangeKeepsConnection`（本机真实
+    QUIC 连接对验证「在收包不拆线」）+ `TestConnectFailureNoPacketsDuring
+    ExchangeCountsWindow`（黑空调语义保留），`go build ./...` /
+    `go test ./...` 全绿。
+  - **待真机验收**：重测打不开的网站（B站/微软系/导航类）应显著恢复；fbm=-1
+    占比与 refused 数应下降。
+
 ### 修复（Android 外网打不开，阶段 9 — 连接池死成员阻塞慢解析）
 
 - **连接池轮询命中死成员 → DialTunnel/ResolveDNS 阻塞等待其重连，解析/首包
