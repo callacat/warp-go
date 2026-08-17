@@ -234,17 +234,22 @@ func NewMasqueClient(edgeAddrs []string, tlsConfig *tls.Config, token string) (*
 	return NewMasqueClientContext(context.Background(), edgeAddrs, tlsConfig, token)
 }
 
-// NewMasqueClientContext is NewMasqueClient with an externally-cancellable
-// initial dial. ctx cancels the bootstrapping dial loop (so a host that wants
-// to abort startup — e.g. the Android bridge when the user hits Stop while the
-// edge is unreachable and the client would otherwise retry forever — can
-// return immediately). The established connection's lifetime is still owned
-// by the returned client's own lifecycle ctx; ctx only gates construction.
-func NewMasqueClientContext(ctx context.Context, edgeAddrs []string, tlsConfig *tls.Config, token string) (*MasqueClient, error) {
-	if len(edgeAddrs) == 0 {
-		return nil, errors.New("未提供任何边缘地址")
-	}
-	quicConfig := &quic.Config{
+// newQUICConfig 构造 QUIC/H3 连接配置。独立成函数以便单测锁定
+// 包大小钳制（见 QUIC_MAX_PACKET_SIZE 注释）。
+func newQUICConfig() *quic.Config {
+	// 包大小下限（v0.5.31，真机实测路径 MTU ≈1478：ICMP 1450 负载全通、
+	// 1460 全丢——负载上限 1450）：quic-go 向边缘通告 MaxUDPPayloadSize
+	// =1452 硬编码（internal/protocol.MaxPacketBufferSize），1452+IPv4/UDP
+	// 头=1480 越过 1478，一旦边缘或本端 PMTUD 探到 1452 就触发 DF 静默丢包
+	// → QUIC PTO/cwnd 循环塌陷，表现正是"小响应通、大流卡死"。因此：
+	//   1) InitialPacketSize 从 1350 收到 1200（quic-go 合法下限），本端报文
+	//      恒 ≤1228 字节，任何 ≥1232 MTU 路径都能过，顺便把单包丢失的粒度
+	//      砍掉约 11%；
+	//   2) 关闭 PMTUD 探测（DisablePathMTUDiscovery），杜绝把上行包探到
+	//      1452 危险区——本端包尺寸终生锁死在 InitialPacketSize。
+	// 下行（边缘→本端）仍受其自身 1350 发送上限约束（warp-svc tokio-quiche
+	// 逆向文档 §6），MaxUDPPayloadSize 通告无法经 quic.Config 压下，记录在案。
+	return &quic.Config{
 		KeepAlivePeriod:      10 * time.Second,
 		MaxIdleTimeout:       60 * time.Second,
 		HandshakeIdleTimeout: 30 * time.Second,
@@ -264,8 +269,22 @@ func NewMasqueClientContext(ctx context.Context, edgeAddrs []string, tlsConfig *
 		MaxStreamReceiveWindow:         1_000_000,
 		MaxIncomingStreams:             100,
 		MaxIncomingUniStreams:          100,
-		InitialPacketSize:              1350,
+		InitialPacketSize:              1200,
+		DisablePathMTUDiscovery:        true,
 	}
+}
+
+// NewMasqueClientContext is NewMasqueClient with an externally-cancellable
+// initial dial. ctx cancels the bootstrapping dial loop (so a host that wants
+// to abort startup — e.g. the Android bridge when the user hits Stop while the
+// edge is unreachable and the client would otherwise retry forever — can
+// return immediately). The established connection's lifetime is still owned
+// by the returned client's own lifecycle ctx; ctx only gates construction.
+func NewMasqueClientContext(ctx context.Context, edgeAddrs []string, tlsConfig *tls.Config, token string) (*MasqueClient, error) {
+	if len(edgeAddrs) == 0 {
+		return nil, errors.New("未提供任何边缘地址")
+	}
+	quicConfig := newQUICConfig()
 
 	lifeCtx, lifeStop := context.WithCancel(context.Background())
 	c := &MasqueClient{
