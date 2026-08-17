@@ -25,6 +25,28 @@
     全绿。
   - **待真机验收**（东哥验收标准：真机浏览器打开 YouTube/linux.do 大流不卡）。
 
+### 改进（Android 外网打不开，阶段 8b — 共享 QUIC 连接按连接限速，连接池）
+
+- **单条共享 QUIC 连接被网络按连接限速 ~1Mbps，浏览器多流均分 → 大流饿死**
+  （真机 Device A 实测驱动，阶段 8 的剩余瓶颈。curl 单流独占 0.75MB/s 能下
+  完 5MB/25MB，浏览器几十条并发流被均分后每条只剩 ~15KB/s → 视频永远转圈、
+  linux.do 永不进；判定依据——同机同会话 1 条 / 10 条 / 20 条并发下载的总
+  吞吐恒定 0.75 / 0.99 / 0.74 MB/s：总上限与并发数无关、只按流均分，指向
+  **单连接（单个 5 元组）被限速**而非全局带宽或单流流控）。
+  - **修复（QUIC 连接池）**：`core/pool.go` 新增 `poolDialer` + 边缘表旋转
+    `rotateEdges`，`core/kernel.go` 的 `NewKernelContext` 按 `core.Config.
+    TunnelConnections`（默认 2，`config.json` 可配）建多条 QUIC 连接，轮询
+    分发 `DialTunnel`/`ResolveDNS`，单条连接失败自动换下一条。每条连接复用原
+    MasqueClient 自愈机制（各自重连/探针/DoH）；边缘表按连接序号左旋，让不同
+    连接落在不同边缘/端口（不同 5 元组），各自拿独立限速额度。
+    **无回归下限**：单连接时透传原行为；若瓶颈为全局带宽则总量不变、若为按
+    连接限速则总量随连接数叠加（真机 A/B 验收）。
+  - 新增 `TestPool*` 单测（轮询均分 / 失败换下一条 / 全败返回末错 / ctx 取消
+    早停 / 单连接透传 / Close 全关 / DNS 轮询 / 边缘旋转 / 连接数解析），
+    `go build ./...` / `go test ./...` 全绿。
+  - **待真机验收**（TunnelConnections=2 的 APK：再测单 vs 10 并发总量，
+    预期 >1Mbps；浏览器大流显著提速）。
+
 ### 修复（Android 外网打不开，阶段 7 — IPv6 裸 IP CONNECT 洞）
 
 - **AAAA 查询泄漏物理 DNS → 本地视图 v6 IP → 裸 v6 走隧道 CONNECT 挂死**

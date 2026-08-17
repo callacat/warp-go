@@ -98,9 +98,31 @@ func NewKernel(cfg *Config, regData *registration.Registration, edgeAddrs []stri
 // （NewMasqueClientContext）或在装配开始前已取消时直接失败。Android 桥用它
 // 让"装配中停止"能立即中止拨号，而非无限重连停不掉（v0.5.10 反馈）。
 // 桌面/CLI 路径用 NewKernel（background，行为不变）。
+//
+// v0.5.31：按 cfg.TunnelConnections 建立多条 QUIC 连接并用 poolDialer 轮询
+// 分发（默认 2）。单连接被网络按连接限速 ~1Mbps，多连接各自达到独立限速
+// 均衡、总量可叠加；连接失败各自独立重连（MasqueClient 内建），池不叠加
+// 任何连接级状态。
 func NewKernelContext(ctx context.Context, cfg *Config, regData *registration.Registration, edgeAddrs []string, tlsConfig *tls.Config) (*Kernel, error) {
 	return newKernel(ctx, cfg, regData, edgeAddrs, tlsConfig, func() (dialer, error) {
-		return tunnel.NewMasqueClientContext(ctx, edgeAddrs, tlsConfig, regData.Token)
+		n := tunnelConnectionsFor(cfg.TunnelConnections)
+		dials := make([]dialer, 0, n)
+		for i := 0; i < n; i++ {
+			// 每条连接从旋转后的边缘表开始拨号 → 不同连接落在不同候选
+			// （不同 5 元组），避免所有连接挤在同一边缘/端口共享同一限速额度。
+			d, err := tunnel.NewMasqueClientContext(ctx, rotateEdges(edgeAddrs, i), tlsConfig, regData.Token)
+			if err != nil {
+				for _, dd := range dials {
+					_ = dd.Close()
+				}
+				return nil, err
+			}
+			dials = append(dials, d)
+		}
+		if len(dials) == 1 {
+			return dials[0], nil
+		}
+		return newPoolDialer(dials), nil
 	})
 }
 

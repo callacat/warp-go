@@ -45,6 +45,10 @@ type Config struct {
 	// DialTimeoutSeconds 是边缘拨号总超时（秒）。仅 Android 使用：装配
 	// ctx 的 WithTimeout 值；0 或缺失 = 默认 60s（见 androidDialTimeoutDefault）。
 	DialTimeoutSeconds int `json:"dial_timeout_seconds,omitempty"`
+	// TunnelConnections 是隧道 QUIC 连接数（≥1）。>1 时按连接池轮询分发
+	// （v0.5.31 吞吐改进：真机单连接被网络按连接限速 ~1Mbps，多连接各自达到
+	// 独立均衡、总量可叠加）；0/缺省 = 1。
+	TunnelConnections int `json:"tunnel_connections,omitempty"`
 	// ThemeMode 是界面主题模式：light / dark / system（跟随系统）。
 	// GUI 保存设置时同步写入 config.json，启动时从配置读取并注入前端。
 	ThemeMode string `json:"theme_mode,omitempty"`
@@ -63,6 +67,7 @@ func DefaultConfig() *Config {
 		AllowUDP:          false,
 		DownloadProxy:     "https://gh-proxy.org/",
 		ThemeMode:         "system",
+		TunnelConnections: 2,
 	}
 }
 
