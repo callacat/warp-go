@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"warp/androidvpn"
 	"warp/core"
@@ -70,6 +72,16 @@ func buildAndroidConfig(sandboxDir string, fd int) (*builtAndroid, error) {
 	if v6, ok := parseAssignedAddr(regData.AssignedIPv6); ok {
 		vpnCfg.Inet6Address = []netip.Prefix{netip.PrefixFrom(v6, 128)}
 	}
+	// config.json 的 physical_dns（辅助来源，v0.5.30 阶段 12）：解析为
+	// netip.Addr 列表——上层 Java 注入的物理网络 DNS 优先于它（为空才回退
+	// 公共 DNS，见 NewDNSInterceptor）。
+	for _, s := range cfg.PhysicalDNS {
+		if a, err := netip.ParseAddr(s); err == nil {
+			vpnCfg.PhysicalDNS = append(vpnCfg.PhysicalDNS, a)
+		} else {
+			log.Printf("⚠ 忽略非法 physical_dns 项 %q：%v", s, err)
+		}
+	}
 
 	return &builtAndroid{vpnCfg: vpnCfg, cfg: cfg, regData: regData}, nil
 }
@@ -93,4 +105,23 @@ func parseAssignedAddr(s string) (netip.Addr, bool) {
 		return netip.Addr{}, false
 	}
 	return a, true
+}
+
+// parsePhysicalDNSCSV 解析 Java 侧注入的物理 DNS 列表（逗号分隔 IP
+// 字符串，如 "122.189.80.186,223.5.5.5"）。忽略空段与非法项；全部非法/
+// 空串返回 nil（调用方回退公共 DNS 兜底，见 NewDNSInterceptor）。
+func parsePhysicalDNSCSV(s string) []netip.Addr {
+	var out []netip.Addr
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if a, err := netip.ParseAddr(part); err == nil {
+			out = append(out, a)
+		} else {
+			log.Printf("⚠ 忽略 Java 注入的非法物理 DNS 项 %q：%v", part, err)
+		}
+	}
+	return out
 }

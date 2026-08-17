@@ -13,16 +13,19 @@ import (
 	"golang.org/x/net/dns/dnsmessage"
 )
 
-// fakeResolve 测试用假解析器：host→ipv4/ipv6 静态表。
+// fakeResolve 测试用假解析器：host→ipv4/ipv6 静态表。called 记录被查询的
+// host（断言 DNS 源分流用，HandleQuery 同步执行无并发）。
 type fakeResolve struct {
-	v4 map[string]string
-	v6 map[string]string
+	v4     map[string]string
+	v6     map[string]string
+	called []string
 }
 
 func (f *fakeResolve) resolve(ctx context.Context, host string) (net.IP, error) {
 	if f == nil {
 		return nil, errors.New("no resolver")
 	}
+	f.called = append(f.called, host)
 	if ip, ok := f.v4[host]; ok {
 		return net.ParseIP(ip), nil
 	}
@@ -32,12 +35,141 @@ func (f *fakeResolve) resolve(ctx context.Context, host string) (net.IP, error) 
 	return nil, errors.New("NXDOMAIN: " + host)
 }
 
-// newTestInterceptor 构造带假解析器的拦截器。
+// newTestInterceptor 构造带假解析器的拦截器（无路由/无物理 DNS → 恒隧道）。
 func newTestInterceptor() *dnsInterceptor {
 	return NewDNSInterceptor((&fakeResolve{
 		v4: map[string]string{"www.example.com": "57.145.12.1"},
 		v6: map[string]string{"ipv6.example.com": "2606:4700:4700::1111"},
-	}).resolve)
+	}).resolve, nil, nil)
+}
+
+// newSplitInterceptor 构造带路由判定 + 假物理/隧道解析器的拦截器，供 DNS
+// 源分流测试：tunnel 解析 geosite:proxy 的国外 host，physical 解析
+// geosite:cn 的国内 host（两个解析器对同一 host 可给不同 IP——实测根因）。
+func newSplitInterceptor() *dnsInterceptor {
+	tunnel := &fakeResolve{
+		v4: map[string]string{"www.google.com": "142.250.72.4"},
+	}
+	physical := &fakeResolve{
+		v4: map[string]string{"www.example.com": "122.189.80.186"},
+	}
+	d := NewDNSInterceptor(tunnel.resolve, splitTestRoute, nil)
+	d.physicalResolver = physical.resolve
+	return d
+}
+
+// splitTestRoute 测试路由：www.example.com → direct（国内），其余 → proxy。
+func splitTestRoute(host string, ip netip.Addr) (string, bool) {
+	if host == "www.example.com" {
+		return "direct", true
+	}
+	return "proxy", true
+}
+
+// TestDNSInterceptorCNDirectPhysical 验证国内域名（route→direct）走物理
+// DNS 解析：返回物理解析器的国内节点 IP（122.189.80.186），隧道解析器
+// 未被调用；映射 src=physical。
+func TestDNSInterceptorCNDirectPhysical(t *testing.T) {
+	d := newSplitInterceptor()
+	resp := d.HandleQuery(packAQuery(0x20, "www.example.com"))
+	if resp == nil {
+		t.Fatal("国内域名查询应返回响应")
+	}
+	var m dnsmessage.Message
+	if err := m.Unpack(resp); err != nil {
+		t.Fatalf("解包响应失败：%v", err)
+	}
+	if len(m.Answers) != 1 {
+		t.Fatalf("应恰有 1 条应答，得到 %d", len(m.Answers))
+	}
+	a, ok := m.Answers[0].Body.(*dnsmessage.AResource)
+	if !ok {
+		t.Fatalf("应答应为 A 记录，得到 %T", m.Answers[0].Body)
+	}
+	if got := net.IP(a.A[:]).String(); got != "122.189.80.186" {
+		t.Fatalf("国内域名应返回物理 DNS 的国内节点 122.189.80.186，得到 %s", got)
+	}
+	// 映射记录物理源 IP → 域名，src=physical
+	entry, ok := d.domains[netip.MustParseAddr("122.189.80.186")]
+	if !ok || entry.src != srcPhysical {
+		t.Fatalf("映射应为 src=physical，得到 src=%q ok=%v", entry.src, ok)
+	}
+	if domain, ok := d.LookupDomain(netip.MustParseAddr("122.189.80.186")); !ok || domain != "www.example.com" {
+		t.Fatalf("映射域名应为 www.example.com，得到 %s/%v", domain, ok)
+	}
+}
+
+// TestDNSInterceptorForeignTunnel 验证国外域名（route→proxy）走隧道 DoH
+// 解析：隧道解析器被调用，物理解析器未被调用。
+func TestDNSInterceptorForeignTunnel(t *testing.T) {
+	d := newSplitInterceptor()
+	resp := d.HandleQuery(packAQuery(0x21, "www.google.com"))
+	if resp == nil {
+		t.Fatal("国外域名查询应返回响应")
+	}
+	var m dnsmessage.Message
+	if err := m.Unpack(resp); err != nil {
+		t.Fatalf("解包响应失败：%v", err)
+	}
+	if len(m.Answers) != 1 {
+		t.Fatalf("应恰有 1 条应答，得到 %d", len(m.Answers))
+	}
+	a, ok := m.Answers[0].Body.(*dnsmessage.AResource)
+	if !ok {
+		t.Fatalf("应答应为 A 记录，得到 %T", m.Answers[0].Body)
+	}
+	if got := net.IP(a.A[:]).String(); got != "142.250.72.4" {
+		t.Fatalf("国外域名应返回隧道 DoH 的 IP 142.250.72.4，得到 %s", got)
+	}
+	// 物理解析器未被调用
+	entry, ok := d.domains[netip.MustParseAddr("142.250.72.4")]
+	if !ok || entry.src != srcTunnel {
+		t.Fatalf("映射应为 src=tunnel，得到 src=%q ok=%v", entry.src, ok)
+	}
+}
+
+// TestDNSInterceptorNilRouteTunnel 验证 route 为 nil 时（桌面/CLI，或
+// Android 未注入 route）国内域名也走隧道 DoH——退回现状行为，不误判。
+func TestDNSInterceptorNilRouteTunnel(t *testing.T) {
+	d := newTestInterceptor()
+	resp := d.HandleQuery(packAQuery(0x22, "www.example.com"))
+	if resp == nil {
+		t.Fatal("nil route 查询应返回响应")
+	}
+	var m dnsmessage.Message
+	if err := m.Unpack(resp); err != nil {
+		t.Fatalf("解包响应失败：%v", err)
+	}
+	if len(m.Answers) != 1 {
+		t.Fatalf("应恰有 1 条应答，得到 %d", len(m.Answers))
+	}
+	a, ok := m.Answers[0].Body.(*dnsmessage.AResource)
+	if !ok {
+		t.Fatalf("应答应为 A 记录，得到 %T", m.Answers[0].Body)
+	}
+	// 假解析器只给 57.145.12.1（隧道 DoH 视角），物理路径未启用
+	if got := net.IP(a.A[:]).String(); got != "57.145.12.1" {
+		t.Fatalf("nil route 应走隧道 DoH 返回 57.145.12.1，得到 %s", got)
+	}
+}
+
+// TestDNSInterceptorPhysicalFallback 验证物理 DNS 全部失败时回 SERVFAIL
+// （设计文档风险节：不恶化，Android 回退下一个 DNS）。
+func TestDNSInterceptorPhysicalFallback(t *testing.T) {
+	physical := &fakeResolve{} // 空表 → 全 NXDOMAIN
+	d := NewDNSInterceptor((&fakeResolve{}).resolve, splitTestRoute, nil)
+	d.physicalResolver = physical.resolve
+	resp := d.HandleQuery(packAQuery(0x23, "www.example.com"))
+	if resp == nil {
+		t.Fatal("物理解析失败应返回 SERVFAIL（不应 nil）")
+	}
+	var m dnsmessage.Message
+	if err := m.Unpack(resp); err != nil {
+		t.Fatalf("解包 SERVFAIL 失败：%v", err)
+	}
+	if m.RCode != dnsmessage.RCodeServerFailure {
+		t.Fatalf("SERVFAIL 响应 RCode = %v, want ServerFailure", m.RCode)
+	}
 }
 
 // packAQuery 构造一条 A 查询报文。
@@ -236,7 +368,7 @@ func TestDNSInterceptorResolveFailure(t *testing.T) {
 
 // TestDNSInterceptorNilResolve 验证未配置解析函数时全部丢弃。
 func TestDNSInterceptorNilResolve(t *testing.T) {
-	d := NewDNSInterceptor(nil)
+	d := NewDNSInterceptor(nil, nil, nil)
 	if resp := d.HandleQuery(packAQuery(10, "www.example.com")); resp != nil {
 		t.Fatal("nil resolve 应返回 nil")
 	}

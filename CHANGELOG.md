@@ -3,6 +3,46 @@
 本项目所有值得记录的变更。格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v0.5.30] - Unreleased
+
+### 修复（国内网站 200-300ms 高延迟，阶段 12 — DNS 源分流：国内域名走物理 DNS 拿国内节点）
+
+- **国内网站 273-312ms 高延迟**（bcf04d9 GEO 修复版真机复测，东哥 2026-08-18 实测
+  「电脑 Mihomo 17ms / 手机直连 39ms」反驳「CDN 固有延迟」定性）：真正根因是 **TUN
+  DNS 拦截把所有 UDP:53 查询（含国内域名）都走隧道 DoH（1.1.1.1 海外解析者视角）
+  解析 → CDN（B站/淘宝/字节）按解析者地理位置返回海外节点 → geosite:cn 判 direct
+  （正确）但直连目标是美国 IP（172.96.115.243 / 163.181.246.186 / 155.102.54.133）
+  → 200-300ms**。同一个域名物理 DNS 解析是国内节点（122.189.80.186 湖北联通）<
+  50ms 可达。判定链没错，错在解析源视角。
+  - **修复：DNS 源分流（域名级）**。`HandleQuery` 已解出域名（无 IP），用
+    `route.Engine.Match(host, 零值 IP)` 判定：命中 **direct**（geosite:cn /
+    geosite:private / geoip:private / domain 规则）→ 物理 DNS 直连解析拿国内节点；
+    proxy / 未命中 / route 为 nil → 隧道 DoH（现状不变）。
+  - **物理 DNS 上游三层来源**：① Java 在 `establish()` **之前**捕获物理网络真实
+    DNS（`ConnectivityManager.getActiveNetwork()` → `LinkProperties.getDnsServers()`，
+    建立后读会拿到 VPN 自身 DNS，时序关键）经 JNI 注入；② config.json 新增
+    `physical_dns` 字段（辅助）；③ 公共 DNS 兜底
+    （223.5.5.5 / 119.29.29.29 / 114.114.114.114）。
+  - **protect 防环路（不可省）**：物理 DNS 直连 socket 必须
+    `VpnService.protect()`（`Dialer.Control` 复用 decision.go socketProtector），
+    否则 UDP:53 查询重新进 TUN 环路风暴——与 v0.5.24 修的「direct 拨号物理解析
+    环路」独立，两处各自 protect 各自 socket。
+  - **防覆盖**：IP→域名映射 key 是 IP，物理/隧道解析出的 IP 不同天然不冲突；
+    `domainEntry` 增 `src` 标记（physical/tunnel，可观测性）；direct 分支保留原始
+    IP 拨号（decideTunnelTarget 只还原 proxy 分支），物理 IP 直接用于直连不被
+    隧道 IP 覆盖。
+  - **失败不恶化**：物理 DNS 全部失败回 SERVFAIL（Android 回退下一个 DNS）；
+    AAAA 查询拿到 v4 走既有 noData 空应答路径；proxy 分支语义不变（隧道 DoH 解析
+    的 IP 边缘可达）。
+  - 新增 `TestDNSInterceptorCNDirectPhysical`（国内→物理解析器，映射 src=physical）、
+    `TestDNSInterceptorForeignTunnel`（国外→隧道解析器）、
+    `TestDNSInterceptorNilRouteTunnel`（nil route→隧道，不误判）、
+    `TestDNSInterceptorPhysicalFallback`（物理全失败→SERVFAIL）；CI 两个 workflow 的
+    JNI 签名断言同步更新（`nativeStartVpn(int fd, String dnsList)`）。
+    `go build ./...` / `go test ./...` 全绿。
+  - **待真机验收**：国内网站（B站/百度/淘宝）应 <100ms（对照 39ms 直连）；日志/
+    debugdiag 可见国内域名解析到国内节点（122.189.x），直达延迟回落。
+
 ## [v0.5.29] - Unreleased
 
 ### 修复（国内网站解析慢，阶段 11 — GEO 分流失效：APK 未打包 GEO 库 + 静默降级）

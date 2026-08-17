@@ -73,7 +73,10 @@ func New(cfg Config) (*Vpn, error) {
 	}
 	var dns *dnsInterceptor
 	if cfg.TunnelDNS != nil {
-		dns = NewDNSInterceptor(cfg.TunnelDNS)
+		// v0.5.30 阶段 12：注入 route（域名级 direct→物理 DNS 分流）+ 物理
+		// DNS 上游列表。route 为 nil（桌面/CLI）时 DNS 拦截不启用（TunnelDNS
+		// 也恒 nil），不产生影响。
+		dns = NewDNSInterceptor(cfg.TunnelDNS, cfg.Route, cfg.PhysicalDNS)
 	}
 	return &Vpn{cfg: cfg, fd: cfg.FileDescriptor, dns: dns}, nil
 }

@@ -22,10 +22,13 @@ package androidvpn
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"net/netip"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"golang.org/x/net/dns/dnsmessage"
@@ -43,17 +46,45 @@ var DNSInterceptAddr = netip.MustParseAddr("198.18.0.1")
 // 测试注入假解析避免真实网络）。
 type ResolveFunc func(ctx context.Context, host string) (net.IP, error)
 
-// dnsInterceptor 拦截 TUN 内 UDP:53 查询：隧道 DoH 解析 + IP→域名映射。
+// 解析源标记：remember 记录该 IP 由哪个上游解析出（可观测性与防覆盖辅助）。
+// LookupDomain 的还原入口保持单一（返回域名字符串），src 不改变还原行为
+// ——direct 分支保留原始 IP 拨号（decideTunnelTarget），物理 IP 天然不被
+// 隧道 IP 覆盖（见 design.md §3）。
+const (
+	srcTunnel   = "tunnel"   // 隧道 DoH（海外解析者视角，边缘可达）
+	srcPhysical = "physical" // 物理 DNS 直连（国内解析者视角，本地直连）
+)
+
+// defaultPhysicalDNSServers 是物理 DNS 上游兜底（Java 注入/config.json 均
+// 未提供时）：阿里/腾讯/114 公共 DNS，国内视角解析国内 CDN 节点。与隧道
+// DoH（1.1.1.1 海外视角）的区别正是 v0.5.30 阶段 12 的修复点。
+var defaultPhysicalDNSServers = []netip.Addr{
+	netip.MustParseAddr("223.5.5.5"),
+	netip.MustParseAddr("119.29.29.29"),
+	netip.MustParseAddr("114.114.114.114"),
+}
+
+// dnsInterceptor 拦截 TUN 内 UDP:53 查询：按域名走隧道 DoH 或物理 DNS
+// 解析 + IP→域名映射。
 type dnsInterceptor struct {
 	resolve ResolveFunc
+	route   RouteFunc
+	// physicalServers 是物理 DNS 上游（NewDNSInterceptor 由 Java 注入/
+	// config.json 填充，为空时用 defaultPhysicalDNSServers）。
+	physicalServers []netip.Addr
+	// physicalResolver 解析国内域名：生产 = resolvePhysical（UDP 直连
+	// physicalServers + protect socket）；测试注入假解析避免真实网络。
+	physicalResolver ResolveFunc
 
 	mu      sync.Mutex
 	domains map[netip.Addr]domainEntry
 }
 
-// domainEntry 记录 IP→域名映射及其过期时间。
+// domainEntry 记录 IP→域名映射、解析源及其过期时间。src 目前仅可观测性
+// 用途（LookupDomain 行为不分支），见 srcTunnel/srcPhysical。
 type domainEntry struct {
 	domain string
+	src    string
 	expiry time.Time
 }
 
@@ -66,11 +97,20 @@ const dnsLookupTimeout = 8 * time.Second
 
 // NewDNSInterceptor 创建拦截服务器。resolve 为 nil 时 HandleQuery 返回 nil
 // （调用方丢弃查询，退化为未拦截行为）。
-func NewDNSInterceptor(resolve ResolveFunc) *dnsInterceptor {
+//
+// v0.5.30 阶段 12 扩展：route 判定命中 direct 的域名走物理 DNS
+// （physicalDNS 上游，为空时用公共 DNS 兜底），其余走隧道 DoH。
+func NewDNSInterceptor(resolve ResolveFunc, route RouteFunc, physicalDNS []netip.Addr) *dnsInterceptor {
 	if resolve == nil {
 		log.Println("⚠ DNS 拦截服务器未配置解析函数，TUN DNS 不拦截")
 	}
-	return &dnsInterceptor{resolve: resolve, domains: make(map[netip.Addr]domainEntry)}
+	d := &dnsInterceptor{resolve: resolve, route: route, domains: make(map[netip.Addr]domainEntry)}
+	d.physicalServers = physicalDNS
+	if len(d.physicalServers) == 0 {
+		d.physicalServers = defaultPhysicalDNSServers
+	}
+	d.physicalResolver = d.resolvePhysical
+	return d
 }
 
 // LookupDomain 查询 IP→域名映射；未命中或已过期返回 ok=false。
@@ -91,8 +131,10 @@ func (d *dnsInterceptor) LookupDomain(ip netip.Addr) (string, bool) {
 	return entry.domain, true
 }
 
-// remember 记录 IP→域名映射（覆盖旧值，刷新过期时间）。
-func (d *dnsInterceptor) remember(ip netip.Addr, domain string) {
+// remember 记录 IP→域名映射（覆盖旧值，刷新过期时间）。src 标记解析源
+// （srcPhysical / srcTunnel），仅可观测性用途；同 IP 后写覆盖前写保持现状
+// 语义（key 是 IP，物理/隧道解析出的 IP 不同 → 天然不覆盖）。
+func (d *dnsInterceptor) remember(ip netip.Addr, domain, src string) {
 	if !ip.IsValid() {
 		return
 	}
@@ -100,8 +142,21 @@ func (d *dnsInterceptor) remember(ip netip.Addr, domain string) {
 	if d.domains == nil {
 		d.domains = make(map[netip.Addr]domainEntry)
 	}
-	d.domains[ip.Unmap()] = domainEntry{domain: domain, expiry: time.Now().Add(dnsMapTTL)}
+	d.domains[ip.Unmap()] = domainEntry{domain: domain, src: src, expiry: time.Now().Add(dnsMapTTL)}
 	d.mu.Unlock()
+}
+
+// usePhysical 判定域名是否走物理 DNS 解析（v0.5.30 阶段 12 DNS 源分流）：
+// route 命中 direct（geosite:cn / geosite:private / geoip:private / domain
+// 规则）→ 物理 DNS 拿国内节点；proxy / 未命中 / route 为 nil → 隧道 DoH
+// （现状不变）。域名级判定：HandleQuery 已解出 host（没有 IP），传零值
+// netip.Addr 使 geosite/domain 规则可命中、geoip 规则不参与。
+func (d *dnsInterceptor) usePhysical(host string) bool {
+	if d.route == nil {
+		return false
+	}
+	action, matched := d.route(host, netip.Addr{})
+	return matched && action == "direct"
 }
 
 // HandleQuery 处理一条 TUN 内 DNS 查询报文：解析域名 → 隧道 DoH 解析 →
@@ -138,8 +193,17 @@ func (d *dnsInterceptor) HandleQuery(payload []byte) []byte {
 		return nil // 仅 A/AAAA
 	}
 
+	// DNS 源分流（v0.5.30 阶段 12）：国内域名（route→direct）走物理 DNS
+	// 直连拿国内节点，其余走隧道 DoH（海外解析者视角，现状不变）。route
+	// 为 nil（桌面/CLI）恒走隧道。
+	resolver := d.resolve
+	src := srcTunnel
+	if d.usePhysical(host) {
+		resolver = d.physicalResolver
+		src = srcPhysical
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), dnsLookupTimeout)
-	ip, err := d.resolve(ctx, host)
+	ip, err := resolver(ctx, host)
 	cancel()
 	if err != nil {
 		// 解析失败 → SERVFAIL 响应（v0.5.25：不再静默 drop）。drop 让
@@ -167,7 +231,7 @@ func (d *dnsInterceptor) HandleQuery(payload []byte) []byte {
 		return noData(q)
 	}
 
-	d.remember(addrFromIP(ip), host)
+	d.remember(addrFromIP(ip), host, src)
 
 	resp := dnsmessage.Message{
 		Header: dnsmessage.Header{
@@ -186,6 +250,142 @@ func (d *dnsInterceptor) HandleQuery(payload []byte) []byte {
 		return nil
 	}
 	return wire
+}
+
+// resolvePhysical 用物理 DNS 上游解析 host（v0.5.30 阶段 12）：先查 A
+// （国内 CDN 普遍双栈，A 记录足够；AAAA 查询的 noData 由 HandleQuery 的
+// 地址族过滤兜底），A 无记录时再查 AAAA——避免 AAAA-only 站点无解。多上游
+// 逐个试；单上游失败换下一个。全部失败返回错误 → HandleQuery 回 SERVFAIL，
+// Android 回退下一个 DNS，不恶化（design.md 风险节）。
+func (d *dnsInterceptor) resolvePhysical(ctx context.Context, host string) (net.IP, error) {
+	var lastErr error
+	for _, server := range d.physicalServers {
+		ip, err := d.physicalQuery(ctx, server, host, dnsmessage.TypeA)
+		if err == nil {
+			return ip, nil
+		}
+		lastErr = err
+		if errors.Is(err, errNoSuchRecord) {
+			// A 无记录 → 试 AAAA
+			ip, err = d.physicalQuery(ctx, server, host, dnsmessage.TypeAAAA)
+			if err == nil {
+				return ip, nil
+			}
+			lastErr = err
+			log.Printf("⚠ 物理 DNS %s 解析 %s 的 AAAA 失败：%v", server, host, err)
+			continue
+		}
+		log.Printf("⚠ 物理 DNS %s 解析 %s 失败：%v", server, host, err)
+	}
+	return nil, lastErr
+}
+
+// errNoSuchRecord 标记物理 DNS 对该查询类型返回了 NXDOMAIN / 空应答
+// （权威"无此记录"），区别于传输错误——resolvePhysical 据此试下一个地址族。
+var errNoSuchRecord = errors.New("no such record")
+
+// physicalQuery 向单个物理 DNS 服务器发一条 UDP DNS 查询并解析响应。
+// socket 经 Dialer.Control 调用 socketProtector（Android VpnService.
+// protect），否则查询重新进入 TUN 环路（与 v0.5.24 修的"direct 拨号物理
+// 解析环路"独立：这次是 DNS 查询 socket 本身）。单查询超时
+// dnsLookupTimeout 内完成。
+func (d *dnsInterceptor) physicalQuery(ctx context.Context, server netip.Addr, host string, qtype dnsmessage.Type) (net.IP, error) {
+	name, err := dnsmessage.NewName(fqdn(host))
+	if err != nil {
+		return nil, fmt.Errorf("非法的 DNS 名称 %q：%w", host, err)
+	}
+	query := dnsmessage.Message{
+		Header: dnsmessage.Header{ID: nextDNSQueryID(), RecursionDesired: true},
+		Questions: []dnsmessage.Question{{
+			Name:  name,
+			Type:  qtype,
+			Class: dnsmessage.ClassINET,
+		}},
+	}
+	wire, err := query.Pack()
+	if err != nil {
+		return nil, fmt.Errorf("封装 DNS 查询失败：%w", err)
+	}
+
+	// 复用 decision.go 的 socketProtector 模式：物理 DNS socket 必须豁免出
+	// VPN 路由（protect），否则 UDP:53 查询经 TUN 拦截再回来，环路风暴。
+	dialer := &net.Dialer{}
+	if socketProtector != nil {
+		dialer.Control = func(network, address string, c syscall.RawConn) error {
+			return c.Control(func(fd uintptr) {
+				if perr := socketProtector(int(fd)); perr != nil {
+					log.Printf("⚠ 保护物理 DNS socket（fd=%d）失败：%v", int(fd), perr)
+				}
+			})
+		}
+	}
+	conn, err := dialer.DialContext(ctx, "udp", net.JoinHostPort(server.String(), "53"))
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	if _, err := conn.Write(wire); err != nil {
+		return nil, err
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(dnsLookupTimeout))
+	buf := make([]byte, 512) // UDP DNS 响应常规上限；truncated 时上层回退
+	n, err := conn.Read(buf)
+	if err != nil {
+		return nil, err
+	}
+	return parsePhysicalAnswer(buf[:n], host, qtype)
+}
+
+// dnsQueryIDCounter 生成物理 DNS 查询的报文 ID（自增即可满足"请求-响应
+// 匹配"——每条查询独立 socket，无并发碰撞面）。
+var dnsQueryIDCounter atomic.Uint32
+
+func nextDNSQueryID() uint16 {
+	return uint16(dnsQueryIDCounter.Add(1))
+}
+
+// fqdn 补 FQDN 尾点（dnsmessage.NewName 要求 "example.com." 形式）。
+func fqdn(host string) string {
+	if len(host) > 0 && host[len(host)-1] == '.' {
+		return host
+	}
+	return host + "."
+}
+
+// parsePhysicalAnswer 从物理 DNS 响应中提取指定地址族的首个地址。
+// 只接受完整响应（非 truncated）、RCode 成功且有匹配记录；NXDOMAIN /
+// 空应答 / CNAME 链无匹配 → errNoSuchRecord（resolvePhysical 换下一上游
+// 或下一地址族）。
+func parsePhysicalAnswer(body []byte, host string, qtype dnsmessage.Type) (net.IP, error) {
+	var msg dnsmessage.Message
+	if err := msg.Unpack(body); err != nil {
+		return nil, fmt.Errorf("解析物理 DNS 响应失败：%w", err)
+	}
+	if msg.RCode == dnsmessage.RCodeNameError {
+		return nil, errNoSuchRecord
+	}
+	if msg.RCode != dnsmessage.RCodeSuccess {
+		return nil, fmt.Errorf("%s 的物理 DNS 响应码为 %s", host, msg.RCode)
+	}
+	for _, ans := range msg.Answers {
+		var ip net.IP
+		switch body := ans.Body.(type) {
+		case *dnsmessage.AResource:
+			if qtype != dnsmessage.TypeA {
+				continue
+			}
+			ip = net.IP(body.A[:])
+		case *dnsmessage.AAAAResource:
+			if qtype != dnsmessage.TypeAAAA {
+				continue
+			}
+			ip = net.IP(body.AAAA[:])
+		default:
+			continue
+		}
+		return ip, nil
+	}
+	return nil, errNoSuchRecord
 }
 
 // noData 构造一条 NOERROR 空应答（保留原 Question、ID、OpCode，无 Answer），

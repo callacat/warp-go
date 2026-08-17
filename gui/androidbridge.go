@@ -191,6 +191,11 @@ var warpCtl struct {
 // WarpVpnService 的 JNI 入口：VpnService.Builder.establish() 拿到 TUN fd 后
 // 传入，Go 侧装配 core.Kernel（MASQUE 隧道 + 分流引擎）与 androidvpn 栈并启动。
 //
+// 第二参数 dnsList 是 Java 在 establish() 前缓存的物理网络 DNS（逗号分隔
+// IP 字符串，可为空串）——建立 VPN 后读会拿到 VPN 自身 DNS，时序无关解法：
+// 提前缓存，注入 Config.PhysicalDNS 供 TUN DNS 拦截的国内域名分流使用
+// （v0.5.30 阶段 12，见 design.md §3 防覆盖）。
+//
 // 必须在 Java 主线程（onStartCommand）内尽快返回：Kernel 装配里的边缘地址
 // 解析（resolveEdge 的 DNS 查找最长 10s）与 MASQUE 拨号（指数退避重试）若
 // 阻塞该线程，系统会在 5s 后 ANR"卡死"（v0.5.9 真机反馈：日志停留在
@@ -203,7 +208,7 @@ var warpCtl struct {
 // 这些是确定性的快速失败，不涉及网络，可安全同步返回。
 //
 //export Java_com_wails_app_WarpVpnService_nativeStartVpn
-func Java_com_wails_app_WarpVpnService_nativeStartVpn(env *C.JNIEnv, obj C.jobject, fd C.jint) C.jint {
+func Java_com_wails_app_WarpVpnService_nativeStartVpn(env *C.JNIEnv, obj C.jobject, fd C.jint, dnsList C.jstring) C.jint {
 	C.storeJvm(env)
 
 	// 缓存 WarpVpnService 类引用 + protectSocket/kernelFailed 方法 ID。
@@ -263,6 +268,21 @@ func Java_com_wails_app_WarpVpnService_nativeStartVpn(env *C.JNIEnv, obj C.jobje
 		// Java 已 detachFd：同步失败路径 Go 负责关闭 fd（防泄漏）。
 		_ = unix.Close(int(fd))
 		return -1
+	}
+
+	// v0.5.30 阶段 12：Java 侧在 establish() 前缓存的物理网络 DNS（主来源）
+	// 经 JNI 注入。优先级：Java 注入 > config.json 的 physical_dns
+	// （androidconfig.go 已填）> 公共 DNS 兜底（NewDNSInterceptor）。空串/
+	// 全非法时保留 config.json 值或兜底，不覆盖。
+	if dnsList != nil {
+		if cstr := C.jstringToChars(env, dnsList, nil); cstr != nil {
+			parsed := parsePhysicalDNSCSV(C.GoString(cstr))
+			C.releaseChars(env, dnsList, cstr)
+			if len(parsed) > 0 {
+				built.vpnCfg.PhysicalDNS = parsed
+				log.Printf("✓ 物理 DNS 注入：%v", parsed)
+			}
+		}
 	}
 
 	// 先置 started + 创建装配取消信号：装配在 goroutine 异步进行，此标记

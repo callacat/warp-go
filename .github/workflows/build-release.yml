@@ -370,7 +370,7 @@ jobs:
           grep -q 'requestStartVpn' androidbridge.go
           grep -q 'requestStopVpn' build/android/app/src/main/java/com/wails/app/MainActivity.java
           grep -q 'requestStopVpn' androidbridge.go
-          grep -qE 'int +nativeStartVpn *\(int fd\)' build/android/app/src/main/java/com/wails/app/WarpVpnService.java
+          grep -qE 'int +nativeStartVpn *\(int fd, String dnsList\)' build/android/app/src/main/java/com/wails/app/WarpVpnService.java
           grep -qE 'Java_com_wails_app_WarpVpnService_nativeStartVpn.*C\.jint' androidbridge.go
           grep -qE 'int +nativeStopVpn *\(\)' build/android/app/src/main/java/com/wails/app/WarpVpnService.java
           grep -qE 'Java_com_wails_app_WarpVpnService_nativeStopVpn.*C\.jint' androidbridge.go

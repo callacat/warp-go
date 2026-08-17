@@ -49,6 +49,12 @@ type Config struct {
 	// （v0.5.31 吞吐改进：真机单连接被网络按连接限速 ~1Mbps，多连接各自达到
 	// 独立均衡、总量可叠加）；0/缺省 = 1。
 	TunnelConnections int `json:"tunnel_connections,omitempty"`
+	// PhysicalDNS 是物理 DNS 上游列表（v0.5.30 阶段 12 DNS 源分流，Android
+	// 专用）：TUN DNS 拦截对国内域名（route→direct）改用物理 DNS 直连解析
+	// 拿国内节点。优先级：Java 侧 establish() 前注入的物理网络真实 DNS > 本
+	// 字段 > 公共 DNS 兜底（androidvpn/dns.go）。桌面/CLI 无 TUN DNS 拦截，
+	// 此字段不生效。
+	PhysicalDNS []string `json:"physical_dns,omitempty"`
 	// ThemeMode 是界面主题模式：light / dark / system（跟随系统）。
 	// GUI 保存设置时同步写入 config.json，启动时从配置读取并注入前端。
 	ThemeMode string `json:"theme_mode,omitempty"`

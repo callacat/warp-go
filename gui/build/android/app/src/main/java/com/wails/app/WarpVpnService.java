@@ -7,6 +7,9 @@ import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
+import android.net.ConnectivityManager;
+import android.net.LinkProperties;
+import android.net.Network;
 import android.net.VpnService;
 import android.os.Build;
 import android.os.IBinder;
@@ -26,9 +29,16 @@ import java.net.InetAddress;
  * the Go native library ({@code gui/androidbridge.go}) via JNI:
  *
  * <pre>
- *   Java_com_wails_app_WarpVpnService_nativeStartVpn(int fd) -> 0 ok / -1 fail
+ *   Java_com_wails_app_WarpVpnService_nativeStartVpn(int fd, String dnsList) -> 0 ok / -1 fail
  *   Java_com_wails_app_WarpVpnService_nativeStopVpn()        -> idempotent
  * </pre>
+ *
+ * The {@code dnsList} argument carries the physical network's real DNS servers
+ * (comma-separated, possibly empty), captured <i>before</i> {@code establish()}
+ * routes the app's own sockets into the TUN. Go uses them to resolve
+ * CN/domestic domains through the physical DNS so CDN geo-DNS returns domestic
+ * nodes instead of the overseas ones the tunnel DoH (1.1.1.1) would pick
+ * (v0.5.30 stage 12).
  *
  * The Go side runs the MASQUE/QUIC tunnel over the TUN fd and routes the
  * resulting packets back through the Android network stack. The service is
@@ -59,7 +69,9 @@ public class WarpVpnService extends VpnService {
     // Native methods implemented in Go (gui/androidbridge.go). JNI resolves
     // them as Java_com_wails_app_WarpVpnService_nativeStartVpn /
     // Java_com_wails_app_WarpVpnService_nativeStopVpn / nativeVpnRunning.
-    private static native int nativeStartVpn(int fd);
+    // v0.5.30: second arg = physical DNS list (comma-separated, possibly empty),
+    // captured before establish() — see collectPhysicalDns().
+    private static native int nativeStartVpn(int fd, String dnsList);
     private static native int nativeStopVpn();
     private static native int nativeVpnRunning();
 
@@ -179,6 +191,14 @@ public class WarpVpnService extends VpnService {
             if (ipv6 == null) ipv6 = assigned[1];
         }
 
+        // v0.5.30 stage 12: capture the physical network's real DNS BEFORE
+        // establish(). Once the VPN takes over routing, getActiveNetwork can
+        // report the VPN itself and the servers would be the TUN's own
+        // 198.18.0.1 — useless as a domestic-view upstream. Go resolves CN
+        // domains (route -> direct) through these so CDN geo-DNS returns
+        // domestic nodes instead of the overseas ones the tunnel DoH picks.
+        String physicalDns = collectPhysicalDns();
+
         VpnService.Builder builder = new VpnService.Builder();
         builder.setSession("warp-go");
         // 与 Go 侧 androidvpn.DefaultMTU（1400）保持一致（v0.5.31：真机实测
@@ -230,7 +250,7 @@ public class WarpVpnService extends VpnService {
         MainActivity.nativeLogMessage("info", "VPN 隧道已建立（fd=" + fd + "），正在启动内核...");
         int result;
         try {
-            result = nativeStartVpn(fd);
+            result = nativeStartVpn(fd, physicalDns);
         } catch (Throwable t) {
             Log.e(TAG, "nativeStartVpn threw", t);
             result = -1;
@@ -259,6 +279,45 @@ public class WarpVpnService extends VpnService {
         nativeRunning = false;
         if (pfd != null) {
             closePfd(pfd);
+        }
+    }
+
+    /**
+     * Collect the active physical network's DNS servers as a comma-separated
+     * string for Go (v0.5.30 stage 12). Must be called BEFORE establish() —
+     * afterwards getActiveNetwork() may return the VPN we just created.
+     * Failures (no ConnectivityManager / no active network / exception) are
+     * non-fatal: an empty string makes Go fall back to the public DNS or the
+     * config.json physical_dns list.
+     */
+    private String collectPhysicalDns() {
+        try {
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (cm == null) {
+                return "";
+            }
+            Network n = cm.getActiveNetwork();
+            if (n == null) {
+                return "";
+            }
+            LinkProperties lp = cm.getLinkProperties(n);
+            if (lp == null) {
+                return "";
+            }
+            StringBuilder sb = new StringBuilder();
+            for (InetAddress dns : lp.getDnsServers()) {
+                if (sb.length() > 0) {
+                    sb.append(',');
+                }
+                sb.append(dns.getHostAddress());
+            }
+            if (sb.length() > 0) {
+                Log.i(TAG, "physical DNS captured before establish(): " + sb);
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            Log.w(TAG, "collectPhysicalDns failed", e);
+            return "";
         }
     }
 

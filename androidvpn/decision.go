@@ -91,6 +91,18 @@ type Config struct {
 	// DialTunnel，保证 CONNECT 目标永远边缘可达。nil 时不拦截（桌面/CLI
 	// 无 TUN，恒 nil）。
 	TunnelDNS ResolveFunc
+
+	// PhysicalDNS 是物理 DNS 上游列表（v0.5.30 阶段 12 DNS 源分流）：
+	// route 判定命中 direct 的国内域名（geosite:cn 等）改走物理 DNS 直连
+	// 解析，拿国内节点 IP——否则 TUN 拦截把一切 UDP:53（含国内域名）走
+	// 隧道 DoH（1.1.1.1 海外解析者视角），CDN 按解析者位置返回海外节点，
+	// geosite:cn 判 direct 但直连的是美国 IP（200-300ms 根因，20260818-
+	// dns-source-fix）。来源三层：Java 侧 establish() 前注入物理网络真实
+	// DNS（主）> config.json 的 physical_dns 字段（辅）> dns.go 公共 DNS
+	// 兜底（223.5.5.5/119.29.29.29/114.114.114.114）。直连 socket 必须
+	// VpnService.protect()（decision.go socketProtector 模式），否则 UDP
+	// 查询回 TUN 环路。为空时 DNS 拦截全走隧道 DoH（现状）。
+	PhysicalDNS []netip.Addr
 }
 
 // decideTunnelTarget 决定拨号目标字符串（v0.5.25 修复）。
