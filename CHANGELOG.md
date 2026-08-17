@@ -3,7 +3,7 @@
 本项目所有值得记录的变更。格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [v0.5.28] - 2026-08-17
 
 ### 修复（Android 外网打不开，阶段 10 — 连接退役风暴误杀在途流）
 
