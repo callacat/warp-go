@@ -41,3 +41,10 @@
 
 ## 待办（东哥已记）
 - 码农"类 A2A"功能（a2a-laoma.sh 已存在于 ~/.claude/，是码农→老马单向；双向需再做）
+
+## 2026-08-17 追加测试 (100.64.0.6 PJD110 A14) — 见 deviceB-working-vs-A.md
+
+- ops：VPN 正常！tun0 172.16.0.2、google 302、cloudflare 200、ping11 1ms 0 丢包、60s 稳定。
+- 码农独立复现（同日）：tun0 UP 期间外网 HTTP 全通属实（curl 多轮 302/200/200）；
+  **但会话 3.9 分钟后 VPN 自停（Go 侧 rollback/stop）→ 之后 google 直连被 DNS 投毒超时**。
+  完整健康 vs 坏数据对照见 deviceB-working-vs-A.md。
