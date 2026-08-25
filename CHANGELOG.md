@@ -1,9 +1,5 @@
-# Changelog
+## [v0.5.30] - 2026-08-26
 
-本项目所有值得记录的变更。格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
-版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
-
-## [v0.5.30] - Unreleased
 
 ### 修复（国内网站 200-300ms 高延迟，阶段 12 — DNS 源分流：国内域名走物理 DNS 拿国内节点）
 
@@ -43,7 +39,7 @@
   - **待真机验收**：国内网站（B站/百度/淘宝）应 <100ms（对照 39ms 直连）；日志/
     debugdiag 可见国内域名解析到国内节点（122.189.x），直达延迟回落。
 
-## [v0.5.29] - Unreleased
+### 附：阶段 11 — GEO 分流失效修复（原 v0.5.29 段并入）
 
 ### 修复（国内网站解析慢，阶段 11 — GEO 分流失效：APK 未打包 GEO 库 + 静默降级）
 
@@ -80,6 +76,12 @@
     `go test ./...` 全绿。
   - **待真机验收**：国内站点（B站/百度/淘宝等）应明显加速（直连）；日志可见
     `action=direct`。若仍需"未命中全直连"可用规则文件声明 `default: direct`。
+# Changelog
+
+本项目所有值得记录的变更。格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
+版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
+
+
 
 ## [v0.5.28] - 2026-08-17
 
