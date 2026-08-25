@@ -11,7 +11,7 @@ import {
   setAutostart,
 } from "../lib/api";
 import { AppConfig } from "../lib/types";
-import { useTheme } from "../lib/useTheme";
+import { useThemeContext } from "../lib/ThemeContext";
 import type { ThemeMode } from "../lib/theme";
 import { Button, Card, Field, Toggle, inputCls } from "../components/ui";
 
@@ -33,7 +33,7 @@ export default function SettingsPage() {
   const [updateInfo, setUpdateInfo] = useState<string | null>(null);
   const [updateUrl, setUpdateUrl] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
-  const { mode, setMode, setModeFromConfig } = useTheme();
+  const { mode, setMode, setModeFromConfig } = useThemeContext();
 
   const load = useCallback(async () => {
     try {
