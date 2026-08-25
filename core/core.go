@@ -121,6 +121,9 @@ type Server struct {
 	lastError       string
 	geoCancel       context.CancelFunc
 	sysProxyEnabled atomic.Bool
+
+	// geoUpdateFn 允许测试注入更新实现；nil 时 geoUpdateOnce 使用 s.UpdateGeo。
+	geoUpdateFn func(ctx context.Context) (bool, error)
 }
 
 // New 创建 Server 并填充 Options 默认值。默认 StateFile 为 reg.json、
@@ -499,8 +502,11 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 	}
 
-	// GEO 自动更新：数据缺失时启动即补一份，之后按 GeoAutoUpdateDays
-	// 周期更新（0 表示关闭）。失败只打 warning，下个周期重试。
+	// GEO 自动更新：数据缺失时启动即补一份，之后按 GeoAutoUpdateDays 周期
+	// 更新（0 表示关闭）。等待时长按 .dat 落盘时间（mtime）跨进程累计：
+	// 文件年龄满一个周期，即使每次运行只有几分钟也会在启动后立即补跑
+	// （旧 ticker 实现要进程连续运行满周期才触发，实测永不生效）。
+	// 失败只打 warning，按最小重试间隔重试。
 	geoCtx, geoCancel := context.WithCancel(context.Background())
 	defer geoCancel() // 提前返回路径不泄漏 context
 	if cfg.GeoAutoUpdateDays > 0 {
@@ -510,16 +516,7 @@ func (s *Server) Start(ctx context.Context) error {
 				log.Println("GEO 数据缺失，立即更新...")
 				s.geoUpdateOnce(geoCtx)
 			}
-			ticker := time.NewTicker(interval)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-geoCtx.Done():
-					return
-				case <-ticker.C:
-					s.geoUpdateOnce(geoCtx)
-				}
-			}
+			s.geoAutoUpdateLoop(geoCtx, cfg.GeoDir, interval)
 		}()
 	}
 
@@ -802,19 +799,20 @@ func (s *Server) InitDefaults(ctx context.Context) error {
 		}
 	}
 
-	// GEO 下载：缺失时拉取；SHA-1 去重由 route.UpdateGeoData 负责。
-	if !geoDataPresent(cfg.GeoDir) {
-		if err := os.MkdirAll(cfg.GeoDir, 0o755); err != nil {
-			return fmt.Errorf("创建 GEO 目录失败：%w", err)
-		}
-		updated, uerr := route.UpdateGeoData(ctx, cfg.GeoDir, cfg.GeoSiteURL(), cfg.GeoIPURL())
-		if uerr != nil {
-			log.Printf("⚠ 初始 GEO 下载失败（可稍后手动更新）：%v", uerr)
-			return nil // 下载失败不致命，下次可重试
-		}
-		if updated {
-			log.Println("✓ 初始 GEO 数据已下载")
-		}
+	// GEO 下载：缺失或数据年龄 ≥ GeoAutoUpdateDays 天时拉取（0=关闭自动更新）；
+	// SHA-1 去重由 route.UpdateGeoData 负责。GUI/Android 每次打开都经过这里，
+	// 过期数据在打开后即刻补新——修复此前"只在文件缺失首启时下载、之后永不
+	// 自动更新"的问题（守护进程的周期巡检见 Start() 的 geoAutoUpdateLoop）。
+	// 走 geoUpdateOnce 统一日志与测试注入；失败只告警不致命，下次打开或
+	// Start 巡检会再补。
+	stale := false
+	if cfg.GeoAutoUpdateDays > 0 {
+		last := geoLastUpdate(cfg.GeoDir)
+		stale = last.IsZero() ||
+			time.Since(last) >= time.Duration(cfg.GeoAutoUpdateDays)*24*time.Hour
+	}
+	if stale {
+		s.geoUpdateOnce(ctx)
 	}
 	return nil
 }
@@ -874,9 +872,18 @@ func (s *Server) ScanEdgesFamily(ctx context.Context, ipMode string) ([]string, 
 		s.opts.ScanTimeout, s.opts.ScanPerProbe, s.opts.ScanTop), nil
 }
 
+// geoUpdateChecked 执行一次 GEO 更新，返回是否实际变更；错误原样上抛。
+// 更新实现可经 geoUpdateFn 注入（测试用），默认走 UpdateGeo。
+func (s *Server) geoUpdateChecked(ctx context.Context) (bool, error) {
+	if s.geoUpdateFn != nil {
+		return s.geoUpdateFn(ctx)
+	}
+	return s.UpdateGeo(ctx)
+}
+
 // geoUpdateOnce 是自动更新协程的调用入口：失败只打 warning，不中断周期。
 func (s *Server) geoUpdateOnce(ctx context.Context) {
-	updated, err := s.UpdateGeo(ctx)
+	updated, err := s.geoUpdateChecked(ctx)
 	if err != nil {
 		log.Printf("⚠ GEO 数据更新失败（保留现有数据，下个周期重试）：%v", err)
 		return
@@ -886,6 +893,69 @@ func (s *Server) geoUpdateOnce(ctx context.Context) {
 		return
 	}
 	log.Println("✓ GEO 数据已更新并热加载")
+}
+
+// minGeoRetry 是自动更新失败后的最小重试间隔：mtime 未前移时等待会被
+// 地板到该值，避免离线等持续性故障下紧密空转重试。
+const minGeoRetry = time.Hour
+
+// geoAutoUpdateLoop 按 interval 周期更新 GEO 数据，直到 ctx 取消。
+// 与旧 time.Ticker 实现的关键差异：等待基准是 .dat 的落盘时间（mtime，
+// 持久在磁盘上）而非进程启动时刻——文件年龄满一个周期就立即补跑，进度
+// 跨重启累计；每次成功更新后 mtime 前移，下个周期自然顺延（手动"立即
+// 更新"按钮同样会重置周期）。SHA-1 去重保证内容无变更时不重写 mtime。
+func (s *Server) geoAutoUpdateLoop(ctx context.Context, geoDir string, interval time.Duration) {
+	base := geoLastUpdate(geoDir) // 启动基线：磁盘上的落盘时间（跨重启累计）
+	var nextRetry time.Time       // 失败重试地板；零值表示首次到期即可尝试
+	for {
+		wait := geoWaitUntil(time.Now(), base, interval)
+		if retryIn := time.Until(nextRetry); retryIn > wait {
+			wait = retryIn
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+			if _, err := s.geoUpdateChecked(ctx); err == nil {
+				// 成功核对即前移基线：内容未变（上游未发版、SHA-1 去重不刷新
+				// mtime）也视为新鲜，避免按失败地板空转反复重下。
+				base = time.Now()
+			}
+			nextRetry = time.Now().Add(minGeoRetry)
+		}
+	}
+}
+
+// geoLastUpdate 返回 GEO 数据最近一次成功落盘的时间：取两个 .dat mtime 中
+// 较旧者（最陈旧的文件驱动下一次更新）；任一缺失返回零值（视为已到期）。
+func geoLastUpdate(geoDir string) time.Time {
+	var oldest time.Time
+	for _, name := range []string{"geosite.dat", "geoip-lite.dat"} {
+		fi, err := os.Stat(filepath.Join(geoDir, name))
+		if err != nil {
+			return time.Time{}
+		}
+		mt := fi.ModTime()
+		if oldest.IsZero() || mt.Before(oldest) {
+			oldest = mt
+		}
+	}
+	return oldest
+}
+
+// geoWaitUntil 计算距下次周期更新的等待时长（纯函数，便于单测）：
+// 以 last（落盘时间）+interval 为到期点跨进程累计；无记录或已到期返回 0。
+func geoWaitUntil(now, last time.Time, interval time.Duration) time.Duration {
+	if last.IsZero() {
+		return 0
+	}
+	next := last.Add(interval)
+	if !now.Before(next) {
+		return 0
+	}
+	return next.Sub(now)
 }
 
 // SetSystemProxy 开启/关闭系统代理，指向当前监听地址。运行中直接调用
