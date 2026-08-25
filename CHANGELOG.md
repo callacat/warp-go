@@ -1,3 +1,30 @@
+## [未发布]
+
+### 修复（GUI 两题：夜间主题启动不生效 + GEO 自动更新永不触发，东哥 2026-08-26 派单）
+
+- **夜间主题不持久**（每次重开 GUI 都是白天主题，点进设置才切夜间）：
+  根因是 `useTheme()` 这个唯一的"读配置 → 打 `.dark` class"入口只挂载在
+  SettingsPage 组件里——持久层本身完好（config.json `theme_mode` +
+  localStorage 双写），缺的只是启动时读取。修复：
+  - 新增 `ThemeContext`：App 根组件挂载唯一 `useTheme()` 实例，启动即
+    `getConfig()` 应用已保存主题；设置页改为消费共享实例（避免双实例
+    状态分叉导致 OS 主题翻转时旧值回打）（64300aa）。
+  - `index.html` 增加 localStorage 预上色内联脚本：React 挂载前同步打
+    `.dark`，消除首帧闪白（含 legacy `warpgo-dark` key 兼容）。
+- **GEO 自动更新无效**（默认 7 天一更，实测仅首次打开 GUI 初始化下载一次）：
+  旧调度只有两处会下载——InitDefaults 仅当文件缺失、Start 内 ticker 锚定
+  进程启动且要连续运行满整个周期才首次触发；GUI/Android 短会话下数学上
+  不可能到期。且无任何持久化"上次更新时间"做跨重启补偿。修复（dda7587）：
+  - `InitDefaults`（GUI/Android 每次打开必经）：数据缺失或年龄
+    ≥ `geo_auto_update_days` 天即更新——短会话也能到期补新；
+  - Start 守护路径改用 `geoAutoUpdateLoop`：等待时长按 `.dat` mtime 跨进程
+    累计，文件年龄满周期立即补跑；成功核对即前移基线（上游未发版、SHA-1
+    去重不刷 mtime 也不会按小时空转重下）；失败按 1h 最小重试间隔兜底；
+  - `geoUpdateOnce` 增加 `geoUpdateFn` 测试注入点；新增过期/缺失/新鲜三态
+    单测与循环取消冒烟测试；`go test ./... -race` 全绿。
+- 说明：mtime 同时是 GUI「上次更新」展示值与调度基准；手动"立即更新"
+  会自然重置周期。
+
 ## [v0.5.30] - 2026-08-26
 
 
