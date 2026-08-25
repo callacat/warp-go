@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/quic-go/quic-go"
@@ -46,14 +47,21 @@ func releaseStream(s *http3.RequestStream) {
 type tunnelConn struct {
 	*streamConn
 	releaseOnce sync.Once
-	client      *MasqueClient // 触发重连用（连接死亡时唤醒恢复，不等新请求）
-	bundle      *connBundle   // retire 用（幂等：current!=bundle 时 no-op）
+	// closing 标记本端已主动 Close。relay 是双向 io.Copy：一侧结束后 Close
+	// （CancelRead/CancelWrite）会解除另一方向仍阻塞在 Read 上的 Copy，那条
+	// Read 返回的错误是本端收尾的尾流而非连接故障——closing 置位后一律不再
+	// 进 noteDeadStream（2026-08-26 qlog 实验：缺这层防护时每个请求结束都会
+	// 贡献一次可疑流失败，观察窗 2 次即满，健康共享连接被按请求节奏拆除）。
+	closing atomic.Bool
+	client  *MasqueClient // 触发重连用（连接死亡时唤醒恢复，不等新请求）
+	bundle  *connBundle   // retire 用（幂等：current!=bundle 时 no-op）
 }
 
 // Close 完整释放 H3 流。只关发送侧会让读方向永久阻塞（边缘保持隧道另一侧
 // 直到目标关闭），同时泄漏边缘的并发流配额——与 releaseStream 同一套约束。
 func (t *tunnelConn) Close() error {
 	t.releaseOnce.Do(func() {
+		t.closing.Store(true) // 先置位再取消：解除阻塞的 Read 前尾流抑制必须就绪
 		reqStream := t.streamConn.RequestStream
 		reqStream.CancelRead(quic.StreamErrorCode(http3.ErrCodeNoError))
 		reqStream.CancelWrite(quic.StreamErrorCode(http3.ErrCodeNoError))
@@ -93,6 +101,9 @@ func (t *tunnelConn) noteDeadStream(err error) {
 	if t == nil || t.client == nil || t.bundle == nil {
 		return
 	}
+	if t.closing.Load() {
+		return // 本端已 Close：I/O 错误是收尾尾流（另一方向被解除阻塞的 Copy），非连接故障
+	}
 	if err == io.EOF {
 		return // 正常关闭（对端 FIN），非连接死亡
 	}
@@ -109,9 +120,17 @@ func (t *tunnelConn) noteDeadStream(err error) {
 		// 一轮 retire/reconnect 只剩噪声——retire 单飞且幂等，但没必要也不该
 		// 由垂死流来唤醒恢复（恢复已由先动手的那条路径完成）。
 		return
+	case isLocalStreamTeardown(err):
+		// 本端主动取消单条流的尾流：http3 的 RequestStream.Read 路径经
+		// body.Read 冒泡时，maybeReplaceError 已把 *quic.StreamError 替换为
+		// *http3.Error（无 Unwrap），上面的 shouldReconnectH3 单流豁免
+		// （errors.As(*quic.StreamError)）因此失效。不拦住的话，每条流正常
+		// 收尾都被误计为可疑失败，观察窗两次即满 → 健康共享连接按请求节奏
+		// 被反复拆除，其上全部活跃流（Telegram 长轮询等）周期性中断。
+		return
 	default:
 		// 其余（对端 reset、未知 net 错误等）可能是单目标/单流问题：走观察
-		// 窗，窗口内累计 connectFailureTargets 次才判定连接死亡——一条流被
+		// 窗，窗口内累计 streamFailureTargets 次才判定连接死亡——一条流被
 		// 边缘重置不该拆毁共享连接、拖死所有健康并发流（debugdiag：批量
 		// 死亡全部源于本地拆线）。
 		if !t.bundle.noteStreamFailure() {
@@ -121,6 +140,7 @@ func (t *tunnelConn) noteDeadStream(err error) {
 	// 先置 dead：即使 QUIC 连接在黑洞下 Context() 未 Done，后续并发请求
 	// 也会经 currentConnection 立即加入重连航班，不再在死连接上重试
 	// （v0.5.26 只 retire 本 bundle，重连期间新请求仍会叠在死连接上超时）。
+	log.Printf("HTTP/3 流观测到连接级错误，淘汰当前连接并重连：%T: %v", err, err)
 	t.bundle.dead.Store(true)
 	go func() {
 		t.client.retireConnection(t.bundle)
@@ -283,6 +303,17 @@ func isConnectionLevelError(err error) bool {
 		return true
 	}
 	return false
+}
+
+// isLocalStreamTeardown 判定错误是否为本端主动取消单条流的尾流。quic-go 的
+// http3 body.Read 在返回前用 maybeReplaceError 把 *quic.StreamError 替换为
+// *http3.Error（后者无 Unwrap），shouldReconnectH3 的单流 reset 豁免
+// （errors.As(*quic.StreamError)）对这条路径失效。Remote=false 且
+// H3_NO_ERROR 是本地 CancelRead/CancelWrite(ErrCodeNoError) 的唯一特征；
+// 对端拒绝目标产生的是 Remote=true，不匹配、仍走观察窗。
+func isLocalStreamTeardown(err error) bool {
+	var h3e *http3.Error
+	return errors.As(err, &h3e) && !h3e.Remote && h3e.ErrorCode == http3.ErrCodeNoError
 }
 
 // shouldReconnectH3 distinguishes a dead shared transport from a target-level

@@ -66,6 +66,12 @@ const (
 	// 下：单目标失败 1 次不重连（保护共享连接，保留 v0.5.21 场景），同/异
 	// 目标累计 2 次即触发 retire + 重连恢复。
 	connectFailureTargets = 2
+	// streamFailureTargets 是流错误观察窗（noteStreamFailure）的独立阈值。
+	// 与 CONNECT 失败阈值分开：流错误信号的噪声更高——每条流的收尾路径都可能
+	// 贡献一次误判（分类修复前的「每请求杀连接」bug 即由此而来），阈值取 4
+	// 宁可多忍可疑目标也不误杀承载全部活跃流的健康共享连接。窗口衰减与
+	// CONNECT 窗口一致（connectFailureWindow 超时自然重置）。
+	streamFailureTargets  = 4
 	reconnectRetryInitial = 100 * time.Millisecond
 	reconnectRetryMax     = 5 * time.Second
 
@@ -948,7 +954,7 @@ func (b *connBundle) noteProgressingCONNECTFailure(target string, now time.Time)
 }
 
 // noteStreamFailure 记录一条非连接级流错误；窗口内（connectFailureWindow）
-// 累计 connectFailureTargets 次返回 true（调用方据此判定共享连接死亡并
+// 累计 streamFailureTargets 次返回 true（调用方据此判定共享连接死亡并
 // retire）。与 CONNECT 失败窗口分开计数：流错误与 CONNECT 失败是独立信号，
 // 混在一起会互相污染阈值。窗口靠超时自然衰减（无成功路径重置——读路径每
 // 包触发的重置会把锁打进热路径）。
@@ -960,7 +966,7 @@ func (b *connBundle) noteStreamFailure() bool {
 		b.streamFailureCount = 0
 	}
 	b.streamFailureCount++
-	return b.streamFailureCount >= connectFailureTargets
+	return b.streamFailureCount >= streamFailureTargets
 }
 
 func (b *connBundle) noteCONNECTSuccess() {

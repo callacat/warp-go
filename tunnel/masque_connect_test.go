@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/http3"
 )
 
 // newTestMasqueClient 构造一个无隧道状态的最小客户端：lifeCtx 可取消以便
@@ -499,25 +500,29 @@ func TestNoteDeadStreamNetErrClosedNoReconnect(t *testing.T) {
 }
 
 // TestNoteDeadStreamAmbiguousErrorWindowed 锁定非连接级流错误走观察窗：单条
-// 流被边缘重置（resetErr）第 1 次只计数不拆共享连接，窗口内第 2 次才判定
-// 连接死亡——一条流被边缘重置不该拆毁共享连接拖死所有健康并发流
-// （debugdiag：批量死亡全部源于本地拆线）。
+// 流被边缘重置（resetErr）前 streamFailureTargets-1 次只计数不拆共享连接，
+// 窗口内累计到阈值才判定连接死亡——一条流被边缘重置不该拆毁共享连接拖死所
+// 有健康并发流（debugdiag：批量死亡全部源于本地拆线）。阈值取独立常量
+// streamFailureTargets（高于 CONNECT 失败的 connectFailureTargets=2）：流
+// 错误信号噪声更高，误杀健康共享连接的代价是全部在途流一起中断。
 func TestNoteDeadStreamAmbiguousErrorWindowed(t *testing.T) {
 	c, b := deadBundle(t)
 	newB := newTestBundle()
 	c.dialFn = func(context.Context) (*connBundle, error) { return newB, nil }
 	tc := &tunnelConn{client: c, bundle: b}
 
-	tc.noteDeadStream(resetErr()) // 第 1 次：仅记窗
-	time.Sleep(50 * time.Millisecond)
-	c.connMu.RLock()
-	cur := c.cur
-	c.connMu.RUnlock()
-	if cur != b {
-		t.Fatal("非连接级流错误第 1 次不应拆共享连接：cur 不应被替换")
+	for i := 1; i < streamFailureTargets; i++ {
+		tc.noteDeadStream(resetErr()) // 第 1..N-1 次：仅记窗
+		time.Sleep(50 * time.Millisecond)
+		c.connMu.RLock()
+		cur := c.cur
+		c.connMu.RUnlock()
+		if cur != b {
+			t.Fatalf("非连接级流错误第 %d 次不应拆共享连接：cur 不应被替换", i)
+		}
 	}
 
-	tc.noteDeadStream(resetErr()) // 第 2 次：观察窗达标 → retire + 重连
+	tc.noteDeadStream(resetErr()) // 第 N 次：观察窗达标 → retire + 重连
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		c.connMu.RLock()
@@ -528,7 +533,7 @@ func TestNoteDeadStreamAmbiguousErrorWindowed(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatal("观察窗内第 2 次非连接级流错误应触发重连：cur 未被替换")
+	t.Fatal("观察窗内第 N 次非连接级流错误应触发重连：cur 未被替换")
 }
 
 // TestProbeEgressOnceSingleFailureKeepsConnection 锁定运行期探测单次失败不拆
@@ -588,5 +593,109 @@ func TestProbeEgressOnceSuccessResetsFailures(t *testing.T) {
 	c.connMu.RUnlock()
 	if cur != b {
 		t.Fatal("探测成功清零后单次失败不应拆共享连接：cur 不应被替换")
+	}
+}
+
+// localH3TeardownErr 构造本地取消尾流错误。http3 的 body.Read 在返回前用
+// maybeReplaceError 把本地 CancelRead 产生的 *quic.StreamError 替换为
+// *http3.Error（Remote=false、ErrCodeNoError），冒泡到 tunnelConn.Read 时
+// 已是后者——正是「每请求杀连接」bug 的穿透错误类型。
+func localH3TeardownErr() error {
+	return &http3.Error{Remote: false, ErrorCode: http3.ErrCodeNoError}
+}
+
+// TestNoteDeadStreamLocalH3TeardownNoReconnect 锁定「每请求杀连接」bug 的直接
+// 修复：relay 双向 io.Copy 收尾时，Close 的 CancelRead 解除另一方向阻塞的
+// Read，其错误经 http3 层替换后不再匹配 shouldReconnectH3 的单流 reset 豁免
+// （*quic.StreamError 已被换成 *http3.Error）。修复前每个请求结束贡献一次
+// 可疑失败，观察窗两次即满 → 健康共享连接按请求节奏被拆除（qlog 实验：
+// 连接寿命严格跟随探活节奏 5-23s 一拆）。修复后此类尾流必须完全不计入。
+func TestNoteDeadStreamLocalH3TeardownNoReconnect(t *testing.T) {
+	c, b := deadBundle(t)
+	newB := newTestBundle()
+	c.dialFn = func(context.Context) (*connBundle, error) { return newB, nil }
+	tc := &tunnelConn{client: c, bundle: b}
+
+	// 连续多次（超过旧阈值 2 与新阈值 4）注入尾流错误：任何一次都不该拆连接。
+	for i := 0; i < streamFailureTargets+1; i++ {
+		tc.noteDeadStream(localH3TeardownErr())
+	}
+	time.Sleep(50 * time.Millisecond)
+	c.connMu.RLock()
+	cur := c.cur
+	c.connMu.RUnlock()
+	if cur != b {
+		t.Fatal("本地取消尾流不应触发重连：cur 不应被替换")
+	}
+}
+
+// TestNoteDeadStreamRemoteH3ErrorStillWindowed 锁定对端 H3 错误不与本地尾流
+// 混淆：Remote=true 的 *http3.Error（边缘拒绝/协议问题）仍走观察窗计数。
+func TestNoteDeadStreamRemoteH3ErrorStillWindowed(t *testing.T) {
+	c, b := deadBundle(t)
+	newB := newTestBundle()
+	c.dialFn = func(context.Context) (*connBundle, error) { return newB, nil }
+	tc := &tunnelConn{client: c, bundle: b}
+
+	for i := 1; i < streamFailureTargets; i++ {
+		tc.noteDeadStream(&http3.Error{Remote: true, ErrorCode: http3.ErrCodeNoError})
+		time.Sleep(50 * time.Millisecond)
+		c.connMu.RLock()
+		cur := c.cur
+		c.connMu.RUnlock()
+		if cur != b {
+			t.Fatalf("对端 H3 错误第 %d 次不应拆共享连接：cur 不应被替换", i)
+		}
+	}
+
+	tc.noteDeadStream(&http3.Error{Remote: true, ErrorCode: http3.ErrCodeNoError}) // 达阈值 → 重连
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		c.connMu.RLock()
+		cur := c.cur
+		c.connMu.RUnlock()
+		if cur == newB {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("观察窗内对端 H3 错误达阈值应触发重连：cur 未被替换")
+}
+
+// TestNoteDeadStreamClosingSuppresses 锁定 closing 标志抑制：tunnelConn.Close
+// 置位后，noteDeadStream 对任何错误（含真正的连接级错误）一律 no-op——本端
+// 已收尾的流不该参与连接生死判定（真故障由仍在服务的并发流负责上报）。
+func TestNoteDeadStreamClosingSuppresses(t *testing.T) {
+	c, b := deadBundle(t)
+	newB := newTestBundle()
+	c.dialFn = func(context.Context) (*connBundle, error) { return newB, nil }
+	tc := &tunnelConn{client: c, bundle: b}
+	tc.closing.Store(true) // 等价 Close() 的置位效果（streamConn 为 nil 时无法走完整 Close）
+
+	tc.noteDeadStream(connectionLevelErr())
+	time.Sleep(50 * time.Millisecond)
+	c.connMu.RLock()
+	cur := c.cur
+	c.connMu.RUnlock()
+	if cur != b {
+		t.Fatal("closing 置位后连接级错误也不应触发重连：cur 不应被替换")
+	}
+}
+
+// TestIsLocalStreamTeardown 锁定尾流分类器的边界：仅"本地发起 + H3_NO_ERROR"
+// 匹配；对端错误（Remote=true）、非 H3_NO_ERROR、非 http3.Error 一律不匹配
+// （后者交由原有分类路径处理，行为不变）。
+func TestIsLocalStreamTeardown(t *testing.T) {
+	if !isLocalStreamTeardown(localH3TeardownErr()) {
+		t.Fatal("本地取消尾流应匹配")
+	}
+	if isLocalStreamTeardown(&http3.Error{Remote: true, ErrorCode: http3.ErrCodeNoError}) {
+		t.Fatal("对端 H3 错误不应匹配（仍需走观察窗）")
+	}
+	if isLocalStreamTeardown(&http3.Error{Remote: false, ErrorCode: http3.ErrCodeRequestCanceled}) {
+		t.Fatal("非 NO_ERROR 的本地取消不应匹配（保守起见仍走观察窗）")
+	}
+	if isLocalStreamTeardown(io.EOF) || isLocalStreamTeardown(closedErr()) {
+		t.Fatal("EOF/net.ErrClosed 不属于 http3 尾流分类")
 	}
 }
