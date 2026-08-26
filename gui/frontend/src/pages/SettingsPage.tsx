@@ -1,6 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
 import { ListFilter, Monitor, Moon, Palette, RefreshCw, Rocket, RotateCcw, Save, Sun } from "lucide-react";
-import { System } from "@wailsio/runtime";
 import {
   checkUpdate,
   getAutostartEnabled,
@@ -47,8 +46,9 @@ export default function SettingsPage() {
   const [updateInfo, setUpdateInfo] = useState<string | null>(null);
   const [updateUrl, setUpdateUrl] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
-  // 分应用代理状态（仅 Android 展示）。
-  const [isAndroid, setIsAndroid] = useState(false);
+  // 分应用代理状态。Card 始终显示：桌面端 config 字段被忽略（VpnService 是
+  // Android 概念），不产生副作用；不依赖 System.IsAndroid()——Wails v3 Android
+  // runtime 不注入 window._wails.environment，该 API 在 Android 上恒 false。
   const [perAppMode, setPerAppMode] = useState<PerAppConfig["mode"]>("off");
   const [perAppPackages, setPerAppPackages] = useState<string[]>([]);
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -75,12 +75,6 @@ export default function SettingsPage() {
     void load();
     getAutostartEnabled().then(setAutostartState).catch(() => {});
     getVersion().then(setVersion).catch(() => {});
-    // 检测是否 Android 平台（Wails runtime）用以显示分应用代理 Card。
-    try {
-      setIsAndroid(System.IsAndroid());
-    } catch {
-      setIsAndroid(false);
-    }
     // 加载分应用代理配置。
     getPerAppConfig().then((c) => {
       setPerAppMode(c.mode);
@@ -303,74 +297,72 @@ export default function SettingsPage() {
         </p>
       </Card>
 
-      {isAndroid && (
-        <Card title="分应用代理">
-          <p className="mb-3 text-xs text-slate-500 dark:text-slate-400">
-            仅代理指定应用（白名单）或排除指定应用（黑名单）；默认全部应用走代理，与旧版一致。
-          </p>
+      <Card title="分应用代理">
+        <p className="mb-3 text-xs text-slate-500 dark:text-slate-400">
+          仅代理指定应用（白名单）或排除指定应用（黑名单）；默认全部应用走代理，与旧版一致。
+        </p>
 
-          <div className="grid grid-cols-3 gap-1 rounded-lg border border-slate-200 bg-slate-50 p-1 dark:border-slate-700 dark:bg-slate-800">
-            {PER_APP_MODES.map(({ value, label }) => (
-              <button
-                key={value}
-                type="button"
-                onClick={() => changePerAppMode(value)}
-                aria-pressed={perAppMode === value}
-                className={`flex items-center justify-center rounded-md px-2 py-2 text-sm font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-500/50 ${
-                  perAppMode === value
-                    ? "bg-white text-orange-600 shadow-sm dark:bg-slate-700 dark:text-orange-400"
-                    : "text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200"
-                }`}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-          <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
-            {PER_APP_MODES.find((m) => m.value === perAppMode)?.hint}
-          </p>
+        <div className="grid grid-cols-3 gap-1 rounded-lg border border-slate-200 bg-slate-50 p-1 dark:border-slate-700 dark:bg-slate-800">
+          {PER_APP_MODES.map(({ value, label }) => (
+            <button
+              key={value}
+              type="button"
+              onClick={() => changePerAppMode(value)}
+              aria-pressed={perAppMode === value}
+              className={`flex items-center justify-center rounded-md px-2 py-2 text-sm font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-500/50 ${
+                perAppMode === value
+                  ? "bg-white text-orange-600 shadow-sm dark:bg-slate-700 dark:text-orange-400"
+                  : "text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
+          {PER_APP_MODES.find((m) => m.value === perAppMode)?.hint}
+        </p>
 
-          {perAppMode !== "off" && (
-            <div className="mt-4">
-              <Button variant="secondary" onClick={() => setPickerOpen(true)}>
-                <ListFilter className="h-4 w-4" />
-                选择应用{perAppPackages.length > 0 ? `（已选 ${perAppPackages.length} 个）` : ""}
-              </Button>
-              {perAppPackages.length > 0 && (
-                <div className="mt-2 flex max-h-28 flex-wrap gap-1 overflow-y-auto">
-                  {perAppPackages.map((pkg) => (
-                    <span
-                      key={pkg}
-                      className="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-700 dark:bg-slate-800 dark:text-slate-300"
-                    >
-                      {pkg}
-                    </span>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-
-          <p className="mt-3 text-xs text-amber-600 dark:text-amber-400">
-            ⚠ 本应用自身始终不进入代理列表（防路由死锁）
-          </p>
-
-          <div className="mt-4 flex flex-wrap items-center gap-3">
-            <Button onClick={onSavePerApp} loading={perAppBusy}>
-              <RefreshCw className="h-4 w-4" /> 保存并重连
+        {perAppMode !== "off" && (
+          <div className="mt-4">
+            <Button variant="secondary" onClick={() => setPickerOpen(true)}>
+              <ListFilter className="h-4 w-4" />
+              选择应用{perAppPackages.length > 0 ? `（已选 ${perAppPackages.length} 个）` : ""}
             </Button>
-            {perAppNotice && (
-              <span className="text-sm text-emerald-600 dark:text-emerald-400">{perAppNotice}</span>
-            )}
-            {perAppError && (
-              <span className="text-sm text-red-600 dark:text-red-400">{perAppError}</span>
+            {perAppPackages.length > 0 && (
+              <div className="mt-2 flex max-h-28 flex-wrap gap-1 overflow-y-auto">
+                {perAppPackages.map((pkg) => (
+                  <span
+                    key={pkg}
+                    className="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-700 dark:bg-slate-800 dark:text-slate-300"
+                  >
+                    {pkg}
+                  </span>
+                ))}
+              </div>
             )}
           </div>
-          <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
-            应用列表变更会短暂重连隧道，不影响 VPN 授权。
-          </p>
-        </Card>
-      )}
+        )}
+
+        <p className="mt-3 text-xs text-amber-600 dark:text-amber-400">
+          ⚠ 本应用自身始终不进入代理列表（防路由死锁）
+        </p>
+
+        <div className="mt-4 flex flex-wrap items-center gap-3">
+          <Button onClick={onSavePerApp} loading={perAppBusy}>
+            <RefreshCw className="h-4 w-4" /> 保存并重连
+          </Button>
+          {perAppNotice && (
+            <span className="text-sm text-emerald-600 dark:text-emerald-400">{perAppNotice}</span>
+          )}
+          {perAppError && (
+            <span className="text-sm text-red-600 dark:text-red-400">{perAppError}</span>
+          )}
+        </div>
+        <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
+          应用列表变更会短暂重连隧道，不影响 VPN 授权。
+        </p>
+      </Card>
 
       <Card title="开机自启">
         <div className="flex items-center justify-between gap-4">
