@@ -1,4 +1,4 @@
-## [未发布]
+## [v0.5.31] - 2026-08-26
 
 ### 修复（GUI 两题：夜间主题启动不生效 + GEO 自动更新永不触发，东哥 2026-08-26 派单）
 
@@ -24,6 +24,14 @@
     单测与循环取消冒烟测试；`go test ./... -race` 全绿。
 - 说明：mtime 同时是 GUI「上次更新」展示值与调度基准；手动"立即更新"
   会自然重置周期。
+
+### 修复（断联：健康共享 H3 连接被按请求节奏拆除）
+
+- **每请求杀连接**（4f9cc48，qlog 实验实锤）：relay 双向收尾时
+  `tunnelConn.Close` 的 CancelRead 解除对向阻塞 Read，其 StreamError 经
+  http3 `maybeReplaceError` 换成无 Unwrap 的 `*http3.Error` → shouldReconnectH3
+  的单流 reset 豁免失效，正常收尾计入失败观察窗，阈值即满拆健康共享连接
+  （Telegram 长轮询等周期性中断，探活 7s 时实测 5-23s 一拆）。
 
 ## [v0.5.30] - 2026-08-26
 
