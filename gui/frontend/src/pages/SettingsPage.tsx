@@ -1,25 +1,39 @@
 import { useEffect, useState, useCallback } from "react";
-import { Monitor, Moon, Palette, Rocket, RotateCcw, Save, Sun } from "lucide-react";
+import { ListFilter, Monitor, Moon, Palette, RefreshCw, Rocket, RotateCcw, Save, Sun } from "lucide-react";
+import { System } from "@wailsio/runtime";
 import {
   checkUpdate,
   getAutostartEnabled,
   getConfig,
+  getPerAppConfig,
   getVersion,
   isDemoMode,
   openExternalBrowser,
   saveConfig,
   setAutostart,
+  setPerAppConfig,
 } from "../lib/api";
-import { AppConfig } from "../lib/types";
+import { AppConfig, PerAppConfig } from "../lib/types";
 import { useThemeContext } from "../lib/ThemeContext";
 import type { ThemeMode } from "../lib/theme";
 import { Button, Card, Field, Toggle, inputCls } from "../components/ui";
+import { PerAppPicker } from "../components/PerAppPicker";
 
 const THEME_OPTIONS: { value: ThemeMode; label: string; icon: typeof Sun }[] = [
   { value: "light", label: "浅色", icon: Sun },
   { value: "dark", label: "深色", icon: Moon },
   { value: "system", label: "跟随系统", icon: Monitor },
 ];
+
+// 分应用代理三种模式（off=全量代理，与 v0.5.31 现状一致）。
+const PER_APP_MODES: { value: PerAppConfig["mode"]; label: string; hint: string }[] = [
+  { value: "off", label: "全部应用", hint: "所有应用走代理（默认，与旧版一致）" },
+  { value: "allow", label: "仅指定应用", hint: "白名单：只有列表中的应用走代理" },
+  { value: "disallow", label: "排除指定应用", hint: "黑名单：列表外的应用走代理" },
+];
+
+// warp-go 壳自身包名：选择器剔除、保存前兜底剔除（与 Go 侧 androidSelfPackage 一致）。
+const SELF_PACKAGE = "com.wails.app";
 
 export default function SettingsPage() {
   const [cfg, setCfg] = useState<AppConfig | null>(null);
@@ -33,6 +47,14 @@ export default function SettingsPage() {
   const [updateInfo, setUpdateInfo] = useState<string | null>(null);
   const [updateUrl, setUpdateUrl] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
+  // 分应用代理状态（仅 Android 展示）。
+  const [isAndroid, setIsAndroid] = useState(false);
+  const [perAppMode, setPerAppMode] = useState<PerAppConfig["mode"]>("off");
+  const [perAppPackages, setPerAppPackages] = useState<string[]>([]);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [perAppBusy, setPerAppBusy] = useState(false);
+  const [perAppNotice, setPerAppNotice] = useState<string | null>(null);
+  const [perAppError, setPerAppError] = useState<string | null>(null);
   const { mode, setMode, setModeFromConfig } = useThemeContext();
 
   const load = useCallback(async () => {
@@ -53,6 +75,17 @@ export default function SettingsPage() {
     void load();
     getAutostartEnabled().then(setAutostartState).catch(() => {});
     getVersion().then(setVersion).catch(() => {});
+    // 检测是否 Android 平台（Wails runtime）用以显示分应用代理 Card。
+    try {
+      setIsAndroid(System.IsAndroid());
+    } catch {
+      setIsAndroid(false);
+    }
+    // 加载分应用代理配置。
+    getPerAppConfig().then((c) => {
+      setPerAppMode(c.mode);
+      setPerAppPackages(c.packages);
+    }).catch(() => {});
   }, [load]);
 
   const onCheckUpdate = async () => {
@@ -107,6 +140,30 @@ export default function SettingsPage() {
       setError(String(e));
     } finally {
       setAutostartBusy(false);
+    }
+  };
+
+  // 分应用代理：切换模式时清空包列表（列表仅 allow/disallow 有意义）。
+  const changePerAppMode = (m: PerAppConfig["mode"]) => {
+    setPerAppMode(m);
+    setPerAppNotice(null);
+    setPerAppError(null);
+    if (m === "off") setPerAppPackages([]);
+  };
+
+  const onSavePerApp = async () => {
+    setPerAppBusy(true);
+    setPerAppError(null);
+    setPerAppNotice(null);
+    try {
+      // 保存前兜底剔除壳自身（选择器已剔除，这里双保险，防脏数据）。
+      const packages = perAppPackages.filter((p) => p !== SELF_PACKAGE);
+      await setPerAppConfig({ mode: perAppMode, packages });
+      setPerAppNotice("已保存" + (perAppMode !== "off" ? "，VPN 运行中会重启应用" : ""));
+    } catch (e) {
+      setPerAppError(String(e));
+    } finally {
+      setPerAppBusy(false);
     }
   };
 
@@ -246,6 +303,75 @@ export default function SettingsPage() {
         </p>
       </Card>
 
+      {isAndroid && (
+        <Card title="分应用代理">
+          <p className="mb-3 text-xs text-slate-500 dark:text-slate-400">
+            仅代理指定应用（白名单）或排除指定应用（黑名单）；默认全部应用走代理，与旧版一致。
+          </p>
+
+          <div className="grid grid-cols-3 gap-1 rounded-lg border border-slate-200 bg-slate-50 p-1 dark:border-slate-700 dark:bg-slate-800">
+            {PER_APP_MODES.map(({ value, label }) => (
+              <button
+                key={value}
+                type="button"
+                onClick={() => changePerAppMode(value)}
+                aria-pressed={perAppMode === value}
+                className={`flex items-center justify-center rounded-md px-2 py-2 text-sm font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-500/50 ${
+                  perAppMode === value
+                    ? "bg-white text-orange-600 shadow-sm dark:bg-slate-700 dark:text-orange-400"
+                    : "text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200"
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
+            {PER_APP_MODES.find((m) => m.value === perAppMode)?.hint}
+          </p>
+
+          {perAppMode !== "off" && (
+            <div className="mt-4">
+              <Button variant="secondary" onClick={() => setPickerOpen(true)}>
+                <ListFilter className="h-4 w-4" />
+                选择应用{perAppPackages.length > 0 ? `（已选 ${perAppPackages.length} 个）` : ""}
+              </Button>
+              {perAppPackages.length > 0 && (
+                <div className="mt-2 flex max-h-28 flex-wrap gap-1 overflow-y-auto">
+                  {perAppPackages.map((pkg) => (
+                    <span
+                      key={pkg}
+                      className="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-700 dark:bg-slate-800 dark:text-slate-300"
+                    >
+                      {pkg}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          <p className="mt-3 text-xs text-amber-600 dark:text-amber-400">
+            ⚠ 本应用自身始终不进入代理列表（防路由死锁）
+          </p>
+
+          <div className="mt-4 flex flex-wrap items-center gap-3">
+            <Button onClick={onSavePerApp} loading={perAppBusy}>
+              <RefreshCw className="h-4 w-4" /> 保存并重连
+            </Button>
+            {perAppNotice && (
+              <span className="text-sm text-emerald-600 dark:text-emerald-400">{perAppNotice}</span>
+            )}
+            {perAppError && (
+              <span className="text-sm text-red-600 dark:text-red-400">{perAppError}</span>
+            )}
+          </div>
+          <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
+            应用列表变更会短暂重连隧道，不影响 VPN 授权。
+          </p>
+        </Card>
+      )}
+
       <Card title="开机自启">
         <div className="flex items-center justify-between gap-4">
           <div className="flex items-start gap-3">
@@ -264,6 +390,17 @@ export default function SettingsPage() {
           />
         </div>
       </Card>
+
+      <PerAppPicker
+        open={pickerOpen}
+        selected={perAppPackages}
+        selfPackage={SELF_PACKAGE}
+        onClose={() => setPickerOpen(false)}
+        onConfirm={(pkgs) => {
+          setPerAppPackages(pkgs);
+          setPickerOpen(false);
+        }}
+      />
     </div>
   );
 }

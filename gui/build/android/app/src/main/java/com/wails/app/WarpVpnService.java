@@ -10,6 +10,7 @@ import android.content.pm.ServiceInfo;
 import android.net.ConnectivityManager;
 import android.net.LinkProperties;
 import android.net.Network;
+import android.content.pm.PackageManager;
 import android.net.VpnService;
 import android.os.Build;
 import android.os.IBinder;
@@ -214,6 +215,12 @@ public class WarpVpnService extends VpnService {
         addAddress(builder, ipv4);
         addAddress(builder, ipv6);
 
+        // 分应用代理（per-app）：从沙箱 perapp.json 读 {mode, packages} 应用到
+        // Builder（addAllowed/addDisallowed）。列表是 establish() 时一次性下发
+        // 生效，变更列表必须重建 VPN（无热更 API，见设计文档 §4.1）。文件缺失
+        // /损坏时回退全量代理（fail-open，见 applyPerAppFilter）。
+        applyPerAppFilter(builder);
+
         ParcelFileDescriptor pfd;
         try {
             pfd = builder.establish();
@@ -319,6 +326,114 @@ public class WarpVpnService extends VpnService {
             Log.w(TAG, "collectPhysicalDns failed", e);
             return "";
         }
+    }
+
+    /**
+     * Read the per-app proxy config from the sandbox perapp.json
+     * ({@code getFilesDir()/perapp.json}) and apply it to the VpnService
+     * Builder via {@code addAllowedApplication} / {@code addDisallowedApplication}.
+     * The file is written by the Go side ({@code SetPerAppConfig}) before the
+     * VPN is started (or restarted).
+     *
+     * Semantics (per the per-app proxy design):
+     * <ul>
+     *   <li>mode="off" (or missing/corrupt): no filter, full proxy (fail-open)</li>
+     *   <li>mode="allow": {@code addAllowedApplication} for each package
+     *       (white-list), with the self package forced in</li>
+     *   <li>mode="disallow": {@code addDisallowedApplication} for each package
+     *       (black-list), with the self package excluded</li>
+     * </ul>
+     * The self-package ensure the shell's own traffic stays in the tunnel
+     * (the existing {@code protectSocket} handles the loop-prevention).
+     * Uninstalled/missing packages are silently skipped.
+     */
+    private void applyPerAppFilter(VpnService.Builder builder) {
+        PerAppConfig pac = readPerAppConfig();
+        String self = getPackageName();
+        try {
+            if ("allow".equals(pac.mode)) {
+                // White-list: force the self-package in so the shell's traffic
+                // stays in the tunnel (the user can't un-select it).
+                java.util.LinkedHashSet<String> set = new java.util.LinkedHashSet<>(pac.packages);
+                set.add(self);
+                for (String pkg : set) {
+                    try {
+                        builder.addAllowedApplication(pkg);
+                        Log.i(TAG, "per-app allow: " + pkg);
+                    } catch (PackageManager.NameNotFoundException e) {
+                        Log.w(TAG, "per-app allow skip missing: " + pkg);
+                    }
+                }
+            } else if ("disallow".equals(pac.mode)) {
+                // Black-list: exclude the self-package so the shell's traffic
+                // stays in the tunnel (user can't exclude themselves).
+                for (String pkg : pac.packages) {
+                    if (pkg.equals(self)) {
+                        Log.w(TAG, "per-app disallow skip self: " + pkg);
+                        continue;
+                    }
+                    try {
+                        builder.addDisallowedApplication(pkg);
+                        Log.i(TAG, "per-app disallow: " + pkg);
+                    } catch (PackageManager.NameNotFoundException e) {
+                        Log.w(TAG, "per-app disallow skip missing: " + pkg);
+                    }
+                }
+            }
+            // mode="off" or anything else — no addAllowed/Disallowed calls,
+            // full proxy (current behaviour, fail-open).
+        } catch (Exception e) {
+            Log.w(TAG, "applyPerAppFilter failed, fallback to full proxy (fail-open)", e);
+        }
+    }
+
+    /**
+     * Read perapp.json from the sandbox and parse it into a PerAppConfig.
+     * Missing or corrupt file → return default (off, empty list) = fail-open.
+     * Uses the same pattern as {@link #readAssignedAddrs()} (manual JSON
+     * parsing without external dependencies).
+     */
+    private PerAppConfig readPerAppConfig() {
+        PerAppConfig out = new PerAppConfig();
+        try {
+            java.io.File f = new java.io.File(getFilesDir(), "perapp.json");
+            if (!f.exists()) {
+                return out;
+            }
+            java.io.InputStream in = new java.io.FileInputStream(f);
+            try {
+                byte[] buf = new byte[(int) f.length()];
+                int off = 0;
+                while (off < buf.length) {
+                    int n = in.read(buf, off, buf.length - off);
+                    if (n < 0) break;
+                    off += n;
+                }
+                org.json.JSONObject o = new org.json.JSONObject(new String(buf, 0, off, "UTF-8"));
+                String mode = o.optString("mode", "off");
+                if ("allow".equals(mode) || "disallow".equals(mode)) {
+                    out.mode = mode;
+                }
+                org.json.JSONArray arr = o.optJSONArray("packages");
+                if (arr != null) {
+                    out.packages = new java.util.ArrayList<>();
+                    for (int i = 0; i < arr.length(); i++) {
+                        out.packages.add(arr.optString(i, ""));
+                    }
+                }
+            } finally {
+                in.close();
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "readPerAppConfig failed, fallback to full proxy (fail-open)", e);
+        }
+        return out;
+    }
+
+    /** Lightweight struct for per-app JSON parsing. */
+    private static class PerAppConfig {
+        String mode = "off";
+        java.util.List<String> packages = new java.util.ArrayList<>();
     }
 
     /**

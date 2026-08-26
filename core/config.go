@@ -58,6 +58,14 @@ type Config struct {
 	// ThemeMode 是界面主题模式：light / dark / system（跟随系统）。
 	// GUI 保存设置时同步写入 config.json，启动时从配置读取并注入前端。
 	ThemeMode string `json:"theme_mode,omitempty"`
+	// PerAppMode 是 Android 分应用代理模式：off=全量代理（默认）| allow=仅
+	// 白名单 | disallow=黑名单。桌面端忽略（VpnService 是 Android 概念）；
+	// 该值仅持久化，实际过滤由 Java 侧在 establish() 前读取 perapp.json
+	// 应用到 VpnService.Builder（见 gui/build/android/.../WarpVpnService.java）。
+	PerAppMode string `json:"per_app_mode,omitempty"`
+	// PerAppPackages 是分应用代理生效的包名列表（allow/disallow 模式下使用）。
+	// 空列表 = 该模式下不过滤（等价全量）。仅 Android 生效。
+	PerAppPackages []string `json:"per_app_packages,omitempty"`
 }
 
 // DefaultConfig 返回内置默认值。LoadConfig 以它为基底，JSON 反序列化只覆盖
@@ -73,6 +81,7 @@ func DefaultConfig() *Config {
 		AllowUDP:          false,
 		DownloadProxy:     "https://gh-proxy.org/",
 		ThemeMode:         "system",
+		PerAppMode:        "off",
 		TunnelConnections: 2,
 	}
 }

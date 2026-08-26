@@ -22,7 +22,9 @@ import {
   fromLogs,
   fromStatus,
   GeoInfo,
+  InstalledApp,
   LogEntry,
+  PerAppConfig,
 } from "./types";
 
 // ---------- backend service shape (structural, mirror of gui/service.go) ----------
@@ -48,6 +50,9 @@ interface ServiceAPI {
   GetAutostartEnabled(): Promise<unknown>;
   GetConfig(): Promise<unknown>;
   SaveConfig(config: Record<string, unknown>): Promise<unknown>;
+  GetPerAppConfig(): Promise<unknown>;
+  SetPerAppConfig(cfg: unknown): Promise<unknown>;
+  ListInstalledApps(): Promise<unknown>;
   GetLogs(limit: number): Promise<unknown>;
   GetVersion(): Promise<unknown>;
   CheckUpdate(): Promise<unknown>;
@@ -151,6 +156,8 @@ function mockConfig(): AppConfig {
     allowUDP: false,
     downloadProxy: "https://gh-proxy.org/",
     themeMode: "system",
+    perAppMode: "off",
+    perAppPackages: [],
   };
 }
 
@@ -408,6 +415,8 @@ export async function saveConfig(config: AppConfig): Promise<void> {
     allow_udp: config.allowUDP,
     download_proxy: config.downloadProxy,
     theme_mode: config.themeMode,
+    per_app_mode: config.perAppMode ?? "off",
+    per_app_packages: config.perAppPackages ?? [],
   });
 }
 
@@ -473,6 +482,61 @@ export async function openExternalBrowser(url: string): Promise<void> {
   const svc = await loadService();
   if (!svc) return;
   await svc.OpenExternalBrowser(url);
+}
+
+// ---------- 分应用代理（Android） ----------
+
+function mockPerApp(): PerAppConfig {
+  return { mode: "off", packages: [] };
+}
+
+function mockInstalledApps(): InstalledApp[] {
+  return [
+    { package: "org.example.browser", label: "示例浏览器", system: false },
+    { package: "org.example.mail", label: "示例邮箱", system: false },
+    { package: "com.android.settings", label: "设置", system: true },
+  ];
+}
+
+export async function getPerAppConfig(): Promise<PerAppConfig> {
+  const svc = await loadService();
+  if (!svc) {
+    await sleep(jitter(120));
+    return mockPerApp();
+  }
+  const raw = (await svc.GetPerAppConfig()) as Partial<PerAppConfig> | null;
+  const mode = raw?.mode === "allow" || raw?.mode === "disallow" ? raw.mode : "off";
+  return { mode, packages: Array.isArray(raw?.packages) ? (raw.packages as string[]) : [] };
+}
+
+export async function setPerAppConfig(cfg: PerAppConfig): Promise<void> {
+  const svc = await loadService();
+  if (!svc) {
+    await sleep(jitter(250));
+    mockState.logs.push({ time: now(), level: "info", msg: `分应用代理已保存（演示）：${cfg.mode}` });
+    return;
+  }
+  await svc.SetPerAppConfig({ mode: cfg.mode, packages: cfg.packages });
+}
+
+export async function listInstalledApps(): Promise<InstalledApp[]> {
+  const svc = await loadService();
+  if (!svc) {
+    await sleep(jitter(300));
+    return mockInstalledApps();
+  }
+  const raw = await svc.ListInstalledApps();
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((a) => {
+      const o = (a ?? {}) as Partial<InstalledApp>;
+      return {
+        package: String(o.package ?? ""),
+        label: String(o.label ?? o.package ?? ""),
+        system: o.system === true,
+      };
+    })
+    .filter((a) => a.package !== "");
 }
 
 function now(): string {

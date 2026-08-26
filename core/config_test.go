@@ -31,6 +31,56 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.EnableSystemProxy || cfg.AllowUDP {
 		t.Error("EnableSystemProxy/AllowUDP 默认应为 false")
 	}
+	if cfg.PerAppMode != "off" {
+		t.Errorf("PerAppMode 默认应为 off，得到 %q", cfg.PerAppMode)
+	}
+	if len(cfg.PerAppPackages) != 0 {
+		t.Errorf("PerAppPackages 默认应为空，得到 %v", cfg.PerAppPackages)
+	}
+}
+
+// TestPerAppConfigSerialization 验证分应用代理字段在 config.json 的序列化
+// 往返：写盘 → 读回，字段不丢失；缺省（空列表）不污染磁盘 JSON。
+func TestPerAppConfigSerialization(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+
+	// 缺省 off + 空列表：写盘不应出现空数组（omitempty），读回仍为 off。
+	if _, err := LoadConfig(path); err != nil {
+		t.Fatalf("LoadConfig 失败：%v", err)
+	}
+	data, _ := os.ReadFile(path)
+	if strings.Contains(string(data), "per_app_packages") {
+		t.Error("缺省配置写盘不应包含 per_app_packages 字段")
+	}
+
+	// allow 模式 + 包名列表：往返完整保留。
+	want := []string{"org.telegram.messenger", "com.android.chrome"}
+	if err := WriteConfig(path, &Config{ListenAddr: "127.0.0.1:40000", PerAppMode: "allow", PerAppPackages: want}); err != nil {
+		t.Fatalf("WriteConfig 失败：%v", err)
+	}
+	got, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig 失败：%v", err)
+	}
+	if got.PerAppMode != "allow" {
+		t.Errorf("PerAppMode = %q，期望 allow", got.PerAppMode)
+	}
+	if len(got.PerAppPackages) != 2 || got.PerAppPackages[0] != want[0] || got.PerAppPackages[1] != want[1] {
+		t.Errorf("PerAppPackages = %v，期望 %v", got.PerAppPackages, want)
+	}
+
+	// disallow 模式 + 空列表：显式 disallow 保留（不是缺省 off）。
+	if err := WriteConfig(path, &Config{ListenAddr: "127.0.0.1:40000", PerAppMode: "disallow"}); err != nil {
+		t.Fatalf("WriteConfig 失败：%v", err)
+	}
+	got, err = LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig 失败：%v", err)
+	}
+	if got.PerAppMode != "disallow" {
+		t.Errorf("PerAppMode = %q，期望 disallow（空列表的 disallow 不等于 off）", got.PerAppMode)
+	}
 }
 
 // TestLoadConfigMissingCreatesFile 验证文件缺失时自动以默认值原子生成模板。

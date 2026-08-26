@@ -18,6 +18,8 @@ import android.os.BatteryManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.PowerManager;
+import android.content.pm.ApplicationInfo;
+import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
@@ -45,6 +47,7 @@ import androidx.core.content.FileProvider;
 import androidx.core.view.WindowCompat;
 import androidx.webkit.WebViewAssetLoader;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.File;
@@ -181,6 +184,66 @@ public class MainActivity extends AppCompatActivity {
             }
         }).start();
         return "started";
+    }
+
+    /**
+     * Enumerate installed applications that declare the INTERNET permission,
+     * returning a JSON string {@code [{package,label,system}]} for the Go-side
+     * per-app proxy picker (frontend app selector). Only apps visible to this
+     * app ({@code <queries>} + launcher apps + system apps) are returned.
+     * <p>
+     * Called from Go via the reverse-JNI bridge ({@code androidListInstalledApps}
+     * in androidbridge.go). Failures return {@code "[]"} so the caller always
+     * gets parseable JSON.
+     */
+    @SuppressLint("QueryPermissionsNeeded")
+    public static String listInstalledApps() {
+        MainActivity a = sInstance;
+        if (a == null) {
+            return "[]";
+        }
+        try {
+            PackageManager pm = a.getPackageManager();
+            JSONArray arr = new JSONArray();
+            // getInstalledPackages with GET_PERMISSIONS: visibility is filtered
+            // by the <queries> declaration in AndroidManifest.xml — apps with
+            // a MAIN/LAUNCHER intent + system apps are visible.
+            @SuppressLint("WrongConstant")
+            java.util.List<PackageInfo> pkgs = pm.getInstalledPackages(PackageManager.GET_PERMISSIONS);
+            for (PackageInfo pi : pkgs) {
+                // Only apps that declare INTERNET permission (WireGuard/CMFA/v2rayNG
+                // all use the same filter — naturally excludes non-networking components).
+                boolean hasInternet = false;
+                if (pi.requestedPermissions != null) {
+                    for (String perm : pi.requestedPermissions) {
+                        if ("android.permission.INTERNET".equals(perm)) {
+                            hasInternet = true;
+                            break;
+                        }
+                    }
+                }
+                if (!hasInternet) {
+                    continue;
+                }
+                String label = "";
+                try {
+                    CharSequence l = pi.applicationInfo.loadLabel(pm);
+                    if (l != null) label = l.toString();
+                } catch (Exception ignored) {
+                }
+                boolean system = (pi.applicationInfo.flags & ApplicationInfo.FLAG_SYSTEM) != 0;
+                JSONObject o = new JSONObject();
+                o.put("package", pi.packageName);
+                o.put("label", label);
+                o.put("system", system);
+                arr.put(o);
+            }
+            Log.i(TAG, "listInstalledApps: " + arr.length() + " apps (INTERNET)");
+            return arr.toString();
+        } catch (Exception e) {
+            Log.e(TAG, "listInstalledApps failed", e);
+            return "[]";
+        }
     }
 
     private static final String TAG = "WailsActivity";

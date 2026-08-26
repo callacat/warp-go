@@ -46,6 +46,19 @@ export interface AppConfig {
   allowUDP: boolean;
   downloadProxy: string;
   themeMode: "light" | "dark" | "system";
+  perAppMode: "off" | "allow" | "disallow";
+  perAppPackages: string[];
+}
+
+export interface PerAppConfig {
+  mode: "off" | "allow" | "disallow";
+  packages: string[];
+}
+
+export interface InstalledApp {
+  package: string;
+  label: string;
+  system: boolean;
 }
 
 export type RuleAction = "proxy" | "direct";
@@ -136,6 +149,8 @@ export function fromConfig(v: any): AppConfig {
       theme === "light" || theme === "dark" || theme === "system"
         ? theme
         : "system",
+    perAppMode: o.per_app_mode === "allow" || o.per_app_mode === "disallow" ? o.per_app_mode : "off",
+    perAppPackages: Array.isArray(o.per_app_packages) ? o.per_app_packages : [],
   };
 }
 

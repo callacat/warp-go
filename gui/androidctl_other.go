@@ -24,3 +24,6 @@ func androidReloadRules() error { return nil }
 // androidOpenExternalBrowser 桌面桩：桌面端用 Wails BrowserManager（service.go
 // 的 OpenExternalBrowser 在 !android 分支直接调用，不会走到这里）。
 func androidOpenExternalBrowser(url string) error { return nil }
+
+// androidListInstalledApps 桌面桩：桌面端无 Android 包管理器，返回空切片。
+func androidListInstalledApps() []InstalledApp { return nil }

@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -24,6 +25,29 @@ import (
 	"warp/registration"
 	"warp/route"
 )
+
+// PerAppConfig 是分应用代理的配置快照（前端选择器 <-> 后端持久化）。
+// 桌面端调用 GetPerAppConfig 返回 off+空列表（无意义但可安全展示）。
+type PerAppConfig struct {
+	Mode     string   `json:"mode"`     // off | allow | disallow
+	Packages []string `json:"packages"` // 生效的包名列表（allow/disallow 模式）
+}
+
+// InstalledApp 是 Android 已安装应用信息（前端应用选择器列表项）。
+// 桌面端 ListInstalledApps 返回空切片。
+type InstalledApp struct {
+	Package string `json:"package"`
+	Label   string `json:"label"`
+	System  bool   `json:"system"`
+}
+
+// PerAppJSON 是写到 getFilesDir()/perapp.json 的沙箱手递文件结构（Java 侧读取）。
+// 该文件是 VpnService.Builder 配置的来源，perapp.json 缺失/损坏时 Java 侧
+// 回退全量代理（fail-open）。
+type PerAppJSON struct {
+	Mode     string   `json:"mode"`
+	Packages []string `json:"packages"`
+}
 
 // Service 持有 core.Server 的惰性实例。GUI 打开时不必立即启动代理：
 // 服务方法在需要时才创建/使用 Server。
@@ -546,6 +570,143 @@ func (s *Service) GetAutostartEnabled() bool {
 		return false
 	}
 	return srv.AutostartEnabled()
+}
+
+// ---------------------------------------------------------------------------
+// 分应用代理（Android）
+// ---------------------------------------------------------------------------
+
+// GetPerAppConfig 返回当前分应用代理配置（来自 config.json，随其持久化）。
+// Android 上 fallback 到沙箱 perapp.json（VPN 启动前 Go 侧写入，见
+// SetPerAppConfig）；桌面端返回 off+空列表。
+func (s *Service) GetPerAppConfig() PerAppConfig {
+	srv, err := s.serverInstance()
+	if err == nil {
+		if st := srv.Status(); st.Config != nil {
+			return PerAppConfig{Mode: st.Config.PerAppMode, Packages: st.Config.PerAppPackages}
+		}
+	}
+	if runtime.GOOS == "android" {
+		if dir := cachedDataDir(); dir != "" {
+			if pac, err := readPerAppJSON(filepath.Join(dir, "perapp.json")); err == nil {
+				return pac
+			}
+		}
+	}
+	return PerAppConfig{Mode: "off"}
+}
+
+// SetPerAppConfig 保存分应用代理配置。Android 上：写沙箱 perapp.json（Java
+// 侧 establish() 前读取）+ 更新 config.json；若 VPN 正在运行则 stop→start
+// 重启以应用变更（VpnService 无热更 API，见方案 §4.1/§7）。桌面端仅持久化
+// 到 config.json（不影响运行）。
+func (s *Service) SetPerAppConfig(cfg PerAppConfig) error {
+	switch cfg.Mode {
+	case "off", "allow", "disallow":
+	default:
+		return fmt.Errorf("非法分应用代理模式 %q（应为 off/allow/disallow）", cfg.Mode)
+	}
+	// 去重 + 过滤空包名（防脏数据写入 perapp.json / config.json）。
+	seen := make(map[string]bool, len(cfg.Packages))
+	clean := make([]string, 0, len(cfg.Packages))
+	for _, p := range cfg.Packages {
+		p = strings.TrimSpace(p)
+		if p == "" || seen[p] {
+			continue
+		}
+		seen[p] = true
+		clean = append(clean, p)
+	}
+	cfg.Packages = clean
+
+	if runtime.GOOS == "android" {
+		dir := dataDir()
+		if dir == "" {
+			return errors.New("应用沙箱目录未就绪，无法保存分应用代理")
+		}
+		// 先写 perapp.json（Java 侧生效来源），再更新 config.json（持久化）。
+		// 若 VPN 运行中，重启以应用新列表（官方无热更 API，见方案 §7）。
+		if err := writePerAppJSON(filepath.Join(dir, "perapp.json"), cfg); err != nil {
+			return err
+		}
+		wasRunning := androidVpnRunning()
+		if err := s.savePerAppToConfig(cfg); err != nil {
+			return err
+		}
+		if wasRunning {
+			log.Printf("分应用代理已变更，重启 VPN 应用（mode=%s，%d 个包）", cfg.Mode, len(cfg.Packages))
+			_ = androidRequestVpnStop()
+			// 等旧实例拆干净再起新实例：stop 是异步的（nativeStopVpn 内部
+			// cancel + 关 kernel/vpn），直接 start 可能被"已在运行"守卫拦截。
+			deadline := time.Now().Add(5 * time.Second)
+			for androidVpnRunning() && time.Now().Before(deadline) {
+				time.Sleep(100 * time.Millisecond)
+			}
+			if err := androidRequestVpnStart(); err != nil {
+				return fmt.Errorf("重启 VPN 失败：%w", err)
+			}
+			return nil
+		}
+		log.Printf("分应用代理已保存（mode=%s，%d 个包），下次启动 VPN 时生效", cfg.Mode, len(cfg.Packages))
+		return nil
+	}
+
+	// 桌面端：仅持久化到 config.json（VpnService 是 Android 概念，运行不受影响）。
+	return s.savePerAppToConfig(cfg)
+}
+
+// savePerAppToConfig 把分应用代理配置合并写回 config.json（保留其他字段）。
+func (s *Service) savePerAppToConfig(cfg PerAppConfig) error {
+	srv, err := s.serverInstance()
+	if err != nil {
+		return err
+	}
+	st := srv.Status()
+	cur := st.Config
+	if cur == nil {
+		cur = core.DefaultConfig()
+	}
+	cur.PerAppMode = cfg.Mode
+	cur.PerAppPackages = cfg.Packages
+	return srv.SaveConfig(cur)
+}
+
+// ListInstalledApps 返回已安装应用列表（仅 Android；桌面端返回空切片）。
+// 反向 JNI 到 MainActivity.listInstalledApps()，只列声明 INTERNET 权限的
+// 应用并剔除自身包名（防路由死锁，见方案 §4.2）。
+func (s *Service) ListInstalledApps() []InstalledApp {
+	if runtime.GOOS == "android" {
+		return androidListInstalledApps()
+	}
+	return []InstalledApp{}
+}
+
+// readPerAppJSON 读取沙箱 perapp.json（缺失/损坏返回错误，调用方回退）。
+func readPerAppJSON(path string) (PerAppConfig, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return PerAppConfig{}, err
+	}
+	var p PerAppJSON
+	if err := json.Unmarshal(data, &p); err != nil {
+		return PerAppConfig{}, fmt.Errorf("解析 perapp.json 失败：%w", err)
+	}
+	return PerAppConfig{Mode: p.Mode, Packages: p.Packages}, nil
+}
+
+// writePerAppJSON 原子写沙箱 perapp.json（Java 侧 establish() 前读取）。
+func writePerAppJSON(path string, cfg PerAppConfig) error {
+	return atomicWriteFile(path, append(mustMarshalPerApp(cfg), '\n'))
+}
+
+// mustMarshalPerApp 序列化 PerAppConfig → PerAppJSON；失败 panic（纯内存操作，
+// 无失败路径——结构体字段均已校验）。
+func mustMarshalPerApp(cfg PerAppConfig) []byte {
+	data, err := json.Marshal(PerAppJSON{Mode: cfg.Mode, Packages: cfg.Packages})
+	if err != nil {
+		panic(fmt.Sprintf("序列化 perapp.json 失败：%v", err))
+	}
+	return data
 }
 
 // ---------------------------------------------------------------------------

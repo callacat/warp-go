@@ -102,6 +102,13 @@ static jstring callStaticStringMethod(JNIEnv* env, jclass cls, jmethodID mid) {
     return (*env)->CallStaticObjectMethod(env, cls, mid);
 }
 
+// listInstalledApps() → String：枚举已安装应用（声明 INTERNET 权限）为 JSON
+// 数组 [{package,label,system}]，供前端分应用代理选择器使用。失败返回空串，
+// 调用方（androidListInstalledApps）解析失败时回退空列表。
+static jmethodID getListInstalledAppsMethod(JNIEnv* env, jclass cls) {
+    return (*env)->GetStaticMethodID(env, cls, "listInstalledApps", "()Ljava/lang/String;");
+}
+
 // jstring → Go string 的 C 侧转换原语。JNIEnv 调用必须留在 C preamble
 // （cgo 不支持 Go 代码里 -> 运算符），与上方 getRequestStartMethod 等一致。
 static const char* jstringToChars(JNIEnv* env, jstring j, jboolean* isCopy) {
@@ -119,6 +126,7 @@ import "C"
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -171,6 +179,7 @@ var androidCtl struct {
 	stopM        C.jmethodID
 	openBrowserM C.jmethodID
 	exportM      C.jmethodID // exportDebugDiag（调试版）；nil = 未缓存/无此方法
+	listAppsM    C.jmethodID // listInstalledApps（分应用代理）
 	ready        bool
 }
 
@@ -433,14 +442,14 @@ func startVpnKernel(ctx context.Context, cancel context.CancelFunc, sandboxDir s
 			androidRuntime.started = false
 			androidRuntime.lastErr = err.Error()
 		}
-androidRuntime.mu.Unlock()
-	if current {
-		androidNotifyKernelFailed(name + "：" + err.Error())
+		androidRuntime.mu.Unlock()
+		if current {
+			androidNotifyKernelFailed(name + "：" + err.Error())
+		}
+		// debugdiag：装配失败也收尾落盘（release 版为 no-op）。
+		androidvpn.DebugStop()
+		androidExportDebugDiag()
 	}
-	// debugdiag：装配失败也收尾落盘（release 版为 no-op）。
-	androidvpn.DebugStop()
-	androidExportDebugDiag()
-}
 
 	// 装配完成前的最后一次取消检查：nativeStopVpn 可能已拆除了本实例
 	// （cancel 被调用）。此时不得再写入 androidRuntime（会复活已停止的
@@ -639,6 +648,7 @@ func Java_com_wails_app_MainActivity_nativeBridgeReady(env *C.JNIEnv, cls C.jcla
 	stopM := C.getRequestStopMethod(env, clsRef)
 	openBrowserM := C.getOpenBrowserMethod(env, clsRef)
 	exportM := C.getExportDiagMethod(env, clsRef)
+	listAppsM := C.getListInstalledAppsMethod(env, clsRef)
 	if unsafe.Pointer(startM) == nil || unsafe.Pointer(stopM) == nil || unsafe.Pointer(openBrowserM) == nil {
 		log.Println("⚠ nativeBridgeReady：找不到 requestStartVpn/requestStopVpn/openExternalBrowser 静态方法")
 		return -1
@@ -649,9 +659,10 @@ func Java_com_wails_app_MainActivity_nativeBridgeReady(env *C.JNIEnv, cls C.jcla
 	androidCtl.stopM = stopM
 	androidCtl.openBrowserM = openBrowserM
 	androidCtl.exportM = exportM
+	androidCtl.listAppsM = listAppsM
 	androidCtl.ready = true
 	androidCtl.mu.Unlock()
-	log.Println("✓ Android 反向 JNI 桥就绪（requestStartVpn/requestStopVpn/openExternalBrowser）")
+	log.Println("✓ Android 反向 JNI 桥就绪（requestStartVpn/requestStopVpn/openExternalBrowser/listInstalledApps）")
 	return 0
 }
 
@@ -679,12 +690,67 @@ func androidExportDebugDiag() string {
 	if chars == nil {
 		return ""
 	}
-defer C.releaseChars(env, js, chars)
+	defer C.releaseChars(env, js, chars)
 	uri := C.GoString(chars)
 	if uri != "" {
 		log.Printf("✓ 调试数据已导出：%s", uri)
 	}
 	return uri
+}
+
+// androidSelfPackage 是 warp-go 壳自身的包名。分应用代理必须把它从用户可选
+// 集合里剔除（选择器 UI 与 apply 层双保险，见方案 §4.2）：壳自身永远留在隧道
+// 内 + protectSocket 防环，防止用户把壳加进排除集导致壳流量改道物理网
+// （GitHub 下载/GEO 更新在国内直连会失败，属行为退化）。
+const androidSelfPackage = "com.wails.app"
+
+// androidListInstalledApps 请求 Java 侧枚举已安装应用（声明 INTERNET 权限的
+// 应用，见 MainActivity.listInstalledApps）为 JSON，解析为 InstalledApp 切片
+// 并剔除壳自身包名。桥未就绪/Java 失败/解析失败返回空切片（前端选择器显示
+// 空列表并可重试，不致命）。
+func androidListInstalledApps() []InstalledApp {
+	androidCtl.mu.Lock()
+	cls, mid, ready := androidCtl.cls, androidCtl.listAppsM, androidCtl.ready
+	androidCtl.mu.Unlock()
+	if !ready || unsafe.Pointer(cls) == nil || unsafe.Pointer(mid) == nil {
+		log.Println("⚠ listInstalledApps 桥未就绪（MainActivity 未初始化）")
+		return nil
+	}
+	var needsDetach C.int
+	env := C.getEnv(&needsDetach)
+	if env == nil {
+		log.Println("⚠ listInstalledApps：无法获取 JNIEnv")
+		return nil
+	}
+	defer C.releaseEnv(needsDetach)
+	js := C.callStaticStringMethod(env, cls, mid)
+	if unsafe.Pointer(js) == nil {
+		return nil
+	}
+	chars := C.jstringToChars(env, js, nil)
+	if chars == nil {
+		return nil
+	}
+	defer C.releaseChars(env, js, chars)
+	raw := C.GoString(chars)
+	if raw == "" {
+		return nil
+	}
+	var apps []InstalledApp
+	if err := json.Unmarshal([]byte(raw), &apps); err != nil {
+		log.Printf("⚠ 解析 listInstalledApps 结果失败：%v", err)
+		return nil
+	}
+	// 剔除壳自身：选择器里不该出现本应用（UI 层 + apply 层双保险）。
+	filtered := apps[:0]
+	for _, a := range apps {
+		if a.Package == androidSelfPackage {
+			continue
+		}
+		filtered = append(filtered, a)
+	}
+	log.Printf("✓ 已枚举 %d 个应用（剔除自身后）", len(filtered))
+	return filtered
 }
 
 // androidOpenExternalBrowser 请求 Java 侧用系统浏览器打开 URL（Android

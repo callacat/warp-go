@@ -25,6 +25,14 @@
         <intent>
             <action android:name="android.media.action.VIDEO_CAPTURE" />
         </intent>
+        <!-- 分应用代理（per-app）应用选择器：API 30+ 包可见性过滤下，声明
+             MAIN/LAUNCHER intent 即"可查询有启动器入口的应用"——恰好就是
+             选择器要列的集合（无 launcher 入口的纯后台/系统组件本就不该出现
+             在选择器里）。低版本自动忽略，无需版本分支。 -->
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
     </queries>
 
     <application
