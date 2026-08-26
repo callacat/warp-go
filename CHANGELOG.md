@@ -1077,7 +1077,7 @@
 - 前台服务通知渠道名 "Background work" → "warp-go VPN"。
 - CI `build-android` 增加 JNI 符号 Java↔Go 双侧 grep 断言。
 
-## [Unreleased] — v0.5.1 计划中
+## [v0.5.1] - 2026-08-01
 
 ### 修复
 
@@ -1151,10 +1151,6 @@
   解析逻辑单一来源。
 - Android 运行时文件在应用沙箱 `getFilesDir()`（Wails Android 存储路径），
   桌面保持执行目录行为（`gui/androidconfig.go` 路径分支）。
-
-## [Unreleased]
-
-- 无
 
 ## [v0.4.0] - 2026-08-01
 

@@ -1,7 +1,7 @@
 # AGENTS.md — warp-go 接手指南
 
 > 本文件供后续 Agent 快速了解项目。配合计划文档 `.omo/plans/warp-go-reinit-2026-07-31.md`（随进度更新）阅读。
-> 最后更新: 2026-08-07（v0.5.26）
+> 最后更新: 2026-08-26（v0.5.31 收尾：GUI 两修复 + 断联真根因闭环，详见 §6.5 M9.14/M9.15 与 §8 末两条事实）
 
 ## 1. 项目是什么
 
@@ -148,12 +148,16 @@ go test ./androidvpn/... ./gui/...                       # 决策逻辑 + androi
 | M9.10 Android 隧道目标 IP 边缘不可达 + 取消热加载 + 主题持久化修复（v0.5.24） | ✅ | **① Android 外网依旧不通（v0.5.24 决定性实验确证新根因）**：`TestIPEdgeProbe`（真实边缘 + 用户 reg.json）——隧道内 DoH 解析的 facebook IP（57.145.12.1）CONNECT 成功，Android 系统 DNS 解析的同一域名 IP（69.171.235.22）CONNECT hang 到 deadline。**WARP 边缘 CONNECT 的目标 IP 必须处于边缘网络视图**：域名路径用隧道内 DoH 解析（天然边缘可达），TUN 只给系统 DNS 的 IP → 边缘连不到 → 全挂。修复：`tunnel.ResolveDNS` 导出 + `androidvpn/dns.go` DNS 拦截服务器（sing-box 标准架构：拦截 UDP:53 → 隧道 DoH 解析 → IP→域名映射 → NewConnectionEx 还原域名走 DialTunnel）。9 宿主单测。**接线完成**：`core.Kernel.ResolveDNS`（dialer 接口扩展）+ `WarpVpnService.java addDnsServer(198.18.0.1)` + `androidbridge` 注入 `vpnCfg.TunnelDNS = kernel.ResolveDNS` + `NewPacketConnectionEx` 拦截 `198.18.0.1:53`。**② 取消 config.json 热加载（用户需求）**：删 `WatchConfig`/`applyConfigReload`/`configPollInterval`/`configFileState`/`stopWatch` 字段 + 3 测试；配置只在启动/显式保存读取，运行中修改需重启生效（**rules.txt 规则热重载保留**，独立功能）。根因：热加载每 2s 轮询回读磁盘，GUI 保存后被回写覆盖 → "GUI 改配置被自动重置"。**③ 主题持久化不生效 + GUI 配置重置**：`useTheme` effect（`[mode,systemDark]`）mount/OS 切换时用默认 "system" 写回 config.json 覆盖用户持久化主题，且触发整条 SaveConfig 链。修复：`useTheme.ts` 重写——mount 从 config.json 读取并应用持久化主题；只在用户显式点击（setMode）持久化，effect/OS 事件永不写文件。设置页文案同步（"重启后生效"）。`Server.SaveConfig` 同步内存快照保证 `GetConfig` 立即生效。 |
 | M9.11 Android v0.5.24 回归修复：direct 域名还原死循环 + DNS 拦截 drop（v0.5.25） | ✅ | **① 国内 direct 全挂（v0.5.24 回归）**：真机日志 `拨号失败 49.7.252.24:443：lookup obus-cn.dc.heytapmobi.com: canceled`。根因：v0.5.24 的 IP→域名还原在 `NewConnectionEx` **无条件**应用——direct 分支也被还原域名 → `net.Dialer` 物理解析 → 系统 DNS 又进 TUN → 环路 canceled。修复：`androidvpn/decision.go` 新增 `decideTunnelTarget` 纯函数——**域名还原只用于 proxy 分支**（隧道内部再次 DoH 解析，CONNECT 目标永远边缘可达），direct 分支保留原始 IP 拨号（该 IP 是隧道 DoH 解析出的真实 IP，物理同样可达）。3 回归用例。**② DNS 拦截解析失败静默 drop → 系统挂起/fallback 裸 IP**：真机日志 `DNS 拦截：nebula-api-cn.heytapmobi.com 解析失败：没有 TypeA 记录` + `UDP → 114.114.114.114:53（直连）` + `[2001::1]:443 CONNECT 超时`。根因：隧道 DoH 对部分域名无 A/AAAA 记录时 `HandleQuery` 返回 nil **drop**——Android DNS 挂起或 fallback 物理 DNS（114）→ 本地视图 IP → 映射 miss → 裸 IP 走隧道边缘不可达。修复：解析失败返回 **SERVFAIL**（保留原 Question/ID/OpCode），Android 立即回退下个 DNS。 |
 | M9.12 调试设施 debugdiag（v0.5.26） | ✅ | **build-tag 门控的遥测收集器**，诊断"Android 无法访问外网"但 CONNECT 隧道全建立。构建 tag：`-tags debugdiag` 启用（`androidvpn/debugdiag.go`）；正式版（CI `-tags production,android,with_gvisor` 不带 debugdiag）编译 `debugdiag_stub.go` no-op stub——**零 IO/内存/磁盘/网络，release 无调试痕迹**。数据写 `<沙箱根>/debugdiag/`（Android `getFilesDir()/debugdiag`）：`tunnels.tsv`（每关闭 TCP 隧道一行 `time seq host upBytes downBytes firstByteMs lifeMs err`，`firstByteMs=-1` = CONNECT 成功但无数据流回，关键诊断）；`udp.tsv`（每行 `time host kind bytes err`，kind = dns(53 非拦截漏直连)/quic(443 浏览器 HTTP/3 直连泄漏)/udp）；`tun0.tsv`（每 2s 一次 rx/tx 采样，区分"隧道建立但 payload 死"与"完全无流量"）。生命周期：VPN 启动 `androidvpn.DebugSetDir(root)`，停止/回滚 `DebugStop()`；导出走反向 JNI `MainActivity.exportDebugDiag()` 把 `debugdiag/` 打 zip 到 MediaStore Downloads（API 29+，`warp-go-debugdiag-<timestamp>.zip`），URI 打 GUI 日志页。CI 新工作流 `.github/workflows/android-debugdiag.yml`（workflow_dispatch）`-tags production,android,with_gvisor,debugdiag` + assembleRelease → artifact `warp-android-debugdiag`（versionCode 按 ref 派生，覆盖安装 v0.5.25+，`warp-release.p12` 签名不丢 reg.json）；tag v0.5.26 |
-| M9.13 隧道死连快速恢复（v0.5.27） | ⚠️ **未解决** | **新 debug 包（20260808）数据驱动**：`tunnels.tsv` 42s 内 3 次隧道批量死亡（33× `network is unreachable` 全来自 `[::]:X` 双栈 socket 发往 IPv4 边缘 162.159.198.2:4443；`00:05:47` `quic: transport closed` 同毫秒 8 条流）+ 隧道死瞬间并发境外流全 `read tcp <境外IP>:443: connection reset by peer`（dn=0）→ 浏览器"打不开外网"。修复（tunnel/masque.go + scanner/probe.go）：①**socket 地址族收紧**——`net.ListenUDP("udp")`（双栈 `[::]`，IPv4-mapped 走 v6 路由表 → 无 v6 主机 ENETUNREACH）改显式 **`udp4`/`udp6`**（生产 dial + scanner 同步）；②**connBundle.dead 标志**（atomic.Bool，并发安全）——`noteDeadStream`/运行期探测观测到连接级故障即置位，`currentConnection` 与 `establishCONNECT` 立即把后续请求加入重连航班，**消除死连接上 10s×2 CONNECT 白等**；③**拨号时国际出口探测** `probeInternationalEgress`（8.8.8.8:443 隧道内 CONNECT，5s 超时，失败换下一个边缘）；④**运行期活性探测** `egressProbeLoop`（20s 周期 + `probeFn` 注入 seam）。5 新单测全绿 + 本地/CI 全部通过 + v0.5.27 已发布（APK 21MB）。**但用户真机复测仍失败（境外流量打不开），2026-08-08 决定放弃继续修复**——CI 全绿 ≠ 真机解决，完整证据链与接手方向见下方"未解决问题交接" |
+| M9.13 隧道死连快速恢复（v0.5.27） | ⚠️ **未解决** | **新 debug 包（20260808）数据驱动**：`tunnels.tsv` 42s 内 3 次隧道批量死亡（33× `network is unreachable` 全来自 `[::]:X` 双栈 socket 发往 IPv4 边缘 162.159.198.2:4443；`00:05:47` `quic: transport closed` 同毫秒 8 条流）+ 隧道死瞬间并发境外流全 `read tcp <境外IP>:443: connection reset by peer`（dn=0）→ 浏览器"打不开外网"。修复（tunnel/masque.go + scanner/probe.go）：①**socket 地址族收紧**——`net.ListenUDP("udp")`（双栈 `[::]`，IPv4-mapped 走 v6 路由表 → 无 v6 主机 ENETUNREACH）改显式 **`udp4`/`udp6`**（生产 dial + scanner 同步）；②**connBundle.dead 标志**（atomic.Bool，并发安全）——`noteDeadStream`/运行期探测观测到连接级故障即置位，`currentConnection` 与 `establishCONNECT` 立即把后续请求加入重连航班，**消除死连接上 10s×2 CONNECT 白等**；③**拨号时国际出口探测** `probeInternationalEgress`（8.8.8.8:443 隧道内 CONNECT，5s 超时，失败换下一个边缘）；④**运行期活性探测** `egressProbeLoop`（20s 周期 + `probeFn` 注入 seam）。5 新单测全绿 + 本地/CI 全部通过 + v0.5.27 已发布（APK 21MB）。**但用户真机复测仍失败（境外流量打不开），2026-08-08 决定放弃继续修复**——CI 全绿 ≠ 真机解决，完整证据链与接手方向见下方"未解决问题交接"。**（2026-08-26 已由 M9.15 真根因修复关闭）** |
+| M9.14 Android 断联"退役风暴"缓解（阶段10，v0.5.28）+ 国内延迟治理（阶段11/12，v0.5.30） | ✅ | **① 阶段10（v0.5.28）连接退役风暴误杀在途流**：debugdiag 第二轮实证 6.25 分钟会话 59 条 QUIC 连接被本地 retire/reconnect（均 ~6s 一条），每条连坐 4-23 条流同毫秒全灭、79% 正常传输中——退役→失败→记窗→再退役自激循环。修复：`connectFailureRequiresReconnect` 恢复被丢弃的 `packetsBefore` 健康判定——CONNECT 交换期间连接仍在收包（`receivedPackets() > packetsBefore`）则失败纯属目标/单流问题，不累计观察窗不拆共享连接；真黑洞（交换期间无新包）仍按观察窗拆线。**② 阶段11（并入 v0.5.30）GEO 分流失效**：根因 = **APK 从未打包 GEO 库** + 国产网络 GitHub 首启下载失败 → `route.Engine` 静默降级（geoip/geosite=nil 只打 warning）→ `direct,geoip:cn` 永不命中 → 国内流量兜底走隧道。修复三件：CI 构建前下载 GEO 进 APK assets、`WarpVpnService` 首启复制到沙箱 geo/（仅缺失时不覆盖用户新版）；规则文件支持 `default:<action>` 显式兜底声明（规则文件优先于代码 hardcode）；`NewConnectionEx` 日志打印还原域名与 action=proxy/direct/reject 可观测。**③ 阶段12（v0.5.30）DNS 源分流**：国内网站 200-300ms 高延迟根因 = TUN DNS 拦截把国内域名也走隧道 DoH（1.1.1.1 海外解析视角）→ CDN 返回海外节点 → 判 direct 正确但直连目标是美国 IP。修复：`HandleQuery` 用 `route.Match(host)` 判定，命中 direct（geosite:cn/private 等）走**物理 DNS 直连解析**拿国内节点（Java 在 `establish()` 前捕获物理 DNS 经 JNI 注入 + config.json `physical_dns` 辅助 + 公共 DNS 兜底；物理 socket 必须 protect 防环路）；proxy/未命中仍走隧道 DoH；物理全失败回 SERVFAIL 不恶化。CI JNI 断言同步 `nativeStartVpn(int fd, String dnsList)` |
+| M9.15 GUI 两修复 + 断联真根因闭环 + v0.5.31 发布（2026-08-26） | ✅ | **① 夜间主题启动不持久**（recvtkxq）：`useTheme()` 唯一入口只挂载在 SettingsPage——持久层完好（config.json `theme_mode` + localStorage 双写），缺的只是启动时读取。修复：`ThemeContext` 挂 App 根组件唯一实例，设置页消费共享实例防双实例状态分叉（64300aa）；`index.html` localStorage 预上色内联脚本消除 React 挂载前首帧闪白。**② GEO 自动更新永不触发**（recvtkxq）：旧调度只有"文件缺失才下载"+"ticker 锚定进程启动须连续运行满整个周期"，GUI/Android 短会话数学上不可能到期。修复：`InitDefaults` 到期补跑（缺失或年龄 ≥ `geo_auto_update_days` 即更新）+ Start 守护改 `geoAutoUpdateLoop` 按 `.dat` mtime 跨进程累计等待、成功核对前移基线、失败 1h 最小间隔兜底重试（dda7587）。mtime 单源 = GUI「上次更新」展示值 + 调度基准。**③ 断联真根因**（recvtdS6，4f9cc48）：共享 H3 连接"每请求杀连接"，qlog 实验实锤连接寿命严格跟随请求节奏（探活 7s 时 5-23s 一拆）——技术细节见 §8 末尾事实条目。**④ 发布闭环**：CHANGELOG 定版 [v0.5.31] - 2026-08-26（f82b4e9 / tag v0.5.31），CI 三 job 全绿（Build and Release + Docker GHCR tag/main），Release 10 assets 核验齐全；三端部署验收通过（ImmortalWrt md5 一致运行正常 / CT103 service active 无 EOF 循环 / 东哥真机覆盖安装实测"基本没问题"）。**断联系列（v0.5.13→v0.5.27 九轮未果 + 阶段6/10 缓解）至此真根因关闭** |
 
 ---
 
 ### 未解决问题交接（2026-08-08）：Android 境外流量打不开（历经 v0.5.13→v0.5.27 共 9 轮修复未果）
 
+> **✅ 已解决（2026-08-26 关闭）**：真根因为共享 H3 连接"每请求杀连接"（4f9cc48，relay 本地收尾尾流被误判连接级错误，见 M9.15 与 §8 事实条目），v0.5.31 发布并经东哥真机验收通过。本节保留供归档参考。
+>
 > **状态（2026-08-16 更新）**：阶段6 已实施修复——**隧道重连自伤**。新 debugdiag 数据（72s 8 条 socket 代际、全部 `use of closed network connection` 本地拆线）锁定：共享 QUIC 连接被自身健康逻辑反复 retire，拖死所有在途并发流——探针单次失败即拆、单流非连接级错误即拆、单目标 CONNECT 非超时失败即拆，Android 上触发面（映射 miss 裸 IP 目标 + GMS/浏览器多并发流）远大于桌面，故桌面正常 Android 打不开。修复（`tunnel/client_conn.go` + `client_socks5.go`）：探针连续 2 次失败才 retire；`isConnectionLevelError` 类别化——真实连接级错误立即重连、裸 `net.ErrClosed` 跳过（他人已拆线）、其余走观察窗累计 2 次；`bundle.close` 补 reason 日志便于下次 debugdiag 归因。10 项单测 + 全量测试绿。**待真机验收**（东哥验收标准：真机打开境外网站 + warp=on + 批量死亡消失）。<br>阶段5 修复 — **QUIC:443 拦截**：浏览器 HTTP/3（QUIC:443）走 UDP 直连（`relayUDP` → 物理网络），运营商封 UDP/QUIC 直连 → 外网打不开。修复：在 TUN 栈 `NewPacketConnectionEx` 拦截 UDP:443，丢弃包让浏览器回退 TCP:443 → WARP 隧道（上游 warp-svc 只有 ConnectTcpProxy，不支持 CONNECT-UDP / RFC 9298，UDP 无法走隧道）。
 >
 > 以下为原交接信息（保留供参考）。
@@ -324,3 +328,24 @@ release 同名 tag 冲突），但期间 Agent 均提前报告"Android 版已成
   **nativeStartVpn 必须保持异步**（v0.5.9 ANR 教训）：Java 主线程同步装配 Kernel
   （拨号无限重试）会 5s ANR；只做轻量前置校验 + 返回 0"已受理"，装配进 goroutine，
   失败经 androidRuntime.lastErr 上报
+- **v0.5.31 断联真根因（2026-08-26，4f9cc48；后续勿再沿"网络封锁/边缘不稳/UDP QoS"方向排查断联）**：
+  relay 双向 `io.Copy` 收尾时 `tunnelConn.Close` 的 CancelRead 解除另一方向阻塞的 Read，
+  其 `*quic.StreamError` 经 http3 body.Read 的 `maybeReplaceError` 替换为
+  `*http3.Error`（**无 Unwrap**）→ `shouldReconnectH3` 的单流 reset 豁免失效 → 正常请求
+  收尾被计入流失败观察窗，阈值满即拆健康共享 H3 连接 → 其上全部活跃流（Telegram 长轮询等）
+  周期性中断。qlog 实证：连接寿命严格跟随请求节奏（探活 7s 时 5-23s 一拆），死亡时间与
+  CF edge 固定清理阈值一致。防御三件套：`tunnelConn.closing` 标志（本端 Close 后
+  `noteDeadStream` 一律 no-op——收尾尾流不参与连接生死判定）；`isLocalStreamTeardown`
+  分类（`Remote=false` + H3_NO_ERROR = 本地取消尾流不计数，对端 Remote=true 行为不变）；
+  流失败观察窗阈值独立 `streamFailureTargets=4`（原与 CONNECT 失败共用 2）。**教训**：
+  http3 错误经 maybeReplaceError 后丢失 Unwrap 链，连接级判定必须按
+  `(*http3.Error)` 的 Remote/ErrorCode 字段分类，不能依赖 errors.Is/As 找 quic.StreamError；
+  `noteDeadStream` 真触发 retire 前有 %T 类型日志可直接验证穿透错误类型。
+- **v0.5.31 GUI 两修复要点（2026-08-26，recvtkxq）**：① **主题**：`useTheme()` 只能在
+  App 根组件挂载一次（`ThemeContext` 共享给页面消费）——任何页面组件不得再自行调用，
+  双实例会状态分叉（OS 主题翻转时旧值回打）；首帧闪白由 `index.html` 内联预上色脚本负责
+  （React 挂载前同步打 `.dark`，含 legacy `warpgo-dark` key 兼容）。② **GEO 自动更新**：
+  `.dat` mtime 是唯一基准（GUI「上次更新」展示值 + 调度等待计算跨进程累计，SHA-1 去重
+  不刷 mtime 不空转）；"数据过期要更新"逻辑走 `InitDefaults`（GUI/Android 每次打开必经，
+  缺失或年龄 ≥ `geo_auto_update_days` 即更新）而非只靠 Start ticker——短会话永远到不了周期；
+  测试注入点 `geoUpdateFn`
