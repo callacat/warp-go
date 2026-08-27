@@ -1,3 +1,27 @@
+## [v0.6.0] - 2026-08-27
+
+### 功能（分应用代理，recvtpWe，东哥拍板 v1.0 方案）
+
+- **VpnService 按应用分流**（16 文件 +1237/-18，f69b370+9a4b6bb）：Android 端
+  新增 per-app proxy 能力——三种模式（off=全量代理与旧版一致 / allow=白名单仅
+  指定应用走代理 / disallow=黑名单排除指定应用），包名列表按声明 INTERNET 权限
+  枚举（`listInstalledApps`），WarpVpnService 按包名分流：
+  - `core/config.go`：新增 `per_app_proxy` 配置项（开关 + 模式 + 包名列表）
+    及序列化单测；
+  - `gui/service.go` / `androidbridge.go` / `androidctl_other.go`：后端接口
+    listInstalledApps 与配置读写桥；MainActivity 应用选择入口；
+    AndroidManifest 声明必要权限；
+  - 前端：SettingsPage 分应用代理设置区（三模式切换 + 保存并重连）+
+    PerAppPicker 底部弹层（已选置顶→第三方→系统分组、搜索过滤、壳自身
+    包名剔除）；本应用自身始终不进入代理列表（防路由死锁）。
+- **入口修复**（9a4b6bb）：Wails v3 Android runtime 不注入
+  `window._wails.environment` → `System.IsAndroid()` 在 Android 上恒 false
+  → 分应用代理 Card 入口不渲染。修复：去掉 isAndroid 门控，Card 始终
+  展示（桌面端 config 字段被忽略，无副作用）。
+- **真机验收**：东哥真机覆盖安装 warp-perapp-fixed.apk（9a4b6bb 构建）测试
+  基本成功；APK 经飞书协作群投递；CI Build and Release 全 job 全绿含
+  build-android；本地 `go test ./core/` 通过。
+
 ## [v0.5.31] - 2026-08-26
 
 ### 修复（GUI 两题：夜间主题启动不生效 + GEO 自动更新永不触发，东哥 2026-08-26 派单）
