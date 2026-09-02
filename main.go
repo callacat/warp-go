@@ -36,9 +36,12 @@ func usage() {
   -l <host:port>   mixed HTTP+SOCKS5 监听地址（默认 127.0.0.1:40000，可被 config.json 覆盖）
   -user <用户名>   SOCKS5（RFC 1929）/ HTTP Basic 认证用户名；必须同时给出 -user 和 -pass 才启用认证
   -pass <密码>     认证密码
-  -ip <取值>       连接哪个边缘（默认 4）：
-                     4            注册信息中的 IPv4 边缘
-                     6            注册信息中的 IPv6 边缘
+  -ip <取值>       连接哪个边缘（默认 auto）：
+                     auto         同时用注册信息的 IPv4 与 IPv6 边缘做候选，
+                                  启动与运行中逐个实测，失败自动切到下一候选
+                                  （含跨地址族；连续 3 轮全失败仍进长退避）
+                     4            只用注册信息中的 IPv4 边缘
+                     6            只用注册信息中的 IPv6 边缘
                      <host:port>  改为连接指定地址，例如 162.159.198.2:4500、
                                   [2606:4700:103::2]:443、example.com:443
                    它决定的是"如何到达边缘"，不限制隧道内能访问什么 —— 目标
@@ -76,7 +79,7 @@ func usage() {
 
 示例：
   warp -reg                               注册（首次使用）
-  warp                                    用已保存的注册信息运行
+  warp                                    用已保存的注册信息运行（自动测试 IPv4/IPv6 边缘）
   warp -ip 6                              通过 IPv6 连接边缘
   warp -ip 162.159.198.2:4500             指定边缘地址与端口
   warp -ip example.com:443                通过域名连接自定义边缘
@@ -120,7 +123,7 @@ func main() {
 		listen = flag.String("l", "", "mixed HTTP+SOCKS5 监听地址 host:port（默认 127.0.0.1:40000，可被 config.json 覆盖）")
 		user   = flag.String("user", "", "SOCKS5/HTTP 认证用户名（与 -pass 同时给出才启用认证）")
 		pass   = flag.String("pass", "", "SOCKS5/HTTP 认证密码（与 -user 同时给出才启用认证）")
-		ip     = flag.String("ip", "4", "WARP 边缘：4、6，或显式 host:port")
+		ip     = flag.String("ip", core.EdgeIPAuto, "WARP 边缘：auto（默认，自动测试 IPv4/IPv6）、4、6，或显式 host:port")
 		reg    = flag.Bool("reg", false, "尚未注册时执行注册，然后退出")
 		del    = flag.Bool("del", false, "向 API 注销并删除本地注册信息")
 
