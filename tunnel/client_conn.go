@@ -199,6 +199,12 @@ type MasqueClient struct {
 	reconnectMu     sync.Mutex
 	reconnectFlight *reconnectFlight
 
+	// retry 是重连航班的重试节奏（连续 dialRoundFailureLimit 轮全失败 →
+	// 长退避静默，见 dial_retry.go）。仅 runReconnect 触碰（singleflight
+	// 保证同一时刻至多一个航班），无需加锁。装配循环的节奏独立在
+	// NewMasqueClientContext 内局部持有。
+	retry dialRetryPolicy
+
 	// Shared HTTP/2 DoH connection; created on first lookup, replaced when a
 	// query finds it unusable. dohDial coalesces cold-start dials so a burst of
 	// concurrent lookups establishes one connection rather than one each.
@@ -309,15 +315,27 @@ func NewMasqueClientContext(ctx context.Context, edgeAddrs []string, tlsConfig *
 	// not kill the process. The loop runs until dial succeeds or the process
 	// receives a signal (SIGINT/SIGTERM kills the process by default before the
 	// signal handler is installed below).
-	backoff := reconnectRetryInitial
+	//
+	// 连续 dialRoundFailureLimit 轮全失败 → 切入 retryLongBackoff 长退避并
+	// 静默逐端口过程日志（recvu2HKHM5zIj：边缘全端口不可达时旧逻辑每 5s 一轮
+	// 紧循环刷 journal，CT103 连刷 4 天）。
+	var retry dialRetryPolicy
+	backoff := time.Duration(0)
 	for {
-		bundle, err := c.dial(ctx)
+		bundle, err := c.dial(ctx, retry.backing())
 		if err == nil {
 			c.cur = bundle
 			go c.egressProbeLoop()
 			return c, nil
 		}
-		log.Printf("MASQUE 连接失败（%v），%s 后重试 ...", err, backoff)
+		wait, firstBackoff := retry.afterFailure(backoff)
+		if firstBackoff {
+			log.Printf("MASQUE 连续 %d 轮连接失败，进入长退避：每 %s 低频探测一次（本轮错误：%v）",
+				retry.rounds, retryLongBackoff, err)
+		} else if !retry.backing() {
+			log.Printf("MASQUE 连接失败（%v），%s 后重试 ...", err, wait)
+		}
+		backoff = wait
 		timer := time.NewTimer(backoff)
 		select {
 		case <-timer.C:
@@ -332,31 +350,32 @@ func NewMasqueClientContext(ctx context.Context, edgeAddrs []string, tlsConfig *
 			lifeStop()
 			return nil, context.Cause(ctx)
 		}
-		if backoff < reconnectRetryMax {
-			backoff *= 2
-			if backoff > reconnectRetryMax {
-				backoff = reconnectRetryMax
-			}
-		}
 	}
 }
 
 // dialAddr tries each candidate edge address in turn, starting from the one that
 // last worked, and returns the first connection that reaches H3 SETTINGS AND
 // passes the international egress probe.
-func (c *MasqueClient) dial(ctx context.Context) (*connBundle, error) {
+//
+// quiet 抑制逐候选的过程日志（QUIC 拨号/不可达/出口探测失败）：长退避期的
+// 低频探测轮不刷这些重复行——CT103 事故（recvu2HKHM5zIj）里 journal 正是被
+// 它们以每 1~2 秒一条的频率连刷 4 天。汇总错误仍经返回值带给调用方，故障期
+// 边界（进入退避/恢复）由拨号循环各自打一条。
+func (c *MasqueClient) dial(ctx context.Context, quiet bool) (*connBundle, error) {
 	var errs []string
 	n := len(c.edgeAddrs)
 	for i := 0; i < n; i++ {
 		idx := (c.addrIdx + i) % n
 		addr := c.edgeAddrs[idx]
 
-		bundle, err := c.dialAddr(ctx, addr)
+		bundle, err := c.dialAddr(ctx, addr, quiet)
 		if err == nil {
 			// 国际出口探测：验证该边缘能否连通境外目标。
 			// 避免国内边缘节点国际出口受限/故障（握手成功但境外流量被重置）。
 			if err := c.probeEgress(ctx, bundle); err != nil {
-				log.Printf("边缘 %s 国际出口探测失败（%v），尝试下一个 ...", addr, err)
+				if !quiet {
+					log.Printf("边缘 %s 国际出口探测失败（%v），尝试下一个 ...", addr, err)
+				}
 				bundle.close("egress probe failed")
 				errs = append(errs, fmt.Sprintf("%s: egress probe failed: %v", addr, err))
 				continue
@@ -378,7 +397,9 @@ func (c *MasqueClient) dial(ctx context.Context) (*connBundle, error) {
 		if unroutableFamily(err) {
 			break
 		}
-		log.Printf("边缘 %s 不可达（%v），尝试下一个端口 ...", addr, err)
+		if !quiet {
+			log.Printf("边缘 %s 不可达（%v），尝试下一个端口 ...", addr, err)
+		}
 	}
 	return nil, fmt.Errorf("所有边缘地址均失败：%s", strings.Join(errs, "; "))
 }
@@ -520,8 +541,10 @@ func (c *MasqueClient) handleProbeFailure(bundle *connBundle, err error) {
 	_ = c.reconnect(ctx, bundle)
 }
 
-func (c *MasqueClient) dialAddr(ctx context.Context, edgeAddr string) (*connBundle, error) {
-	log.Printf("QUIC 拨号 %s（SNI=%s）...", edgeAddr, c.tlsConfig.ServerName)
+func (c *MasqueClient) dialAddr(ctx context.Context, edgeAddr string, quiet bool) (*connBundle, error) {
+	if !quiet {
+		log.Printf("QUIC 拨号 %s（SNI=%s）...", edgeAddr, c.tlsConfig.ServerName)
+	}
 
 	udpAddr, err := net.ResolveUDPAddr("udp", edgeAddr)
 	if err != nil {
@@ -781,9 +804,13 @@ func (c *MasqueClient) reconnect(ctx context.Context, stale *connBundle) error {
 }
 
 func (c *MasqueClient) runReconnect(flight *reconnectFlight) {
-	dial := c.dial
-	if c.dialFn != nil {
-		dial = c.dialFn
+	// dialFn 测试缝：注入时忽略 quiet（测试只关心成功/失败结果，不关心
+	// 日志节奏），签名保持单参以免牵连 12+ 处测试注入点。
+	dial := func(ctx context.Context, quiet bool) (*connBundle, error) {
+		if c.dialFn != nil {
+			return c.dialFn(ctx)
+		}
+		return c.dial(ctx, quiet)
 	}
 
 	var err error
@@ -791,10 +818,15 @@ func (c *MasqueClient) runReconnect(flight *reconnectFlight) {
 	// 退避：拆线瞬间新连接尽快就位，缩短风暴窗口内导航的等待时间（debugdiag：
 	// 退役→重建窗口内浏览器超时 refused 全聚在此时段）。singleflight 保证
 	// 同一时刻只有一个 dial，不会退避归零引发拨号风暴。
+	//
+	// 连续 dialRoundFailureLimit 轮全失败 → 切入 retryLongBackoff 长退避并
+	// 静默逐端口过程日志（recvu2HKHM5zIj：CT103 边缘全端口不可达时旧逻辑
+	// 每 5s 一轮紧循环刷 journal 4 天）。成功后 retry.reset()：故障期结束，
+	// 下次拆线从快速节奏重新开始。
 	backoff := time.Duration(0)
 	for {
 		var bundle *connBundle
-		bundle, err = dial(c.lifeCtx)
+		bundle, err = dial(c.lifeCtx, c.retry.backing())
 		if err == nil && bundle == nil {
 			err = errors.New("边缘拨号返回了空连接")
 		}
@@ -815,6 +847,7 @@ func (c *MasqueClient) runReconnect(flight *reconnectFlight) {
 				old.close("replaced")
 				c.invalidateDoHBundle(old)
 				log.Println("HTTP/3 连接已重建")
+				c.retry.reset()
 			}
 			break
 		}
@@ -827,7 +860,14 @@ func (c *MasqueClient) runReconnect(flight *reconnectFlight) {
 		// dial storm from concurrent SOCKS requests and means the client heals as
 		// soon as connectivity returns, even if the request that noticed the outage
 		// has already timed out.
-		log.Printf("HTTP/3 重连失败（%v），%s 后重试", err, backoff)
+		wait, firstBackoff := c.retry.afterFailure(backoff)
+		if firstBackoff {
+			log.Printf("HTTP/3 连续 %d 轮重连失败，进入长退避：每 %s 低频探测一次（本轮错误：%v）",
+				c.retry.rounds, retryLongBackoff, err)
+		} else if !c.retry.backing() {
+			log.Printf("HTTP/3 重连失败（%v），%s 后重试", err, wait)
+		}
+		backoff = wait
 		timer := time.NewTimer(backoff)
 		select {
 		case <-timer.C:
@@ -837,14 +877,6 @@ func (c *MasqueClient) runReconnect(flight *reconnectFlight) {
 		}
 		if c.lifeCtx.Err() != nil {
 			break
-		}
-		if backoff == 0 {
-			backoff = reconnectRetryInitial
-		} else if backoff < reconnectRetryMax {
-			backoff *= 2
-			if backoff > reconnectRetryMax {
-				backoff = reconnectRetryMax
-			}
 		}
 	}
 
