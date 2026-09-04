@@ -1,6 +1,10 @@
 package tunnel
 
 import (
+	"context"
+	"crypto/tls"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -117,5 +121,86 @@ func TestEscalateBackoff(t *testing.T) {
 		if got := escalateBackoff(tt.prev); got != tt.want {
 			t.Fatalf("escalateBackoff(%v) 用例 %d：期望 %v，得到 %v", tt.prev, i, tt.want, got)
 		}
+	}
+}
+
+// ---- auto 跨族候选切换（recvu4IV207cHy）----
+//
+// dial 本身的单候选拨号走真实 dialAddr（dialFn 缝在重连航班层，dial 内部不经
+// 它），测试用 TEST-NET/文档前缀黑洞地址：拨号必失败（快速 ENETUNREACH 或
+// 2s perAddrDialTimeout 超时，环境相关），控制流与生产一致，顺序经日志断言。
+
+// TestDialCrossFamilySwitchOrder 锁定 auto 交错候选表的轮内行为：v4 失败后
+// 跨到 v6 候选续拨（不再 break 整轮），跨族边界日志整轮恰 1 条——族序列
+// v4,v6,v4,v6 有 3 次族边界，多播就是刷屏（CT103 教训）。
+func TestDialCrossFamilySwitchOrder(t *testing.T) {
+	c := newTestMasqueClient(t)
+	c.tlsConfig = &tls.Config{ServerName: "test"}
+	c.edgeAddrs = []string{
+		"192.0.2.1:443", "[2001:db8::1]:443",
+		"192.0.2.1:500", "[2001:db8::1]:500",
+	}
+	readLog := captureLog(t)
+
+	_, err := c.dial(context.Background(), false)
+	if err == nil {
+		t.Fatal("黑洞候选全部失败时应返回错误")
+	}
+	out := readLog()
+	if got := strings.Count(out, "IPv4 边缘不可达 → 尝试 IPv6 边缘"); got != 1 {
+		t.Fatalf("跨族边界日志应恰 1 条，得到 %d（全文：%s）", got, out)
+	}
+	// v6 候选必须都被拨打（v4 失败后跨族续拨；族死只针对无路由族）。
+	for _, addr := range []string{"[2001:db8::1]:443", "[2001:db8::1]:500"} {
+		if !strings.Contains(out, "QUIC 拨号 "+addr) {
+			t.Fatalf("v6 候选 %s 未被拨打（全文：%s）", addr, out)
+		}
+	}
+	if !strings.Contains(out, "QUIC 拨号 192.0.2.1:443") {
+		t.Fatalf("首个 v4 候选应最先拨打（全文：%s）", out)
+	}
+	if i := strings.Index(out, "QUIC 拨号 192.0.2.1:443"); i >= 0 {
+		if j := strings.Index(out, "QUIC 拨号 [2001:db8::1]:443"); j >= 0 && j < i {
+			t.Fatalf("拨打顺序应先 v4 后 v6（全文：%s）", out)
+		}
+	}
+}
+
+// TestDialFamilyDeadJudgement 锁定族判定与族名工具：IPv4/IPv6 字面量族归属
+// 正确、族名展示正确、ENETUNREACH 判为族级不可路由（族死跳过的触发源）。
+func TestDialFamilyDeadJudgement(t *testing.T) {
+	if v4, ok := familyOf("192.0.2.1:443"); !ok || !v4 {
+		t.Fatalf("192.0.2.1:443 应判定为 IPv4（ok=true），得到 v4=%v ok=%v", v4, ok)
+	}
+	if v4, ok := familyOf("[2001:db8::1]:443"); !ok || v4 {
+		t.Fatalf("[2001:db8::1]:443 应判定为 IPv6，得到 v4=%v ok=%v", v4, ok)
+	}
+	if _, ok := familyOf("invalid.invalid:443"); ok {
+		t.Fatal("无法解析的地址应返回 ok=false（族未知）")
+	}
+	if familyName(true) != "IPv4" || familyName(false) != "IPv6" {
+		t.Fatalf("族名错误：%q/%q", familyName(true), familyName(false))
+	}
+	if !unroutableFamily(syscall.ENETUNREACH) || !unroutableFamily(syscall.EHOSTUNREACH) {
+		t.Fatal("ENETUNREACH/EHOSTUNREACH 应判为族不可路由")
+	}
+}
+
+// TestDialQuietSuppressesFamilySwitchLog 锁定 quiet（长退避期）下跨族边界
+// 日志同样静默——退避期连边界日志也必须静默（任务书硬性要求），逐候选过程
+// 日志与边界日志全部不出。
+func TestDialQuietSuppressesFamilySwitchLog(t *testing.T) {
+	c := newTestMasqueClient(t)
+	c.tlsConfig = &tls.Config{ServerName: "test"}
+	c.edgeAddrs = []string{"192.0.2.1:443", "[2001:db8::1]:443"}
+	readLog := captureLog(t)
+
+	_, _ = c.dial(context.Background(), true)
+	out := readLog()
+	if strings.Contains(out, "边缘不可达 → 尝试") {
+		t.Fatalf("quiet 下不应有跨族边界日志（全文：%s）", out)
+	}
+	if strings.Contains(out, "QUIC 拨号") {
+		t.Fatalf("quiet 下不应有逐候选过程日志（全文：%s）", out)
 	}
 }
