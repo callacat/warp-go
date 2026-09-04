@@ -76,8 +76,8 @@ type Options struct {
 	Username string
 	Password string
 
-	// EdgeIP 选择连接哪个边缘："4" / "6" 取注册信息中对应地址族，或显式
-	// host:port（CLI -ip）。
+	// EdgeIP 选择连接哪个边缘："auto"（默认，无旗标时由 New 填充）跨族候选
+	// 自动实测切换，"4"/"6" 只用对应地址族，或显式 host:port（CLI -ip）。
 	EdgeIP string
 
 	// RulesPath 覆盖 config.json 的 rules_path（CLI -route）。
@@ -86,6 +86,8 @@ type Options struct {
 	// SysProxy 覆盖 config.json 的 enable_system_proxy（CLI -sysproxy）。
 	// nil 表示不覆盖（按 config.json）；非 nil 时强制启用/禁用。
 	SysProxy *bool
+	// FrontProxyOverride 覆盖 config.json 的 front_proxy.enabled（CLI -front-proxy）。
+	FrontProxyOverride *bool
 
 	// Scan 启动前扫描 WARP 边缘全段并选用最低延迟的端点（CLI -scan 族）。
 	Scan            bool
@@ -127,7 +129,8 @@ type Server struct {
 }
 
 // New 创建 Server 并填充 Options 默认值。默认 StateFile 为 reg.json、
-// EdgeIP 为 "4"；扫描参数沿用 CLI 默认（45s 总超时、3s 单探针、top-4）。
+// EdgeIP 为 "auto"（跨族候选自动实测切换，见 core.EdgeIPAuto）；扫描参数
+// 沿用 CLI 默认（45s 总超时、3s 单探针、top-4）。
 //
 // 所有运行时文件路径（config.json / reg.json / rules.txt / geo）锚定到
 // 执行根目录下的 config/ 子目录（见 resolveExecPath）。Android（DataDir 非空）
@@ -140,7 +143,7 @@ func New(opts Options) *Server {
 		opts.StateFile = defaultStateFile
 	}
 	if opts.EdgeIP == "" {
-		opts.EdgeIP = "4"
+		opts.EdgeIP = EdgeIPAuto
 	}
 	if opts.ScanTimeout == 0 {
 		opts.ScanTimeout = 45 * time.Second
@@ -453,6 +456,10 @@ func (s *Server) Start(ctx context.Context) error {
 			edgeAddrs = runEndpointScan(s.opts.EdgeIP == "6", edgeAddrs, regData, tlsConfig,
 				s.opts.ScanCIDR, s.opts.ScanPorts, s.opts.ScanConcurrency,
 				s.opts.ScanTimeout, s.opts.ScanPerProbe, s.opts.ScanTop)
+		case EdgeIPAuto:
+			// auto 自带拨号层跨族实测（启动逐候选 + 运行中自动切换），再叠
+			// 全段扫描只会让候选表膨胀、拖慢冷启动，二者取一。
+			log.Printf("⚠ -scan 与 -ip auto 不叠加（auto 已含启动/运行中边缘实测），本次扫描被忽略")
 		default:
 			log.Printf("⚠ -ip %q 指定了显式端点，-scan 被忽略（显式端点优于自动优选）", s.opts.EdgeIP)
 		}
@@ -482,6 +489,20 @@ func (s *Server) Start(ctx context.Context) error {
 		Router:     kernel.Route,
 		TunnelDial: kernel.DialTunnel,
 	})
+
+	// front proxy 覆盖（Options.FrontProxyOverride 优先于 config.json）
+	if s.opts.FrontProxyOverride != nil {
+		cfg.FrontProxy.Enabled = *s.opts.FrontProxyOverride
+		if *s.opts.FrontProxyOverride {
+			log.Println("✓ front proxy 已通过 -front-proxy 旗标启用")
+		}
+	}
+	// 互斥：front proxy 开启 → EdgeIP 回退 auto（忽略用户指定的优选 IP/边缘）
+	// CONNECT 目标被改写成 CF 优选裸 IP → 百度 503（实锤坑）
+	if cfg.FrontProxy.Enabled && s.opts.EdgeIP != EdgeIPAuto {
+		log.Printf("⚠ front proxy 开启 → EdgeIP 从 %q 回退 auto（互斥：优选 IP 与百度代理冲突）", s.opts.EdgeIP)
+		s.opts.EdgeIP = EdgeIPAuto
+	}
 
 	// 系统代理（Options.SysProxy 优先于 config.json 的 enable_system_proxy）。
 	if sysProxy := cfg.EnableSystemProxy; s.opts.SysProxy == nil || *s.opts.SysProxy == sysProxy {
@@ -849,14 +870,19 @@ func (s *Server) ScanEdgesFamily(ctx context.Context, ipMode string) ([]string, 
 	}
 
 	// 默认扫注册信息给出的地址族；ipMode 参数（"4"/"6"）优先，
-	// 显式 EdgeIP 为 host:port 时用它的地址族段。
+	// 显式 EdgeIP 为 host:port 时用它的地址族段。EdgeIP 为 auto 时按
+	// 注册信息的 IPv4（缺失退 IPv6）——扫描本身按单族段进行，auto 的
+	// 跨族实测由拨号层负责，GUI 扫描按钮在此保持族语义。
 	v6 := false
 	edgeSpec := ipMode
 	if edgeSpec == "" {
 		edgeSpec = s.opts.EdgeIP
 	}
-	if edgeSpec == "" {
+	if edgeSpec == "" || edgeSpec == EdgeIPAuto {
 		edgeSpec = "4"
+		if regData.EndpointV4 == "" && regData.EndpointV6 != "" {
+			edgeSpec = "6"
+		}
 	}
 	fallback, err := scanFallback(regData, edgeSpec)
 	if err != nil {

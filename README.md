@@ -118,7 +118,7 @@ warp —— Cloudflare WARP 客户端（MASQUE over QUIC/HTTP-3，mixed HTTP+SOC
   -l <host:port>   mixed 监听地址（默认 127.0.0.1:40000，可被 config.json 覆盖）
   -user <用户名>   SOCKS5（RFC 1929）/ HTTP Basic 认证用户名；同时给出 -user 和 -pass 才启用
   -pass <密码>     认证密码
-  -ip <取值>       连接哪个边缘（默认 4）：4 / 6 / <host:port>
+  -ip <取值>       连接哪个边缘（默认 auto：自动测试 IPv4/IPv6 并失败切换）：auto / 4 / 6 / <host:port>
 
 配置（config/config.json，位于运行目录下的 config/ 子目录，自动创建；优先级：旗标 > config.json > 默认值）：
   -config <路径>   配置文件路径（默认 config/config.json；缺失时自动生成默认模板）

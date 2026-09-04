@@ -357,16 +357,59 @@ func NewMasqueClientContext(ctx context.Context, edgeAddrs []string, tlsConfig *
 // last worked, and returns the first connection that reaches H3 SETTINGS AND
 // passes the international egress probe.
 //
-// quiet 抑制逐候选的过程日志（QUIC 拨号/不可达/出口探测失败）：长退避期的
-// 低频探测轮不刷这些重复行——CT103 事故（recvu2HKHM5zIj）里 journal 正是被
-// 它们以每 1~2 秒一条的频率连刷 4 天。汇总错误仍经返回值带给调用方，故障期
+// quiet 抑制逐候选的过程日志（QUIC 拨号/不可达/出口探测失败/跨族切换）：长退
+// 避期的低频探测轮不刷这些重复行——CT103 事故（recvu2HKHM5zIj）里 journal 正是
+// 被它们以每 1~2 秒一条的频率连刷 4 天。汇总错误仍经返回值带给调用方，故障期
 // 边界（进入退避/恢复）由拨号循环各自打一条。
+//
+// 候选表可以是跨地址族的（core 的 auto 模式，recvu4IV207cHy）：族内失败按端口
+// 逐个切换；整族判死（无路由或族内全部失败）时后续该族候选直接跳过，跨到另一
+// 族。切换只播报一条边界日志（本轮第一条跨族边界），族内逐端口过程照旧——
+// 轮内遍历不构成无限重试，轮间节奏仍由 dialRetryPolicy 管（不变）。
 func (c *MasqueClient) dial(ctx context.Context, quiet bool) (*connBundle, error) {
 	var errs []string
 	n := len(c.edgeAddrs)
+
+	// 地址族统计（true=IPv4）：族死/族败计数按族归并。解析失败的候选不参与
+	// 统计，与原行为一致（交给拨号路径报错）。
+	familyDead := map[bool]bool{}
+	familyFailed := map[bool]int{}
+	familyTotal := map[bool]int{}
+	for _, addr := range c.edgeAddrs {
+		if udpAddr, err := net.ResolveUDPAddr("udp", addr); err == nil {
+			familyTotal[udpAddr.IP.To4() != nil]++
+		}
+	}
+
+	switched := false // 本轮跨族边界日志只播报第一条
 	for i := 0; i < n; i++ {
 		idx := (c.addrIdx + i) % n
 		addr := c.edgeAddrs[idx]
+
+		// 族判定：解析失败的候选视为「族未知」——跳过全部族逻辑（族死跳过/
+		// 族败计数/跨族边界），照走 dialAddr 让它按原路径打「QUIC 拨号」并
+		// 报解析错误（TestBootstrapLongBackoffStopsDialing 锁定的日志节奏）。
+		fam, famKnown := familyOf(addr)
+		if famKnown {
+			if familyDead[fam] {
+				// 本族已判死（无路由 / 族内全部失败）：同族剩余候选只是端口
+				// 不同，逐个白拨每端口 2s 结论必然相同——跳过，把时间留给
+				// 另一族。
+				errs = append(errs, fmt.Sprintf("%s: 地址族已判死，跳过", addr))
+				familyFailed[fam]++
+				continue
+			}
+			// 跨地址族边界：上一候选与本候选族不同，且上一族确有失败——这是
+			// auto 模式的核心切换点（v4 全挂 → v6）。族序列 v4,v6,v4,v6 理论
+			// 上有多次边界，只播报第一条：族全灭的结论探一个端口即可得出，
+			// 后几次信息量重复，多条只会在故障期刷屏（CT103 教训）。
+			if prevFam, prevKnown := familyOf(c.edgeAddrs[(idx+n-1)%n]); !switched && n > 1 && prevKnown && prevFam != fam && familyFailed[prevFam] > 0 {
+				if !quiet {
+					log.Printf("%s 边缘不可达 → 尝试 %s 边缘", familyName(prevFam), familyName(fam))
+				}
+				switched = true
+			}
+		}
 
 		bundle, err := c.dialAddr(ctx, addr, quiet)
 		if err == nil {
@@ -378,30 +421,57 @@ func (c *MasqueClient) dial(ctx context.Context, quiet bool) (*connBundle, error
 				}
 				bundle.close("egress probe failed")
 				errs = append(errs, fmt.Sprintf("%s: egress probe failed: %v", addr, err))
+				if famKnown {
+					familyFailed[fam]++
+				}
 				continue
 			}
 			c.addrIdx = idx
 			return bundle, nil
 		}
 		errs = append(errs, fmt.Sprintf("%s: %v", addr, err))
+		if famKnown {
+			familyFailed[fam]++
+		}
 
 		// A canceled caller means give up entirely, not try the next port.
 		if ctx.Err() != nil {
 			break
 		}
-		// The remaining candidates differ only by port, so a failure that comes
-		// from this host having no route for the address family at all will
-		// repeat identically. Stop instead of burning the per-address timeout
-		// once per port — seven ports would otherwise take a minute to report a
-		// condition already known after the first.
-		if unroutableFamily(err) {
-			break
+		// 本机对该地址族无路由（ENETUNREACH 等）：同族剩余候选只是端口不同，
+		// 结果必然相同——标记族死跳过它们。原实现此处 break 整轮，在跨族候选
+		// 表（auto）下会把可达的另一族一起放弃（v4 无路由 → v6 也不试了）；
+		// 单族候选表（显式 -ip 4/6）下行为与 break 等价（无另一族可去）。
+		if famKnown && unroutableFamily(err) {
+			if !quiet {
+				log.Printf("%s 边缘不可达 → 尝试 %s 边缘", familyName(fam), familyName(!fam))
+			}
+			familyDead[fam] = true
+			switched = true
 		}
 		if !quiet {
 			log.Printf("边缘 %s 不可达（%v），尝试下一个端口 ...", addr, err)
 		}
 	}
 	return nil, fmt.Errorf("所有边缘地址均失败：%s", strings.Join(errs, "; "))
+}
+
+// familyOf 报告候选地址的地址族（v4=true）。ok=false 表示地址无法解析（族
+// 未知）：调用方对这类候选跳过族逻辑，让 dialAddr 按原路径报解析错误。
+func familyOf(addr string) (v4, ok bool) {
+	udpAddr, err := net.ResolveUDPAddr("udp", addr)
+	if err != nil {
+		return true, false
+	}
+	return udpAddr.IP.To4() != nil, true
+}
+
+// familyName 返回地址族展示名（切换边界日志用）。
+func familyName(v4 bool) string {
+	if v4 {
+		return "IPv4"
+	}
+	return "IPv6"
 }
 
 // unroutableFamily reports whether err means this host cannot reach the address

@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/base64"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -145,38 +146,139 @@ func TestResolveEdgeAddrsExplicitSpec(t *testing.T) {
 	}
 }
 
-// TestResolveEdgeAddrsBothEmptyFallsBackToIPv4 验证 cfg.EdgeAddr 与 optsEdgeIP
-// 均为空时回落注册信息 IPv4 端点（Android 桥的常态；v0.5.9 修复前落入
-// default 分支把空串当显式端点，报 "-ip \"\" 既不是 4 或 6 ..."）。
-func TestResolveEdgeAddrsBothEmptyFallsBackToIPv4(t *testing.T) {
+// TestResolveEdgeAddrsBothEmptyAutoCrossFamily 验证 cfg.EdgeAddr 与 optsEdgeIP
+// 均为空时进入 auto 模式：候选 = v4:443 → v6:443 → v4 其余 → v6 其余（Android
+// 桥的常态；v0.5.9 曾把双空当显式端点报错，v0.5.9~本版前回落 IPv4——CT103 上
+// IPv4 被 QoS 时该默认把隧道一起带死，recvu4IV207cHy 改为跨族 auto）。
+func TestResolveEdgeAddrsBothEmptyAutoCrossFamily(t *testing.T) {
 	reg := &registration.Registration{
 		EndpointV4:    "162.159.198.2",
+		EndpointV6:    "2606:4700:103::2",
+		EndpointPorts: []int{443, 500, 1701, 4500},
+	}
+	got, err := ResolveEdgeAddrs(DefaultConfig(), "", "", reg)
+	if err != nil {
+		t.Fatalf("双空 auto 失败：%v", err)
+	}
+	want := []string{
+		"162.159.198.2:443", "[2606:4700:103::2]:443", // 两族 443 优先
+		"162.159.198.2:500", "[2606:4700:103::2]:500",
+		"162.159.198.2:1701", "[2606:4700:103::2]:1701",
+		"162.159.198.2:4500", "[2606:4700:103::2]:4500",
+	}
+	if diff := cmpEdges(got, want); diff != "" {
+		t.Errorf("双空 auto 候选不符：%s", diff)
+	}
+}
+
+// TestResolveEdgeAddrsExplicitAutoKeyword 验证显式 -ip auto 与双空同义。
+func TestResolveEdgeAddrsExplicitAutoKeyword(t *testing.T) {
+	reg := &registration.Registration{
+		EndpointV4: "162.159.198.2",
+		EndpointV6: "2606:4700:103::2",
+	}
+	got, err := ResolveEdgeAddrs(DefaultConfig(), EdgeIPAuto, "", reg)
+	if err != nil {
+		t.Fatalf("-ip auto 失败：%v", err)
+	}
+	want := []string{"162.159.198.2:443", "[2606:4700:103::2]:443"}
+	if diff := cmpEdges(got, want); diff != "" {
+		t.Errorf("-ip auto 候选不符（默认端口 443）：%s", diff)
+	}
+}
+
+// TestResolveEdgeAddrsExplicitV4Unchanged 锁定显式 -ip 4 在 auto 引入后行为
+// 不变：只展开 IPv4 端口列表，绝不混入 v6 候选（向后兼容）。
+func TestResolveEdgeAddrsExplicitV4Unchanged(t *testing.T) {
+	reg := &registration.Registration{
+		EndpointV4:    "162.159.198.2",
+		EndpointV6:    "2606:4700:103::2",
+		EndpointPorts: []int{443, 500},
+	}
+	got, err := ResolveEdgeAddrs(DefaultConfig(), "4", "", reg)
+	if err != nil {
+		t.Fatalf("-ip 4 失败：%v", err)
+	}
+	want := []string{"162.159.198.2:443", "162.159.198.2:500"}
+	if diff := cmpEdges(got, want); diff != "" {
+		t.Errorf("-ip 4 候选不符：%s", diff)
+	}
+}
+
+// TestAutoEdgeAddrsPort443Promoted 锁定端口排序规则：注册端口列表不含 443 时
+// 用首个端口充当两族首测端口，其余按原序尾随；443 在列表中但非首位时提前。
+func TestAutoEdgeAddrsPort443Promoted(t *testing.T) {
+	reg := &registration.Registration{
+		EndpointV4:    "162.159.198.2",
+		EndpointV6:    "2606:4700:103::2",
+		EndpointPorts: []int{500, 443, 4500}, // 443 在第 2 位
+	}
+	got, err := ResolveEdgeAddrs(DefaultConfig(), EdgeIPAuto, "", reg)
+	if err != nil {
+		t.Fatalf("auto 失败：%v", err)
+	}
+	want := []string{
+		"162.159.198.2:443", "[2606:4700:103::2]:443",
+		"162.159.198.2:500", "[2606:4700:103::2]:500",
+		"162.159.198.2:4500", "[2606:4700:103::2]:4500",
+	}
+	if diff := cmpEdges(got, want); diff != "" {
+		t.Errorf("443 提前后的候选不符：%s", diff)
+	}
+
+	// 无 443：首端口 500 充当首测端口。
+	reg.EndpointPorts = []int{500, 4500}
+	got, err = ResolveEdgeAddrs(DefaultConfig(), EdgeIPAuto, "", reg)
+	if err != nil {
+		t.Fatalf("auto（无 443）失败：%v", err)
+	}
+	want = []string{
+		"162.159.198.2:500", "[2606:4700:103::2]:500",
+		"162.159.198.2:4500", "[2606:4700:103::2]:4500",
+	}
+	if diff := cmpEdges(got, want); diff != "" {
+		t.Errorf("无 443 时的候选不符：%s", diff)
+	}
+}
+
+// TestAutoEdgeAddrsSingleFamilyDegradation 锁定单族退化：注册信息只有单一
+// 地址族时 auto 等价该族顺序展开（不会产出空 host 的垃圾候选）。
+func TestAutoEdgeAddrsSingleFamilyDegradation(t *testing.T) {
+	reg := &registration.Registration{
+		EndpointV6:    "2606:4700:103::2",
 		EndpointPorts: []int{443, 500},
 	}
 	got, err := ResolveEdgeAddrs(DefaultConfig(), "", "", reg)
 	if err != nil {
-		t.Fatalf("双空回落失败：%v", err)
+		t.Fatalf("单族 auto 失败：%v", err)
 	}
-	want := []string{"162.159.198.2:443", "162.159.198.2:500"}
-	if len(got) != len(want) {
-		t.Fatalf("结果 = %v，期望 %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("结果[%d] = %q，期望 %q", i, got[i], want[i])
-		}
+	want := []string{"[2606:4700:103::2]:443", "[2606:4700:103::2]:500"}
+	if diff := cmpEdges(got, want); diff != "" {
+		t.Errorf("单族退化候选不符：%s", diff)
 	}
 }
 
-// TestResolveEdgeAddrsBothEmptyMissingV4 验证双空回落但注册信息无 IPv4 端点
-// 时报清晰错误（提示重新注册），而不是把空串当显式端点解析。
-func TestResolveEdgeAddrsBothEmptyMissingV4(t *testing.T) {
-	reg := &registration.Registration{EndpointV6: "2606:4700:103::2"}
-	_, err := ResolveEdgeAddrs(DefaultConfig(), "", "", reg)
+// TestResolveEdgeAddrsBothEmptyNoEndpoints 验证双空 auto 且注册信息两族端点
+// 全缺时报清晰错误（提示重新注册），而非产出垃圾候选或空表。
+func TestResolveEdgeAddrsBothEmptyNoEndpoints(t *testing.T) {
+	_, err := ResolveEdgeAddrs(DefaultConfig(), "", "", &registration.Registration{})
 	if err == nil {
-		t.Fatal("双空且无 IPv4 端点时应报错")
+		t.Fatal("两族端点全缺时应报错")
 	}
-	if !strings.Contains(err.Error(), "IPv4") {
-		t.Errorf("错误信息应提及 IPv4，得到：%v", err)
+	if !strings.Contains(err.Error(), "重新注册") {
+		t.Errorf("错误信息应提示重新注册，得到：%v", err)
 	}
+}
+
+// cmpEdges 比较候选列表，不一致时返回差异描述（一致返回空串）。
+func cmpEdges(got, want []string) string {
+	if len(got) != len(want) {
+		return fmt.Sprintf("结果 = %v，期望 %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			return fmt.Sprintf("结果[%d] = %q，期望 %q（全部=%v）", i, got[i], want[i], got)
+		}
+	}
+	return ""
 }
