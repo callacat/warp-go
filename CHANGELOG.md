@@ -1,3 +1,27 @@
+## [未发布]
+
+### 功能（百度中转开关 + GUI 交互，recvvkPP7whiIL）
+
+- **`-front-proxy` 旗标 / `front_proxy` 配置对象**：百度中转 HTTP CONNECT 保命
+  通道（ISP 对 CF 干扰时的备用出口）。开启后内核切 TCP fallback 模式（跳过
+  QUIC/MasqueClient），改用 FrontProxyDialer（HTTP CONNECT 隧道）实现 dialer
+  接口。配置项：`front_proxy.{enabled,server,connect_host,token,user_agent}`，
+  默认 server=`cloudnproxy.baidu.com:443`、connect_host=`sptest.baidu.com`
+  （Host 头实测 200；Host=服务域名会 403）、token 可覆写（X-T5-Auth 是百度
+  内部固定 token，失效=用户自查，不硬编码猜测）。
+- **关键互斥（实锤坑）**：front proxy 开启时忽略 dialIPs/优选 IP，EdgeIP 强制
+  回退 auto——CONNECT 目标被改写成 CF 优选裸 IP 会导致百度 503。CLI 日志播报
+  回退边界；GUI 开关启用后黄字提醒。
+- **GUI（Settings 页）**：新增「百度中转（保命通道）」区块——Toggle + 展开表单
+  （server/Host 头/X-T5-Auth token/自定义 UA），启用后黄字互斥提醒。types/api
+  补 front_proxy 序列化（fromConfig 缺字段兜底默认值，防升级场景空 Host 403）。
+- **兼容性**：不开启 front proxy 时行为完全不变（dialer 装配、QUIC 路径、
+  auto failover 均未动）；`-front-proxy` 三态覆盖语义与 `-sysproxy` 一致
+  （旗标给出时强制，未给出按 config.json）。
+- 新增测试：front proxy 配置校验 8 例（server 空/无效/Host 头兜底/JSON 序列化）+
+  dialer 单测（CONNECT 200/403/关闭/DNS）+ mock TLS 服务器（crypto 自签证书，
+  含 IP SAN）。
+
 ## [v0.6.1] - 2026-09-03
 
 ### 功能（边缘自动测试与自动切换，recvu4IV207cHy）

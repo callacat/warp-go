@@ -9,6 +9,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"log"
 	"net"
@@ -26,6 +27,7 @@ type FrontProxyDialerConfig struct {
 	ConnectHost string // Host 头值（兜底 sptest.baidu.com）
 	Token       string // X-T5-Auth token
 	UserAgent   string // UA 头（空=默认）
+	RootCAs     *x509.CertPool // 信任锚（nil=系统池；单测注入自签 CA）
 }
 
 // FrontProxyDialer 通过 HTTP CONNECT 隧道实现 dialer 接口。
@@ -75,6 +77,7 @@ func (d *FrontProxyDialer) DialTunnel(ctx context.Context, target string) (net.C
 	tlsConn := tls.Client(conn, &tls.Config{
 		ServerName: host,
 		MinVersion: tls.VersionTLS12,
+		RootCAs:    d.cfg.RootCAs, // nil=系统池；单测注入自签 CA
 	})
 	if err := tlsConn.HandshakeContext(ctx); err != nil {
 		conn.Close()

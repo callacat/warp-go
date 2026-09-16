@@ -3,8 +3,13 @@ package tunnel
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
+	"fmt"
+	"math/big"
 	"net"
 	"net/http"
 	"testing"
@@ -12,7 +17,8 @@ import (
 )
 
 // mockFrontProxy 启动一个模拟 front proxy（TLS + HTTP CONNECT）。
-func mockFrontProxy(t *testing.T) (addr string, cleanup func()) {
+// 返回 addr、cleanup 与自签证书 CA 池（dialer 注入信任锚用）。
+func mockFrontProxy(t *testing.T) (addr string, cleanup func(), rootCAs *x509.CertPool) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -24,6 +30,13 @@ func mockFrontProxy(t *testing.T) (addr string, cleanup func()) {
 		Certificates: []tls.Certificate{cert},
 	})
 
+	caPool := x509.NewCertPool()
+	leaf, err := x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		t.Fatalf("parse leaf cert failed: %v", err)
+	}
+	caPool.AddCert(leaf)
+
 	go func() {
 		for {
 			conn, err := tlsLn.Accept()
@@ -34,7 +47,7 @@ func mockFrontProxy(t *testing.T) (addr string, cleanup func()) {
 		}
 	}()
 
-	return ln.Addr().String(), func() { tlsLn.Close() }
+	return ln.Addr().String(), func() { tlsLn.Close() }, caPool
 }
 
 func handleMockCONNECT(conn net.Conn) {
@@ -45,7 +58,8 @@ func handleMockCONNECT(conn net.Conn) {
 		return
 	}
 	if req.Method != http.MethodConnect {
-		http.Error(conn, "405 Method Not Allowed", 405)
+		// net.Conn 不是 http.ResponseWriter，手写 405 响应行。
+		fmt.Fprintf(conn, "HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
 		return
 	}
 	// 模拟 CONNECT 成功（返回 200）
@@ -67,7 +81,7 @@ func handleMockCONNECT(conn net.Conn) {
 }
 
 func TestFrontProxyDialer_DialTunnel_OK(t *testing.T) {
-	addr, cleanup := mockFrontProxy(t)
+	addr, cleanup, rootCAs := mockFrontProxy(t)
 	defer cleanup()
 
 	d := NewFrontProxyDialer(FrontProxyDialerConfig{
@@ -75,6 +89,7 @@ func TestFrontProxyDialer_DialTunnel_OK(t *testing.T) {
 		ConnectHost: "sptest.baidu.com",
 		Token:       "482857715",
 		UserAgent:   "test/1.0",
+		RootCAs:     rootCAs,
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -103,6 +118,13 @@ func TestFrontProxyDialer_DialTunnel_ConnectRejected(t *testing.T) {
 	tlsLn := tls.NewListener(ln, &tls.Config{Certificates: []tls.Certificate{cert}})
 	defer tlsLn.Close()
 
+	caPool := x509.NewCertPool()
+	leaf, err := x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		t.Fatalf("parse leaf cert failed: %v", err)
+	}
+	caPool.AddCert(leaf)
+
 	go func() {
 		conn, err := tlsLn.Accept()
 		if err != nil {
@@ -119,6 +141,7 @@ func TestFrontProxyDialer_DialTunnel_ConnectRejected(t *testing.T) {
 		Server:      ln.Addr().String(),
 		ConnectHost: "sptest.baidu.com",
 		Token:       "482857715",
+		RootCAs:     caPool,
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -155,9 +178,27 @@ func TestFrontProxyDialer_ResolveDNS(t *testing.T) {
 
 func generateSelfSignedCert(t *testing.T) tls.Certificate {
 	t.Helper()
-	// 用 Go crypto 生成自签证书（比 openssl 命令更可移植）
-	t.Skip("自签证书测试依赖 crypto/rand，CI 跳过；真机测试保留")
-	return tls.Certificate{}
+	// Go crypto 自签证书（20 行，无外部依赖；CI/本地都可跑）。
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate key failed: %v", err)
+	}
+	tmpl := x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "127.0.0.1"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		// dialer 用 ServerName=127.0.0.1 握手；Go 1.15+ 不回落 CN，必须带 IP SAN。
+		IPAddresses: []net.IP{net.ParseIP("127.0.0.1")},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, &tmpl, &tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("create certificate failed: %v", err)
+	}
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
 }
 
 // 注：自签证书生成太复杂，跳过。集成测试在 CI 真机跑。
