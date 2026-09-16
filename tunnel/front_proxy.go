@@ -85,13 +85,15 @@ func (d *FrontProxyDialer) DialTunnel(ctx context.Context, target string) (net.C
 	}
 
 	// ③ HTTP CONNECT 请求
+	// Host 头必须设到 req.Host 而非 Header["Host"]：Go 标准库 Request.Write
+	// 只用 req.Host（Header map 里的 "Host" 键会被丢弃），而百度代理以
+	// connect_host 为放行依据（Host=服务域名会 403，CHANGELOG 已记录）。
 	req := &http.Request{
 		Method: http.MethodConnect,
 		URL:    &url.URL{Opaque: target},
-		Host:   target,
+		Host:   connectHost, // 百度放行值（默认 sptest.baidu.com）
 		Header: make(http.Header),
 	}
-	req.Header.Set("Host", connectHost)
 	req.Header.Set("X-T5-Auth", d.cfg.Token)
 	req.Header.Set("User-Agent", ua)
 	req.Header.Set("Proxy-Connection", "keep-alive")

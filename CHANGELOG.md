@@ -22,6 +22,19 @@
   dialer 单测（CONNECT 200/403/关闭/DNS）+ mock TLS 服务器（crypto 自签证书，
   含 IP SAN）。
 
+### 修复（Host 头赋值 bug，recvvkPP7whiIL 验收发现）
+
+- **CONNECT 请求实际发送的 Host 头是 `req.Host`，不是 `Header["Host"]`**：原实现
+  `req.Host = target`（WARP 边缘地址）+ `req.Header.Set("Host", connect_host)`。
+  Go 标准库 `Request.Write` 只用 `req.Host`（Header map 的 "Host" 键被丢弃），
+  导致线上 Host 头实为边缘地址而非百度放行值 `sptest.baidu.com`——百度窗口回
+  403，保命通道实际不可用。修复：`req.Host = connectHost`（默认 sptest.baidu.com）。
+- **mock 改为手写解析 Host 头**：`http.ReadRequest` 对 CONNECT 请求会把 Host 头值
+  并入 `req.Host` 为请求行目标、Header map 不留 "Host" 键，无法校验线上 Host；
+  mock 端改按原始 Header 行解析，DialTunnel_OK 才能真验证 Host 头。
+- 验证：`go test ./tunnel/ -run TestFrontProxyDialer` 全绿（此前 DialTunnel_OK
+  稳定 403）。
+
 ## [v0.6.1] - 2026-09-03
 
 ### 功能（边缘自动测试与自动切换，recvu4IV207cHy）
