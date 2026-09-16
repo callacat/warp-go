@@ -48,6 +48,15 @@ export interface AppConfig {
   themeMode: "light" | "dark" | "system";
   perAppMode: "off" | "allow" | "disallow";
   perAppPackages: string[];
+  frontProxy: FrontProxyConfig;
+}
+
+export interface FrontProxyConfig {
+  enabled: boolean;
+  server: string;
+  connect_host: string;
+  token: string;
+  user_agent: string;
 }
 
 export interface PerAppConfig {
@@ -151,6 +160,7 @@ export function fromConfig(v: any): AppConfig {
         : "system",
     perAppMode: o.per_app_mode === "allow" || o.per_app_mode === "disallow" ? o.per_app_mode : "off",
     perAppPackages: Array.isArray(o.per_app_packages) ? o.per_app_packages : [],
+    frontProxy: o.front_proxy ?? { enabled: false, server: "cloudnproxy.baidu.com:443", connect_host: "sptest.baidu.com", token: "482857715", user_agent: "" },
   };
 }
 

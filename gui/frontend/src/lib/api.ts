@@ -153,6 +153,7 @@ function mockConfig(): AppConfig {
     geoRepo: "MetaCubeX/meta-rules-dat",
     autoUpdateDays: 7,
     systemProxy: mockState.sysProxy,
+    frontProxy: { enabled: false, server: "", connect_host: "", token: "", user_agent: "" },
     allowUDP: false,
     downloadProxy: "https://gh-proxy.org/",
     themeMode: "system",
@@ -417,6 +418,13 @@ export async function saveConfig(config: AppConfig): Promise<void> {
     theme_mode: config.themeMode,
     per_app_mode: config.perAppMode ?? "off",
     per_app_packages: config.perAppPackages ?? [],
+    front_proxy: {
+      enabled: config.frontProxy?.enabled ?? false,
+      server: config.frontProxy?.server ?? "cloudnproxy.baidu.com:443",
+      connect_host: config.frontProxy?.connect_host ?? "sptest.baidu.com",
+      token: config.frontProxy?.token ?? "482857715",
+      user_agent: config.frontProxy?.user_agent ?? "",
+    },
   });
 }
 

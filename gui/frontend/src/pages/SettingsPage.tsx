@@ -275,6 +275,61 @@ export default function SettingsPage() {
                 placeholder="https://gh-proxy.org/"
               />
             </Field>
+
+            {/* 百度中转保命通道（front proxy） */}
+            <Field
+              label="百度中转（保命通道）"
+              hint="ISP 对 CF 干扰时的 HTTP CONNECT 备用出口。开启后忽略边缘优选 IP，走 TCP fallback 模式。"
+            >
+              <div className="flex items-center gap-3">
+                <Toggle
+                  checked={cfg.frontProxy?.enabled ?? false}
+                  onChange={(v) => set("frontProxy", { ...(cfg.frontProxy ?? {}), "enabled": v })}
+                />
+                <span className="text-sm text-slate-600 dark:text-slate-300">
+                  {cfg.frontProxy?.enabled ? "已启用" : "已关闭"}
+                </span>
+              </div>
+            </Field>
+            {cfg.frontProxy?.enabled && (
+              <>
+                <Field label="代理服务器" hint="百度云加速入口（host:port）">
+                  <input
+                    className={inputCls}
+                    value={cfg.frontProxy?.server ?? ""}
+                    onChange={(e) => set("frontProxy", { ...(cfg.frontProxy ?? {}), "server": e.target.value })}
+                    placeholder="cloudnproxy.baidu.com:443"
+                  />
+                </Field>
+                <Field label="Host 头" hint="CONNECT 请求的 Host 值（实测 sptest.baidu.com）">
+                  <input
+                    className={inputCls}
+                    value={cfg.frontProxy?.connect_host ?? ""}
+                    onChange={(e) => set("frontProxy", { ...(cfg.frontProxy ?? {}), "connect_host": e.target.value })}
+                    placeholder="sptest.baidu.com"
+                  />
+                </Field>
+                <Field label="X-T5-Auth Token" hint="百度固定 token，失效后用户自查更新">
+                  <input
+                    className={inputCls}
+                    value={cfg.frontProxy?.token ?? ""}
+                    onChange={(e) => set("frontProxy", { ...(cfg.frontProxy ?? {}), "token": e.target.value })}
+                    placeholder="482857715"
+                  />
+                </Field>
+                <Field label="自定义 User-Agent" hint="置空使用默认 UA">
+                  <input
+                    className={inputCls}
+                    value={cfg.frontProxy?.user_agent ?? ""}
+                    onChange={(e) => set("frontProxy", { ...(cfg.frontProxy ?? {}), "user_agent": e.target.value })}
+                    placeholder="okhttp/3.11.0"
+                  />
+                </Field>
+                <p className="text-xs text-amber-600 dark:text-amber-400">
+                  ⚠ 启用后边缘优选 IP（-ip flag）将被忽略——CONNECT 目标改写为裸 IP 会导致百度 503。
+                </p>
+              </>
+            )}
           </div>
         ) : (
           <p className="text-sm text-slate-500 dark:text-slate-400">加载中…</p>
