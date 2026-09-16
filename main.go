@@ -142,6 +142,7 @@ func main() {
 		scanTimeout  = flag.Duration("scan-timeout", 45*time.Second, "扫描总超时（硬上限）")
 		scanPerProbe = flag.Duration("scan-per-probe", 3*time.Second, "单探针超时")
 		scanTop      = flag.Int("scan-top", 4, "选用 RTT 最低的 N 个端点前置")
+	frontProxy   = flag.Bool("front-proxy", false, "启用百度中转 HTTP CONNECT 保命通道（覆盖 config.json 的 front_proxy.enabled）")
 
 		showVersion   = flag.Bool("version", false, "打印版本号并退出")
 		checkUpdateFL = flag.Bool("check-update", false, "检查是否有新版本并退出")
@@ -178,6 +179,16 @@ func main() {
 
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
 
+	// -front-proxy 三态覆盖（旗标给出时强制，未给出时按 config.json）
+	var frontProxyOverride *bool
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "front-proxy" {
+			v := *frontProxy
+			frontProxyOverride = &v
+		}
+	})
+
+
 	// -sysproxy 是三态覆盖：旗标给出时强制（true/false），未给出时按
 	// config.json 的 enable_system_proxy（nil）。
 	var sysProxyOverride *bool
@@ -198,6 +209,7 @@ func main() {
 		EdgeIP:          *ip,
 		RulesPath:       *routeFlag,
 		SysProxy:        sysProxyOverride,
+		FrontProxyOverride: frontProxyOverride,
 		Scan:            *scan,
 		ScanCIDR:        *scanCidr,
 		ScanPorts:       *scanPorts,

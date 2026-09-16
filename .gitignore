@@ -31,3 +31,4 @@ gui/build/bin/
 
 # Wails 生成的 bindings（wails3 generate bindings 产物，不入库）
 gui/frontend/bindings/
+.worktrees

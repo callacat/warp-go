@@ -1,6 +1,7 @@
 package core
 
 import (
+	"log"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -104,6 +105,23 @@ func NewKernel(cfg *Config, regData *registration.Registration, edgeAddrs []stri
 // 均衡、总量可叠加；连接失败各自独立重连（MasqueClient 内建），池不叠加
 // 任何连接级状态。
 func NewKernelContext(ctx context.Context, cfg *Config, regData *registration.Registration, edgeAddrs []string, tlsConfig *tls.Config) (*Kernel, error) {
+	// front_proxy 开启时切 TCP fallback（百度中转：QUIC/UDP 被 ISP 干扰时的保命通道）。
+	// HTTP CONNECT 隧道是 TCP，无法直通 QUIC——跳过 MasqueClient（QUIC），改用
+	// FrontProxyDialer（TCP）实现 dialer 接口。
+	if cfg.FrontProxy.Enabled {
+		log.Printf("✓ front proxy 启用 → TCP fallback（server=%s, host=%s）",
+			cfg.FrontProxy.Server, cfg.FrontProxy.ConnectHost)
+		fpDial := tunnel.NewFrontProxyDialer(tunnel.FrontProxyDialerConfig{
+			Server:      cfg.FrontProxy.Server,
+			ConnectHost: cfg.FrontProxy.ConnectHost,
+			Token:       cfg.FrontProxy.Token,
+			UserAgent:   cfg.FrontProxy.UserAgent,
+		})
+		return newKernel(ctx, cfg, regData, edgeAddrs, tlsConfig, func() (dialer, error) {
+			return fpDial, nil
+		})
+	}
+
 	return newKernel(ctx, cfg, regData, edgeAddrs, tlsConfig, func() (dialer, error) {
 		n := tunnelConnectionsFor(cfg.TunnelConnections)
 		dials := make([]dialer, 0, n)

@@ -66,6 +66,9 @@ type Config struct {
 	// PerAppPackages 是分应用代理生效的包名列表（allow/disallow 模式下使用）。
 	// 空列表 = 该模式下不过滤（等价全量）。仅 Android 生效。
 	PerAppPackages []string `json:"per_app_packages,omitempty"`
+	// FrontProxy 是百度中转保命通道配置（HTTP CONNECT 隧道）。开启时
+	// 切 TCP fallback 模式，忽略 dialIPs/优选 IP——GUI 需联动置灰。
+	FrontProxy FrontProxyConfig `json:"front_proxy,omitempty"`
 }
 
 // DefaultConfig 返回内置默认值。LoadConfig 以它为基底，JSON 反序列化只覆盖
@@ -83,6 +86,7 @@ func DefaultConfig() *Config {
 		ThemeMode:         "system",
 		PerAppMode:        "off",
 		TunnelConnections: 2,
+		FrontProxy: DefaultFrontProxyConfig(),
 	}
 }
 

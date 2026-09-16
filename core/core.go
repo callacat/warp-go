@@ -86,6 +86,8 @@ type Options struct {
 	// SysProxy 覆盖 config.json 的 enable_system_proxy（CLI -sysproxy）。
 	// nil 表示不覆盖（按 config.json）；非 nil 时强制启用/禁用。
 	SysProxy *bool
+	// FrontProxyOverride 覆盖 config.json 的 front_proxy.enabled（CLI -front-proxy）。
+	FrontProxyOverride *bool
 
 	// Scan 启动前扫描 WARP 边缘全段并选用最低延迟的端点（CLI -scan 族）。
 	Scan            bool
@@ -487,6 +489,20 @@ func (s *Server) Start(ctx context.Context) error {
 		Router:     kernel.Route,
 		TunnelDial: kernel.DialTunnel,
 	})
+
+	// front proxy 覆盖（Options.FrontProxyOverride 优先于 config.json）
+	if s.opts.FrontProxyOverride != nil {
+		cfg.FrontProxy.Enabled = *s.opts.FrontProxyOverride
+		if *s.opts.FrontProxyOverride {
+			log.Println("✓ front proxy 已通过 -front-proxy 旗标启用")
+		}
+	}
+	// 互斥：front proxy 开启 → EdgeIP 回退 auto（忽略用户指定的优选 IP/边缘）
+	// CONNECT 目标被改写成 CF 优选裸 IP → 百度 503（实锤坑）
+	if cfg.FrontProxy.Enabled && s.opts.EdgeIP != EdgeIPAuto {
+		log.Printf("⚠ front proxy 开启 → EdgeIP 从 %q 回退 auto（互斥：优选 IP 与百度代理冲突）", s.opts.EdgeIP)
+		s.opts.EdgeIP = EdgeIPAuto
+	}
 
 	// 系统代理（Options.SysProxy 优先于 config.json 的 enable_system_proxy）。
 	if sysProxy := cfg.EnableSystemProxy; s.opts.SysProxy == nil || *s.opts.SysProxy == sysProxy {
