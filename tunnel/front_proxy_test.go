@@ -12,13 +12,19 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 )
 
 // mockFrontProxy 启动一个模拟 front proxy（TLS + HTTP CONNECT）。
 // 返回 addr、cleanup 与自签证书 CA 池（dialer 注入信任锚用）。
-func mockFrontProxy(t *testing.T) (addr string, cleanup func(), rootCAs *x509.CertPool) {
+// wantHost 是 CONNECT 请求必须携带的 Host 头值（百度放行值 sptest.baidu.com）；
+// 不一致时返回 403（模拟百度对错误 Host 的拒绝，防 req.Host 未正确赋值的回归）。
+// 注：不能用 http.ReadRequest 校验 Host——CONNECT 请求的 Host 头值会被
+// ReadRequest 并入 req.Host 为请求行目标，Header map 里不留 "Host" 键。
+// mock 端按手写 Header 行原始解析以拿到真实 Host 头。
+func mockFrontProxy(t *testing.T, wantHost string) (addr string, cleanup func(), rootCAs *x509.CertPool) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -43,23 +49,45 @@ func mockFrontProxy(t *testing.T) (addr string, cleanup func(), rootCAs *x509.Ce
 			if err != nil {
 				return
 			}
-			go handleMockCONNECT(conn)
+			go handleMockCONNECT(conn, wantHost)
 		}
 	}()
 
 	return ln.Addr().String(), func() { tlsLn.Close() }, caPool
 }
 
-func handleMockCONNECT(conn net.Conn) {
+func handleMockCONNECT(conn net.Conn, wantHost string) {
 	defer conn.Close()
 	br := bufio.NewReader(conn)
-	req, err := http.ReadRequest(br)
+	// 手动解析请求行 + 头部块（不用 http.ReadRequest：对 CONNECT 请求，
+	// 它会把 Host 头值并入 req.Host 为请求行目标，Header map 里不留
+	// "Host" 键——无法从 http.Request 中拿到线上原始 Host 头）。
+	reqLine, err := br.ReadString('\n')
 	if err != nil {
 		return
 	}
-	if req.Method != http.MethodConnect {
-		// net.Conn 不是 http.ResponseWriter，手写 405 响应行。
+	fields := strings.Fields(reqLine)
+	if len(fields) < 1 || fields[0] != http.MethodConnect {
 		fmt.Fprintf(conn, "HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+		return
+	}
+	// 逐行读取头部，按 Host 头值校验
+	host := ""
+	for {
+		line, err := br.ReadString('\n')
+		if err != nil {
+			return
+		}
+		line = strings.TrimRight(line, "\r\n")
+		if line == "" {
+			break
+		}
+		if k, rest, ok := strings.Cut(line, ":"); ok && strings.EqualFold(strings.TrimSpace(k), "Host") {
+			host = strings.TrimSpace(rest)
+		}
+	}
+	if host != wantHost {
+		fmt.Fprintf(conn, "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
 		return
 	}
 	// 模拟 CONNECT 成功（返回 200）
@@ -81,7 +109,7 @@ func handleMockCONNECT(conn net.Conn) {
 }
 
 func TestFrontProxyDialer_DialTunnel_OK(t *testing.T) {
-	addr, cleanup, rootCAs := mockFrontProxy(t)
+	addr, cleanup, rootCAs := mockFrontProxy(t, "sptest.baidu.com") // 百度实测放行 Host 值
 	defer cleanup()
 
 	d := NewFrontProxyDialer(FrontProxyDialerConfig{
