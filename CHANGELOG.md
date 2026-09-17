@@ -1,3 +1,17 @@
+## [v0.6.4] - 2026-09-17
+
+### 修复（发布链基建，v0.6.3 缺 Android 资产根因）
+
+- **Android 构建门禁修复**：Google 已下架 SDK 旧 `tools` 包——
+  `android-actions/setup-android@v3` 的默认 `packages` 是 `tools platform-tools`，
+  新版 cmdline-tools（16.0）执行 `sdkmanager tools` 报
+  `Failed to find package 'tools'` 并以退出码 1 失败，导致 v0.6.3 tag 的
+  `build-android` job 在「设置 Android SDK」步骤失败、Release 缺 APK/AAB 两个
+  资产。修复：三个 workflow（build-release / android-debugdiag /
+  android-root-probe）显式传 `packages: platform-tools`；其余 SDK 组件本就由
+  下一步 sdkmanager 显式安装。**二进制无代码变化**（与 v0.6.3 相同），本版本
+  为补齐 Android 产物的重发。
+
 ## [v0.6.3] - 2026-09-17
 
 ### 修复（CI 测试环境兼容，v0.6.2 发布失败根因）

@@ -252,6 +252,12 @@ jobs:
 
       - name: 设置 Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          # 2026-09-17：Google 已下架 SDK 旧 `tools` 包（cmdline-tools 16.0 实测
+          # `sdkmanager tools` 报 Failed to find package 'tools' 退出码 1），v3
+          # 默认的 `tools platform-tools` 会让 job 直接失败。只装 platform-tools，
+          # 其余组件由下一步 sdkmanager 显式安装。
+          packages: platform-tools
 
       - name: 安装 SDK 组件（platform-tools / platforms / build-tools / NDK）
         run: |
