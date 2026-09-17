@@ -1,4 +1,16 @@
-## [未发布]
+## [v0.6.3] - 2026-09-17
+
+### 修复（CI 测试环境兼容，v0.6.2 发布失败根因）
+
+- **`TestDialCrossFamilySwitchOrder` 对「无 IPv6 路由环境」的隐式依赖**：该测试
+  原先跑**真实**拨号（TEST-NET/文档前缀黑洞地址），隐含假设「IPv6 有路由、拨号
+  黑洞超时」。在 GitHub Actions runner（无 IPv6 路由）上 sendmsg 直接回
+  `ENETUNREACH`，`dial()` 据此判 v6 族死并跳过同族剩余候选（**这是生产的预期
+  行为，未改动**），测试却断言该候选被拨打——本机（IPv6 有路由）恒 PASS、CI 恒
+  FAIL，v0.6.2 tag 的 CI 测试因此挂掉、从未成功发布。修复：`MasqueClient` 加
+  `dialAddrFn` 测试缝（nil-default，生产行为完全不变），测试改用 fake 记录候选
+  拨打序列、返回非 `ENETUNREACH` 的普通失败错误（族不判死）。测试由此变为毫秒级
+  零真实网络依赖，在有无 IPv6 路由的环境下结果一致。
 
 ### 修复（百度中转契约修复 C1–C6 + 真实端点复测 P0，2026-09-17）
 

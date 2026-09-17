@@ -3,6 +3,7 @@ package tunnel
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"strings"
 	"syscall"
 	"testing"
@@ -126,43 +127,48 @@ func TestEscalateBackoff(t *testing.T) {
 
 // ---- auto 跨族候选切换（recvu4IV207cHy）----
 //
-// dial 本身的单候选拨号走真实 dialAddr（dialFn 缝在重连航班层，dial 内部不经
-// 它），测试用 TEST-NET/文档前缀黑洞地址：拨号必失败（快速 ENETUNREACH 或
-// 2s perAddrDialTimeout 超时，环境相关），控制流与生产一致，顺序经日志断言。
+// dial 的候选拨号走 dialAddrFn 缝（注入 fake）。此前测试用 TEST-NET/文档前缀
+// 黑洞地址跑**真实** dialAddr，隐含假设「v6 有路由、拨号黑洞超时」：在无 IPv6
+// 路由的环境（GitHub Actions runner）下 sendmsg 直接回 ENETUNREACH，dial 判
+// v6 族死并跳过同族剩余候选（生产预期行为），测试却断言该候选被拨打——本机
+// （v6 有路由）恒 PASS、CI 恒 FAIL，v0.6.2 的发布门禁即挂在这里。改用 fake 后
+// 候选是否被拨打只由 fake 记录决定，与 runner 的路由表无关。
 
 // TestDialCrossFamilySwitchOrder 锁定 auto 交错候选表的轮内行为：v4 失败后
 // 跨到 v6 候选续拨（不再 break 整轮），跨族边界日志整轮恰 1 条——族序列
 // v4,v6,v4,v6 有 3 次族边界，多播就是刷屏（CT103 教训）。
 func TestDialCrossFamilySwitchOrder(t *testing.T) {
 	c := newTestMasqueClient(t)
-	c.tlsConfig = &tls.Config{ServerName: "test"}
 	c.edgeAddrs = []string{
 		"192.0.2.1:443", "[2001:db8::1]:443",
 		"192.0.2.1:500", "[2001:db8::1]:500",
+	}
+
+	// fake 逐候选记录拨打序列。失败必须是**非 ENETUNREACH 的普通错误**
+	// （bootstrap 超时）：ENETUNREACH 会触发族死跳过，测的就不是「跨族续拨」
+	// 而是族死逻辑了（后者由 TestDialFamilyDeadJudgement 覆盖）。
+	var dialed []string
+	c.dialAddrFn = func(_ context.Context, addr string, _ bool) (*connBundle, error) {
+		dialed = append(dialed, addr)
+		return nil, errors.New("bootstrap timeout")
 	}
 	readLog := captureLog(t)
 
 	_, err := c.dial(context.Background(), false)
 	if err == nil {
-		t.Fatal("黑洞候选全部失败时应返回错误")
+		t.Fatal("候选全部失败时应返回错误")
 	}
+
+	// 顺序断言同时覆盖「4 个候选全部被拨打」与「首拨是 192.0.2.1:443」：
+	// v4 失败后必须跨族续拨到 v6，而非 break 整轮。
+	want := "192.0.2.1:443 -> [2001:db8::1]:443 -> 192.0.2.1:500 -> [2001:db8::1]:500"
+	if got := strings.Join(dialed, " -> "); got != want {
+		t.Fatalf("候选拨打序列错误：期望 %s，得到 %s", want, got)
+	}
+
 	out := readLog()
 	if got := strings.Count(out, "IPv4 边缘不可达 → 尝试 IPv6 边缘"); got != 1 {
 		t.Fatalf("跨族边界日志应恰 1 条，得到 %d（全文：%s）", got, out)
-	}
-	// v6 候选必须都被拨打（v4 失败后跨族续拨；族死只针对无路由族）。
-	for _, addr := range []string{"[2001:db8::1]:443", "[2001:db8::1]:500"} {
-		if !strings.Contains(out, "QUIC 拨号 "+addr) {
-			t.Fatalf("v6 候选 %s 未被拨打（全文：%s）", addr, out)
-		}
-	}
-	if !strings.Contains(out, "QUIC 拨号 192.0.2.1:443") {
-		t.Fatalf("首个 v4 候选应最先拨打（全文：%s）", out)
-	}
-	if i := strings.Index(out, "QUIC 拨号 192.0.2.1:443"); i >= 0 {
-		if j := strings.Index(out, "QUIC 拨号 [2001:db8::1]:443"); j >= 0 && j < i {
-			t.Fatalf("拨打顺序应先 v4 后 v6（全文：%s）", out)
-		}
 	}
 }
 

@@ -220,6 +220,11 @@ type MasqueClient struct {
 	// dialFn overrides the edge dial in lifecycle tests. Nil in production.
 	dialFn func(context.Context) (*connBundle, error)
 
+	// dialAddrFn overrides the per-candidate edge dial inside dial(). Nil in
+	// production (meaning dialAddr); set by tests that need dial()'s candidate
+	// ordering / cross-family control flow without real network I/O.
+	dialAddrFn func(ctx context.Context, addr string, quiet bool) (*connBundle, error)
+
 	// probeFn overrides the egress probe in tests. Nil in production (meaning
 	// probeInternationalEgress).
 	probeFn func(context.Context, *connBundle) error
@@ -411,7 +416,16 @@ func (c *MasqueClient) dial(ctx context.Context, quiet bool) (*connBundle, error
 			}
 		}
 
-		bundle, err := c.dialAddr(ctx, addr, quiet)
+		// dialAddrFn 测试缝：注入时逐候选走 fake，把真实拨号 I/O 整体替换
+		// 掉——族判定/跨族边界/候选顺序等控制流仍走生产路径。nil 时与生产
+		// 路径完全一致（默认不开缝）。
+		var bundle *connBundle
+		var err error
+		if c.dialAddrFn != nil {
+			bundle, err = c.dialAddrFn(ctx, addr, quiet)
+		} else {
+			bundle, err = c.dialAddr(ctx, addr, quiet)
+		}
 		if err == nil {
 			// 国际出口探测：验证该边缘能否连通境外目标。
 			// 避免国内边缘节点国际出口受限/故障（握手成功但境外流量被重置）。
