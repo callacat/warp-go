@@ -1,3 +1,16 @@
+## [v0.6.5] - 2026-09-17
+
+### 改进（百度中转 token 预填，东哥拍板 2026-09-17）
+
+- **X-T5-Auth token 预填默认共享凭据**：`DefaultFrontProxyConfig().Token` 从空串
+  改为共享凭据（打码 `4828****15`，与 x-tunnel examples 同源），用户无需手动填写
+  即可开箱使用。**token 空/缺失一律回填**（统一空串语义，东哥拍板 ①）：
+  `LoadConfig` 对存量 config.json 的显式 `token:\"\"`（v0.6.1/0.6.2 升级用户）同样
+  回填，不再被启动守卫拦下；`ValidateFrontProxy` 空 token 守卫保留，仅防御绕过
+  加载的显式构造场景。GUI `types.ts`/`api.ts` 兜底值（单一事实源常量
+  `DEFAULT_FRONT_PROXY_TOKEN`，与 Go 侧 `DefaultFrontProxyToken` 对齐）统一
+  `||`/`??` 语义，并补 fromConfig / saveConfig token 预填单测（Go + vitest）。
+
 ## [v0.6.4] - 2026-09-17
 
 ### 修复（发布链基建，v0.6.3 缺 Android 资产根因）
@@ -114,17 +127,6 @@ front proxy 时行为完全不变。
   mock 端改按原始 Header 行解析，DialTunnel_OK 才能真验证 Host 头。
 - 验证：`go test ./tunnel/ -run TestFrontProxyDialer` 全绿（此前 DialTunnel_OK
   稳定 403）。
-
-### 改进（百度中转 token 预填，东哥拍板 2026-09-17）
-
-- **X-T5-Auth token 预填默认共享凭据**：`DefaultFrontProxyConfig().Token` 从空串
-  改为共享凭据（打码 `4828****15`，与 x-tunnel examples 同源），用户无需手动填写
-  即可开箱使用。**token 空/缺失一律回填**（统一空串语义，东哥拍板 ①）：
-  `LoadConfig` 对存量 config.json 的显式 `token:""`（v0.6.1/0.6.2 升级用户）同样
-  回填，不再被启动守卫拦下；`ValidateFrontProxy` 空 token 守卫保留，仅防御绕过
-  加载的显式构造场景。GUI `types.ts`/`api.ts` 兜底值（单一事实源常量
-  `DEFAULT_FRONT_PROXY_TOKEN`，与 Go 侧 `DefaultFrontProxyToken` 对齐）统一
-  `||`/`??` 语义，并补 fromConfig / saveConfig token 预填单测（Go + vitest）。
 
 ## [v0.6.1] - 2026-09-03
 
