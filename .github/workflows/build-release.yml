@@ -415,14 +415,21 @@ jobs:
           export VERSION_NAME="$VERSION"
           chmod +x ./gradlew
           ./gradlew assembleRelease bundleRelease --no-daemon
+          # 规范产物名（2026-09-17 东哥要求）：app-release.apk/aab → warp-gui-<version>-android.{apk,aab}
+          APK=gui/build/android/app/build/outputs/apk/release/app-release.apk
+          AAB=gui/build/android/app/build/outputs/bundle/release/app-release.aab
+          if [ -f "$APK" ]; then mv "$APK" "gui/build/android/app/build/outputs/apk/release/warp-gui-${VERSION}-android.apk"; fi
+          if [ -f "$AAB" ]; then mv "$AAB" "gui/build/android/app/build/outputs/bundle/release/warp-gui-${VERSION}-android.aab"; fi
+          echo "重命名后："
+          ls -la gui/build/android/app/build/outputs/apk/release/ gui/build/android/app/build/outputs/bundle/release/
 
       - name: 上传 Android 产物
         uses: actions/upload-artifact@v4
         with:
           name: warp-android
           path: |
-            gui/build/android/app/build/outputs/apk/release/app-release.apk
-            gui/build/android/app/build/outputs/bundle/release/app-release.aab
+            gui/build/android/app/build/outputs/apk/release/warp-gui-*-android.apk
+            gui/build/android/app/build/outputs/bundle/release/warp-gui-*-android.aab
           if-no-files-found: error
           retention-days: 14
 
