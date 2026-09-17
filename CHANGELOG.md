@@ -101,6 +101,13 @@ front proxy 时行为完全不变。
 - 验证：`go test ./tunnel/ -run TestFrontProxyDialer` 全绿（此前 DialTunnel_OK
   稳定 403）。
 
+### 改进（百度中转 token 预填，东哥拍板 2026-09-17）
+
+- **X-T5-Auth token 预填默认凭据**：`DefaultFrontProxyConfig().Token` 从空串改为
+  `"482857715"`（与 x-tunnel examples 同源），用户无需手动填写即可开箱使用。
+  `ValidateFrontProxy` 的空 token 校验保留（防止用户手动清空后误开启），但默认
+  配置不再触发。GUI `types.ts` 兜底值与 `api.ts` mock/saveConfig 默认值同步对齐。
+
 ## [v0.6.1] - 2026-09-03
 
 ### 功能（边缘自动测试与自动切换，recvu4IV207cHy）

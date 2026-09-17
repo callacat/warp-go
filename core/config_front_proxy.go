@@ -13,28 +13,30 @@ import (
 // 关键互斥：front_proxy 开启时忽略 dialIPs/优选 IP（CONNECT 目标被改写成
 // CF 优选裸 IP → 百度 503）。GUI 开关需联动置灰优选 IP 输入。
 //
-// X-T5-Auth token 不进源码（C6）：默认留空，必须由用户填；百度端点对缺失/
-// 错误 token 回 403（2026-09-17 实测：带 token 200 / 不带 403），因此
-// ValidateFrontProxy 在 enabled 且 token 为空时直接报错（启动期暴露）。
+// X-T5-Auth token 预填默认凭据（2026-09-17 东哥拍板：与 x-tunnel 同源，开箱
+// 即用），用户可在 GUI/配置中覆盖。百度端点对缺失/错误 token 回 403，
+// 因此 ValidateFrontProxy 在 enabled 且 token 为空时仍直接报错（防止用户
+// 手动清空后误开启）。
 //
 // 参考蓝本：x-tunnel internal/app/front_proxy.go（语义移植，不抄实现）。
 type FrontProxyConfig struct {
 	Enabled     bool   `json:"enabled"`
 	Server      string `json:"server"`       // front proxy 地址（host:port）
 	ConnectHost string `json:"connect_host"` // Host 头值（兜底=sptest.baidu.com）
-	Token       string `json:"token"`        // X-T5-Auth token（用户自填，无默认值）
+	Token       string `json:"token"`        // X-T5-Auth token（预填共享凭据，用户可覆盖）
 	UserAgent   string `json:"user_agent"`   // 覆写 UA（空=默认 okhttp）
 }
 
 // DefaultFrontProxyConfig 返回内置默认值（百度云加速入口）。
-// Token 故意留空：它是百度内部凭据，硬编码进源码既违反契约（C6）也会随
-// 上游失效变成静默失败源——由配置/GUI 填入，缺失时启动期报错。
+// Token 预填默认凭据（2026-09-17 东哥拍板：与 x-tunnel 同款开箱即用，不再强制用户填）：
+// 该 token 为百度云手机 CONNECT 中转共享凭据（x-tunnel examples 同源），
+// 失效时由用户/示例文档引导更新。
 func DefaultFrontProxyConfig() FrontProxyConfig {
 	return FrontProxyConfig{
 		Enabled:     false,
 		Server:      "cloudnproxy.baidu.com:443",
 		ConnectHost: "sptest.baidu.com",
-		Token:       "",
+		Token:       "482857715",
 		UserAgent:   "okhttp/3.11.0 Dalvik/2.1.0 (Linux; Build/RKQ1.200826.002) baiduboxapp/11.0.5.12 (Baidu; P1 11)",
 	}
 }
@@ -90,7 +92,8 @@ func ValidateFrontProxy(cfg *FrontProxyConfig) error {
 		return ErrFrontProxyServerInvalid
 	}
 	// token 不能为空：X-T5-Auth 缺失/错误时百度端点回 403（实测），
-	// 空 token 的配置等于「开启即全 502」，必须在启动期拦住（C6）。
+	// 空 token 的配置等于「开启即全 502」，必须在启动期拦住。
+	// 注意：默认配置已预填 token，此校验仅覆盖用户手动清空的边界场景。
 	if cfg.Token == "" {
 		return ErrFrontProxyTokenEmpty
 	}

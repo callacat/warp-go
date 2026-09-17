@@ -153,7 +153,7 @@ function mockConfig(): AppConfig {
     geoRepo: "MetaCubeX/meta-rules-dat",
     autoUpdateDays: 7,
     systemProxy: mockState.sysProxy,
-    frontProxy: { enabled: false, server: "", connect_host: "", token: "", user_agent: "" },
+    frontProxy: { enabled: false, server: "cloudnproxy.baidu.com:443", connect_host: "sptest.baidu.com", token: "482857715", user_agent: "" },
     allowUDP: false,
     downloadProxy: "https://gh-proxy.org/",
     themeMode: "system",
@@ -422,8 +422,9 @@ export async function saveConfig(config: AppConfig): Promise<void> {
       enabled: config.frontProxy?.enabled ?? false,
       server: config.frontProxy?.server ?? "cloudnproxy.baidu.com:443",
       connect_host: config.frontProxy?.connect_host ?? "sptest.baidu.com",
-      // token 无默认值：凭据不入源码（C6），留空由配置校验在启动期拦住
-      token: config.frontProxy?.token ?? "",
+      // token 预填默认凭据（2026-09-17 东哥拍板：开箱即用，同 x-tunnel）；
+      // ?? 后备值对齐 Go 侧 DefaultFrontProxyConfig
+      token: config.frontProxy?.token ?? "482857715",
       user_agent: config.frontProxy?.user_agent ?? "",
     },
   });

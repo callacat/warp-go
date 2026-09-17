@@ -50,11 +50,10 @@ func TestValidateFrontProxy_ServerInvalid(t *testing.T) {
 	}
 }
 
-// TestValidateFrontProxy_TokenEmpty 是 C6 的启动期闸门：X-T5-Auth 缺失时百度
-// 端点回 403（实测：带 token 200 / 不带 403），空 token 的配置等于「开启即全
-// 502」，必须在启动期报错而不是运行时才炸。
+// TestValidateFrontProxy_TokenEmpty 验证空 token 仍被拦截（默认已预填，
+// 此用例覆盖用户手动清空 token 后 enabled=true 的边界场景）。
 func TestValidateFrontProxy_TokenEmpty(t *testing.T) {
-	cfg := &FrontProxyConfig{Enabled: true, Server: "proxy.example.com:443"}
+	cfg := &FrontProxyConfig{Enabled: true, Server: "proxy.example.com:443", Token: ""}
 	err := ValidateFrontProxy(cfg)
 	if err == nil {
 		t.Fatal("enabled 且 token 为空应报错")
@@ -86,7 +85,8 @@ func TestValidateFrontProxy_ValidConfig(t *testing.T) {
 	}
 }
 
-// TestDefaultFrontProxyConfig 验证默认值：token 必须为空（C6：凭据不进源码）。
+// TestDefaultFrontProxyConfig 验证默认值：token 预填共享凭据（2026-09-17 东哥拍板，
+// 开箱即用，不再要求用户手动填写）。
 func TestDefaultFrontProxyConfig(t *testing.T) {
 	cfg := DefaultFrontProxyConfig()
 	if cfg.Enabled {
@@ -98,8 +98,8 @@ func TestDefaultFrontProxyConfig(t *testing.T) {
 	if cfg.ConnectHost != "sptest.baidu.com" {
 		t.Fatalf("default connect_host wrong: %q", cfg.ConnectHost)
 	}
-	if cfg.Token != "" {
-		t.Fatalf("默认 token 必须为空（不得硬编码凭据），实际 %q", cfg.Token)
+	if cfg.Token != "482857715" {
+		t.Fatalf("默认 token 应预填为 482857715，实际 %q", cfg.Token)
 	}
 }
 
@@ -197,6 +197,24 @@ func TestApplyFrontProxyOptions_NoFlagKeepsConfig(t *testing.T) {
 	}
 	if opts.EdgeIP != "4" {
 		t.Fatalf("未启用时不应回退 EdgeIP，实际 %q", opts.EdgeIP)
+	}
+}
+
+// TestApplyFrontProxyOptions_DefaultPrefillTokenPasses 验证默认配置下开启
+// front_proxy 不报 token 空（预填 482857715 后，enabled=true 无需用户填 token
+// 即可通过 ValidateFrontProxy）。
+func TestApplyFrontProxyOptions_DefaultPrefillTokenPasses(t *testing.T) {
+	cfg := &Config{FrontProxy: DefaultFrontProxyConfig()}
+	enabled := true
+	opts := &Options{FrontProxyOverride: &enabled, EdgeIP: EdgeIPAuto}
+	if err := ApplyFrontProxyOptions(cfg, opts); err != nil {
+		t.Fatalf("默认配置 + enabled=true 不应报错（token 已预填），实际: %v", err)
+	}
+	if !cfg.FrontProxy.Enabled {
+		t.Fatal("front_proxy 应被旗标启用")
+	}
+	if cfg.FrontProxy.Token != "482857715" {
+		t.Fatalf("token 不应被改动，实际 %q", cfg.FrontProxy.Token)
 	}
 }
 
