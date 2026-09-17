@@ -18,6 +18,17 @@ import (
 // 因此 ValidateFrontProxy 在 enabled 且 token 为空时仍直接报错（防止用户
 // 手动清空后误开启）。
 //
+// DefaultFrontProxyToken 是百度中转共享凭据的默认值（2026-09-17 东哥拍板
+// ①：token 空/缺失一律回填该值，开箱即用；与 x-tunnel examples 同源）。
+// 单一事实源：前端 types.ts 的 DEFAULT_FRONT_PROXY_TOKEN 与 api.ts 引用
+// 均与其对齐，改动时需同步。CHANGELOG 等文档只打码记录，不写全量明文。
+const DefaultFrontProxyToken = "482857715"
+
+// DefaultFrontProxyUserAgent 是 front proxy 拨号层默认 UA（与 x-tunnel 同源，
+// okhttp/3.11.0 + baiduboxapp 组合串）。真实拨号层在 UA 为空时用它兜底
+// （tunnel/front_proxy.go）；GUI mock 展示用同串对齐。
+const DefaultFrontProxyUserAgent = "okhttp/3.11.0 Dalvik/2.1.0 (Linux; Build/RKQ1.200826.002) baiduboxapp/11.0.5.12 (Baidu; P1 11)"
+
 // 参考蓝本：x-tunnel internal/app/front_proxy.go（语义移植，不抄实现）。
 type FrontProxyConfig struct {
 	Enabled     bool   `json:"enabled"`
@@ -36,8 +47,8 @@ func DefaultFrontProxyConfig() FrontProxyConfig {
 		Enabled:     false,
 		Server:      "cloudnproxy.baidu.com:443",
 		ConnectHost: "sptest.baidu.com",
-		Token:       "482857715",
-		UserAgent:   "okhttp/3.11.0 Dalvik/2.1.0 (Linux; Build/RKQ1.200826.002) baiduboxapp/11.0.5.12 (Baidu; P1 11)",
+		Token:       DefaultFrontProxyToken,
+		UserAgent:   DefaultFrontProxyUserAgent,
 	}
 }
 

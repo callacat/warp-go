@@ -320,13 +320,13 @@ export default function SettingsPage() {
                 </Field>
                 <Field
                   label="X-T5-Auth Token"
-                  hint="百度内部凭据，需自行填入（凭据不入源码）；留空无法启动——百度端点对缺失 token 回 403，启动期即报错。失效后自行更新。"
+                  hint="默认已预填共享凭据，可覆盖；清空后启用会报错（百度端点对缺失 token 回 403，启动期即拦）。失效后自行更新。"
                 >
                   <input
                     className={inputCls}
                     value={cfg.frontProxy?.token ?? ""}
                     onChange={(e) => set("frontProxy", { ...(cfg.frontProxy ?? {}), "token": e.target.value })}
-                    placeholder="填入 X-T5-Auth token"
+                    placeholder="默认已预填共享凭据"
                   />
                 </Field>
                 <Field label="自定义 User-Agent" hint="置空使用默认 UA">

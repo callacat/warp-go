@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { fromStatus, fromGeo } from "./types";
+import { DEFAULT_FRONT_PROXY_TOKEN, fromConfig, fromGeo, fromStatus } from "./types";
 
 // 用后端 core.Status JSON 的真实形态（snake_case）验证前端映射。
 // 后端序列化实测：{"state":"running","registration":{"id":"dev-123",
@@ -88,5 +88,42 @@ describe("fromGeo", () => {
     const g = fromGeo({});
     expect(g.geositeUpdated).toBeUndefined();
     expect(g.repository).toBe("MetaCubeX/meta-rules-dat");
+  });
+});
+
+describe("fromConfig frontProxy token 预填语义", () => {
+  it("front_proxy 整体缺失 → token 回填默认共享凭据", () => {
+    const c = fromConfig({});
+    expect(c.frontProxy.token).toBe(DEFAULT_FRONT_PROXY_TOKEN);
+    expect(c.frontProxy.server).toBe("cloudnproxy.baidu.com:443");
+    expect(c.frontProxy.connect_host).toBe("sptest.baidu.com");
+    expect(c.frontProxy.enabled).toBe(false);
+  });
+
+  it("front_proxy 存在但 token 为空串（存量 config.json）→ 回填默认共享凭据", () => {
+    const c = fromConfig({
+      front_proxy: {
+        enabled: true,
+        server: "cloudnproxy.baidu.com:443",
+        connect_host: "sptest.baidu.com",
+        token: "",
+        user_agent: "",
+      },
+    });
+    expect(c.frontProxy.token).toBe(DEFAULT_FRONT_PROXY_TOKEN);
+    expect(c.frontProxy.enabled).toBe(true);
+  });
+
+  it("用户显式 token 非空 → 透传不被覆盖", () => {
+    const c = fromConfig({
+      front_proxy: {
+        enabled: true,
+        server: "cloudnproxy.baidu.com:443",
+        connect_host: "sptest.baidu.com",
+        token: "user-custom",
+        user_agent: "",
+      },
+    });
+    expect(c.frontProxy.token).toBe("user-custom");
   });
 });

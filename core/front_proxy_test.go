@@ -98,8 +98,8 @@ func TestDefaultFrontProxyConfig(t *testing.T) {
 	if cfg.ConnectHost != "sptest.baidu.com" {
 		t.Fatalf("default connect_host wrong: %q", cfg.ConnectHost)
 	}
-	if cfg.Token != "482857715" {
-		t.Fatalf("默认 token 应预填为 482857715，实际 %q", cfg.Token)
+	if cfg.Token != DefaultFrontProxyToken {
+		t.Fatalf("默认 token 应预填共享凭据，实际 %q", cfg.Token)
 	}
 }
 
@@ -201,7 +201,7 @@ func TestApplyFrontProxyOptions_NoFlagKeepsConfig(t *testing.T) {
 }
 
 // TestApplyFrontProxyOptions_DefaultPrefillTokenPasses 验证默认配置下开启
-// front_proxy 不报 token 空（预填 482857715 后，enabled=true 无需用户填 token
+// front_proxy 不报 token 空（预填默认共享凭据后，enabled=true 无需用户填 token
 // 即可通过 ValidateFrontProxy）。
 func TestApplyFrontProxyOptions_DefaultPrefillTokenPasses(t *testing.T) {
 	cfg := &Config{FrontProxy: DefaultFrontProxyConfig()}
@@ -213,7 +213,7 @@ func TestApplyFrontProxyOptions_DefaultPrefillTokenPasses(t *testing.T) {
 	if !cfg.FrontProxy.Enabled {
 		t.Fatal("front_proxy 应被旗标启用")
 	}
-	if cfg.FrontProxy.Token != "482857715" {
+	if cfg.FrontProxy.Token != DefaultFrontProxyToken {
 		t.Fatalf("token 不应被改动，实际 %q", cfg.FrontProxy.Token)
 	}
 }

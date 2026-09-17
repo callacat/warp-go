@@ -17,6 +17,8 @@
 import {
   AppConfig,
   AppStatus,
+  DEFAULT_FRONT_PROXY_TOKEN,
+  DEFAULT_FRONT_PROXY_USER_AGENT,
   fromConfig,
   fromGeo,
   fromLogs,
@@ -153,7 +155,7 @@ function mockConfig(): AppConfig {
     geoRepo: "MetaCubeX/meta-rules-dat",
     autoUpdateDays: 7,
     systemProxy: mockState.sysProxy,
-    frontProxy: { enabled: false, server: "cloudnproxy.baidu.com:443", connect_host: "sptest.baidu.com", token: "482857715", user_agent: "" },
+    frontProxy: { enabled: false, server: "cloudnproxy.baidu.com:443", connect_host: "sptest.baidu.com", token: DEFAULT_FRONT_PROXY_TOKEN, user_agent: DEFAULT_FRONT_PROXY_USER_AGENT },
     allowUDP: false,
     downloadProxy: "https://gh-proxy.org/",
     themeMode: "system",
@@ -397,16 +399,12 @@ export async function getConfig(): Promise<AppConfig> {
   return fromConfig(await svc.GetConfig());
 }
 
-export async function saveConfig(config: AppConfig): Promise<void> {
-  const svc = await loadService();
-  if (!svc) {
-    await sleep(jitter(250));
-    mockState.logs.push({ time: now(), level: "info", msg: "配置已保存（演示）" });
-    return;
-  }
-  // 前端 AppConfig 是 camelCase，但 Go core.Config 的 JSON tag 是 snake_case；
-  // 直接传对象（不要 stringify），Wails 会按字段名映射。
-  await svc.SaveConfig({
+/** 把前端 AppConfig 映射为 Go core.Config 的 snake_case JSON 对象。
+ * 单独抽出便于单测 token/默认值语义（Wails demo 模式不真正调后端）。
+ * 语义对齐 core/config_front_proxy.go DefaultFrontProxyConfig：
+ * token 空/缺失一律回填默认共享凭据（2026-09-17 东哥拍板 ①）。 */
+export function buildSaveConfigPayload(config: AppConfig): Record<string, unknown> {
+  return {
     listen_addr: config.listen,
     rules_path: config.rulesPath,
     geo_dir: config.geoDir,
@@ -422,12 +420,23 @@ export async function saveConfig(config: AppConfig): Promise<void> {
       enabled: config.frontProxy?.enabled ?? false,
       server: config.frontProxy?.server ?? "cloudnproxy.baidu.com:443",
       connect_host: config.frontProxy?.connect_host ?? "sptest.baidu.com",
-      // token 预填默认凭据（2026-09-17 东哥拍板：开箱即用，同 x-tunnel）；
-      // ?? 后备值对齐 Go 侧 DefaultFrontProxyConfig
-      token: config.frontProxy?.token ?? "482857715",
+      // ?? 拦不住显式空串（存量 config.json 的 token:""），必须用 || 回填。
+      token: config.frontProxy?.token || DEFAULT_FRONT_PROXY_TOKEN,
       user_agent: config.frontProxy?.user_agent ?? "",
     },
-  });
+  };
+}
+
+export async function saveConfig(config: AppConfig): Promise<void> {
+  const svc = await loadService();
+  if (!svc) {
+    await sleep(jitter(250));
+    mockState.logs.push({ time: now(), level: "info", msg: "配置已保存（演示）" });
+    return;
+  }
+  // 前端 AppConfig 是 camelCase，但 Go core.Config 的 JSON tag 是 snake_case；
+  // 直接传对象（不要 stringify），Wails 会按字段名映射。
+  await svc.SaveConfig(buildSaveConfigPayload(config));
 }
 
 /** 仅更新部分配置字段（如 theme_mode），避免覆盖其他字段。 */

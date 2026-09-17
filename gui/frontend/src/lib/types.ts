@@ -59,6 +59,12 @@ export interface FrontProxyConfig {
   user_agent: string;
 }
 
+// 与 core/config_front_proxy.go 的 DefaultFrontProxyToken / DefaultFrontProxyUserAgent
+// 对齐（单一事实源，改动需同步；CHANGELOG 等文档只打码不写全量明文）。
+export const DEFAULT_FRONT_PROXY_TOKEN = "482857715";
+export const DEFAULT_FRONT_PROXY_USER_AGENT =
+  "okhttp/3.11.0 Dalvik/2.1.0 (Linux; Build/RKQ1.200826.002) baiduboxapp/11.0.5.12 (Baidu; P1 11)";
+
 export interface PerAppConfig {
   mode: "off" | "allow" | "disallow";
   packages: string[];
@@ -160,8 +166,15 @@ export function fromConfig(v: any): AppConfig {
         : "system",
     perAppMode: o.per_app_mode === "allow" || o.per_app_mode === "disallow" ? o.per_app_mode : "off",
     perAppPackages: Array.isArray(o.per_app_packages) ? o.per_app_packages : [],
-    // token 预填默认（2026-09-17 东哥拍板：开箱即用，同 x-tunnel；凭据为百度共享中转 token）
-    frontProxy: o.front_proxy ?? { enabled: false, server: "cloudnproxy.baidu.com:443", connect_host: "sptest.baidu.com", token: "482857715", user_agent: "" },
+    // token 空/缺失一律回填默认共享凭据（2026-09-17 东哥拍板 ①）——
+    // ?? 只兜整体缺失，存量 config.json 的显式 token:"" 也需回填，故用 ||。
+    frontProxy: {
+      enabled: o.front_proxy?.enabled ?? false,
+      server: o.front_proxy?.server ?? "cloudnproxy.baidu.com:443",
+      connect_host: o.front_proxy?.connect_host ?? "sptest.baidu.com",
+      token: o.front_proxy?.token || DEFAULT_FRONT_PROXY_TOKEN,
+      user_agent: o.front_proxy?.user_agent ?? "",
+    },
   };
 }
 

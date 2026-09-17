@@ -144,6 +144,13 @@ func LoadConfig(path string) (*Config, error) {
 	if err := json.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("解析配置 %s 失败：%w", path, err)
 	}
+	// 统一 token 空串语义（2026-09-17 东哥拍板 ①）：token 空/缺失一律回填默认
+	// 共享凭据。存量 config.json（v0.6.1/0.6.2 的 FrontProxyConfig 无 omitempty，
+	// 必然含显式 "token":""）由此不再拦启动；ValidateFrontProxy 的空 token
+	// 守卫保留，仅防御绕过 LoadConfig 的显式构造/直改场景。
+	if cfg.FrontProxy.Token == "" {
+		cfg.FrontProxy.Token = DefaultFrontProxyToken
+	}
 	return cfg, nil
 }
 

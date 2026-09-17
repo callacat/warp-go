@@ -161,6 +161,56 @@ func TestLoadConfigExplicitZero(t *testing.T) {
 	}
 }
 
+// TestLoadConfigPrefillsEmptyFrontProxyToken 验证存量 config.json 的显式
+// token:""（v0.6.1/0.6.2 的 FrontProxyConfig 无 omitempty，升级用户的旧配置
+// 必然含该字段）在 LoadConfig 时回填默认共享凭据——「开箱即用」对存量升级
+// 用户同样生效，enabled=true 不再被 ErrFrontProxyTokenEmpty 拦下。
+func TestLoadConfigPrefillsEmptyFrontProxyToken(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{
+  "front_proxy": {
+    "enabled": true,
+    "server": "cloudnproxy.baidu.com:443",
+    "connect_host": "sptest.baidu.com",
+    "token": "",
+    "user_agent": ""
+  }
+}`), 0o600); err != nil {
+		t.Fatalf("写入配置失败：%v", err)
+	}
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig 失败：%v", err)
+	}
+	if cfg.FrontProxy.Token != DefaultFrontProxyToken {
+		t.Errorf("旧 token 空串应回填共享凭据，实际 %q", cfg.FrontProxy.Token)
+	}
+	// 回填后 enabled=true 不再报 token 空（存量升级用户一开即用，无需手填）。
+	if err := ValidateFrontProxy(&cfg.FrontProxy); err != nil {
+		t.Errorf("回填后 ValidateFrontProxy 不应报错：%v", err)
+	}
+
+	// 用户显式填写的非空 token 不被覆盖（回填只针对空/缺失）。
+	if err := os.WriteFile(path, []byte(`{
+  "front_proxy": {
+    "enabled": false,
+    "server": "cloudnproxy.baidu.com:443",
+    "token": "user-custom"
+  }
+}`), 0o600); err != nil {
+		t.Fatalf("重写配置失败：%v", err)
+	}
+	cfg, err = LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig 失败：%v", err)
+	}
+	if cfg.FrontProxy.Token != "user-custom" {
+		t.Errorf("用户自定义 token 不应被覆盖，实际 %q", cfg.FrontProxy.Token)
+	}
+}
+
 // TestLoadConfigInvalidJSON 验证解析失败报错且不改动原文件。
 func TestLoadConfigInvalidJSON(t *testing.T) {
 	dir := t.TempDir()
