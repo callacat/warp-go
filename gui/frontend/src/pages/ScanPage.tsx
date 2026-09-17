@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { Radar, Check } from "lucide-react";
 import { applyEdge, scanEdgesV4, scanEdgesV6 } from "../lib/api";
+import { EDGE_PICKING_DISABLED_HINT } from "../lib/frontProxy";
+import { useFrontProxyContext } from "../lib/FrontProxyContext";
 import { Button, Card, StatusPill } from "../components/ui";
 
 interface ScanResult {
@@ -9,6 +11,9 @@ interface ScanResult {
 }
 
 export default function ScanPage() {
+  // 百度中转启用时忽略边缘优选 IP（互斥：CONNECT 目标被改写成 CF 优选裸 IP
+  // → 百度 503），扫描与应用按钮一律置灰并说明原因（C5）。
+  const { enabled: frontProxyEnabled } = useFrontProxyContext();
   const [busy, setBusy] = useState<"v4" | "v6" | null>(null);
   const [results, setResults] = useState<ScanResult[]>([]);
   const [applied, setApplied] = useState<string | null>(null);
@@ -64,12 +69,26 @@ export default function ScanPage() {
         }
       >
         <div className="flex flex-wrap gap-3">
-          <Button onClick={() => onScan("v4")} loading={busy === "v4"}>
+          <Button
+            onClick={() => onScan("v4")}
+            loading={busy === "v4"}
+            disabled={frontProxyEnabled}
+          >
             <Radar className="h-4 w-4" /> 扫描 IPv4 边缘
           </Button>
-          <Button onClick={() => onScan("v6")} loading={busy === "v6"} variant="secondary">
+          <Button
+            onClick={() => onScan("v6")}
+            loading={busy === "v6"}
+            variant="secondary"
+            disabled={frontProxyEnabled}
+          >
             <Radar className="h-4 w-4" /> 扫描 IPv6 边缘
           </Button>
+          {frontProxyEnabled && (
+            <span className="self-center rounded-lg bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:bg-amber-950/40 dark:text-amber-300">
+              {EDGE_PICKING_DISABLED_HINT}
+            </span>
+          )}
           {notice && (
             <span
               className={`self-center rounded-lg px-4 py-3 text-sm ${
@@ -118,7 +137,7 @@ export default function ScanPage() {
                     onClick={() => onApply(addr)}
                     variant="secondary"
                     className="h-8 shrink-0 px-3 text-xs"
-                    disabled={applied === addr}
+                    disabled={frontProxyEnabled || applied === addr}
                   >
                     应用
                   </Button>

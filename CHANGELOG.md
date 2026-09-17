@@ -1,5 +1,59 @@
 ## [未发布]
 
+### 修复（百度中转契约修复 C1–C6 + 真实端点复测 P0，2026-09-17）
+
+本轮基于真实百度端点复测结论修复，**协议形态与契约时序**是重点；不开启
+front proxy 时行为完全不变。
+
+- **P0（真实端点连不上）**：`tunnel/front_proxy.go` 原实现与百度端点建连后
+  先做 TLS 握手再发 CONNECT，但 `cloudnproxy.baidu.com:443` 是**明文 HTTP**
+  端点（443 只是端口号，squid 不终止 TLS）——真实端点直接回
+  `tls: first record does not look like a TLS handshake`，开启后所有请求 502。
+  现按蓝本 x-tunnel 语义改回**明文 CONNECT**（隧道内 TLS 由上层流量自行完成），
+  并给 CONNECT 握手加超时（成功即清除，避免残留 deadline 杀掉数据面长连接）。
+  既有单测用 `tls.NewListener` 做 mock，与真实端点协议不一致、把该缺陷掩盖了：
+  mock 已同步改为明文 TCP listener，并新增「线上首行必须是明文 CONNECT」断言
+  与一条 **env 门控的真实端点集成测试**（`WARP_FRONT_PROXY_LIVE=1` +
+  `WARP_FRONT_PROXY_TOKEN`，token 只从环境读、不入源码）。
+- **C1（-front-proxy 旗标失效）**：旗标覆盖 + EdgeIP 互斥回退原先放在
+  `NewKernel` **之后**，而 `NewKernelContext` 读 `cfg.FrontProxy.Enabled` 决定
+  拨号器、`ResolveEdgeAddrs` 读 `opts.EdgeIP` 展开候选——覆盖晚了两者都看不到
+  （实测：`-front-proxy=true` 后内核全程拨 QUIC、日志 0 处 front proxy 行）。
+  现抽成 `core.ApplyFrontProxyOptions` 并在 `ensureConfig` 之后立即调用。
+- **C2（配置校验从未被调用）**：`ValidateFrontProxy` 原先只有测试调用，配置
+  错误启动期静默、运行时才炸。现由 `ApplyFrontProxyOptions` 调用，错误直接让
+  `Start` 失败（实测：空 token 时启动即报错并退出码 1）。
+- **C3（DNS 不走隧道）**：隧道内 DoH 在本端点上**不可实现**——实测百度代理按
+  域名/SNI 过滤：DoH 裸 IP（1.1.1.1 / 1.0.0.1 / 162.159.36.1 / 162.159.46.1 /
+  8.8.8.8）在 CONNECT 阶段一律 503；`cloudflare-dns.com` 虽回 200，但隧道内
+  TLS 绝大多数连接被立即 EOF（实测 0/6、1/6）。故按契约允许的最低档交付：
+  本模式 DNS **走系统解析器、不经隧道（有泄漏）**，`ResolveDNS` 注释与
+  CHANGELOG 均明示。数据面不受影响：CONNECT 请求行一律是域名形态、由代理侧
+  解析（实测域名 CONNECT 正常）。
+- **C4（单 TCP 无池/无重连）**：补预热连接池（后台预拨 1 条到 front proxy 的
+  TCP 连接，省掉每次新建隧道的握手往返）、`DialTunnel` 失败短退避 300ms 后
+  重试一次、连续 3 轮全失败转长退避静默（复用 `dial_retry.go` 的
+  `dialRetryPolicy`）。另区分**目标级拒绝**（代理可达但对本次目标回 4xx/5xx，
+  如百度白名单 503）与**拨号失败**：前者不推进长退避计数——否则一个目标被拒
+  就会让整条保命通道停掉预热 30 分钟。实测端点其数据面存在间歇窗口（CONNECT
+  回 200 后立即关闭隧道，随节点/时间波动），池与非池在稳定窗口内可用率一致
+  （各 6/6），该波动非本实现引入。
+- **C5（GUI 未置灰优选 IP）**：新增共享启用状态（`lib/frontProxy.ts` +
+  `useFrontProxy` + App 根 `FrontProxyProvider`，与主题同一套路），Settings 页
+  开关即时广播，Scan 页扫描/应用按钮启用时置灰并给出互斥说明。
+- **C6（token 硬编码）**：`DefaultFrontProxyConfig().Token` 置空，GUI 兜底值
+  与 placeholder 去掉真实 token；`ValidateFrontProxy` 在 enabled 且 token 为空
+  时报错（实测百度端点对缺失 X-T5-Auth 回 403：带 token 200 / 不带 403）。
+- **日志如实**：front proxy 模式启动不再打印「✓ MASQUE 连接已建立」（该模式
+  走 HTTP CONNECT TCP fallback、没有 QUIC 连接），改为「✓ 内核已装配：front
+  proxy TCP fallback（HTTP CONNECT，无 QUIC）」——避免排障时把 TCP fallback
+  误判成 QUIC 路径。
+- 新增测试：C1 时序断言（`ApplyFrontProxyOptions` 单测 + `NewKernelContext`
+  拨号器类型断言 + **Start 级回归用例**：真实走 `Server.Start` 断言旗标启用后
+  内核拨号器是 `*tunnel.FrontProxyDialer` 且边缘候选不含用户优选 IP；该用例在
+  修复前代码上稳定失败）、C2/C6 校验用例、C4 池/重试/长退避/目标级拒绝用例、
+  P0 明文断言用例、GUI 纯函数用例。
+
 ### 功能（百度中转开关 + GUI 交互，recvvkPP7whiIL）
 
 - **`-front-proxy` 旗标 / `front_proxy` 配置对象**：百度中转 HTTP CONNECT 保命
@@ -7,11 +61,11 @@
   QUIC/MasqueClient），改用 FrontProxyDialer（HTTP CONNECT 隧道）实现 dialer
   接口。配置项：`front_proxy.{enabled,server,connect_host,token,user_agent}`，
   默认 server=`cloudnproxy.baidu.com:443`、connect_host=`sptest.baidu.com`
-  （Host 头实测 200；Host=服务域名会 403）、token 可覆写（X-T5-Auth 是百度
-  内部固定 token，失效=用户自查，不硬编码猜测）。
+  （Host 头实测 200；Host=服务域名会 403）。token 由用户填入——X-T5-Auth 是
+  百度内部凭据，默认留空、不入源码（缺失时启动期报错，见下方 C6 修复）。
 - **关键互斥（实锤坑）**：front proxy 开启时忽略 dialIPs/优选 IP，EdgeIP 强制
   回退 auto——CONNECT 目标被改写成 CF 优选裸 IP 会导致百度 503。CLI 日志播报
-  回退边界；GUI 开关启用后黄字提醒。
+  回退边界；GUI 开关启用后黄字提醒（Scan 页扫描/应用同步置灰，见 C5 修复）。
 - **GUI（Settings 页）**：新增「百度中转（保命通道）」区块——Toggle + 展开表单
   （server/Host 头/X-T5-Auth token/自定义 UA），启用后黄字互斥提醒。types/api
   补 front_proxy 序列化（fromConfig 缺字段兜底默认值，防升级场景空 Host 403）。
@@ -19,8 +73,8 @@
   auto failover 均未动）；`-front-proxy` 三态覆盖语义与 `-sysproxy` 一致
   （旗标给出时强制，未给出按 config.json）。
 - 新增测试：front proxy 配置校验 8 例（server 空/无效/Host 头兜底/JSON 序列化）+
-  dialer 单测（CONNECT 200/403/关闭/DNS）+ mock TLS 服务器（crypto 自签证书，
-  含 IP SAN）。
+  dialer 单测（CONNECT 200/403/关闭/DNS）+ mock 服务器（自签证书 mock 已在
+  P0 修复中改为明文 TCP listener，见上）。
 
 ### 修复（Host 头赋值 bug，recvvkPP7whiIL 验收发现）
 

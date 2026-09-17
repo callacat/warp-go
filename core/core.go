@@ -423,6 +423,14 @@ func (s *Server) Start(ctx context.Context) error {
 		return fmt.Errorf("加载配置失败：%w", err)
 	}
 
+	// front proxy：旗标覆盖 + 与优选 IP 的互斥回退 + 配置校验。必须在
+	// ResolveEdgeAddrs/NewKernel 之前（C1：NewKernelContext 读
+	// cfg.FrontProxy.Enabled 装配拨号器、ResolveEdgeAddrs 读 opts.EdgeIP
+	// 展开边缘候选——覆盖晚了这两处都看不到；配置错误也在启动期直接失败）。
+	if err := ApplyFrontProxyOptions(cfg, &s.opts); err != nil {
+		return err
+	}
+
 	// 启动从不注册：创建账号是需要明确表达的动作（见 CLI -reg）。
 	regData, err := registration.Load(s.opts.StateFile)
 	if err != nil {
@@ -472,7 +480,14 @@ func (s *Server) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("Kernel 初始化失败：%w", err)
 	}
-	log.Println("✓ MASQUE 连接已建立")
+	// 日志如实反映拨号器类型：front proxy 模式下内核走 FrontProxyDialer
+	// （HTTP CONNECT，TCP fallback），并没有建 MASQUE/QUIC 连接——照打
+	// 「MASQUE 连接已建立」会让排障把 TCP fallback 误判成 QUIC 路径。
+	if cfg.FrontProxy.Enabled {
+		log.Println("✓ 内核已装配：front proxy TCP fallback（HTTP CONNECT，无 QUIC）")
+	} else {
+		log.Println("✓ MASQUE 连接已建立")
+	}
 	log.Printf("✓ 分流引擎就绪（规则=%s，%d 条；GEO=%s）", cfg.RulesPath, len(kernel.engine.get().Rules()), cfg.GeoDir)
 
 	// mixed 代理：同一端口按首字节嗅探 HTTP 与 SOCKS5。Router 命中
@@ -489,20 +504,6 @@ func (s *Server) Start(ctx context.Context) error {
 		Router:     kernel.Route,
 		TunnelDial: kernel.DialTunnel,
 	})
-
-	// front proxy 覆盖（Options.FrontProxyOverride 优先于 config.json）
-	if s.opts.FrontProxyOverride != nil {
-		cfg.FrontProxy.Enabled = *s.opts.FrontProxyOverride
-		if *s.opts.FrontProxyOverride {
-			log.Println("✓ front proxy 已通过 -front-proxy 旗标启用")
-		}
-	}
-	// 互斥：front proxy 开启 → EdgeIP 回退 auto（忽略用户指定的优选 IP/边缘）
-	// CONNECT 目标被改写成 CF 优选裸 IP → 百度 503（实锤坑）
-	if cfg.FrontProxy.Enabled && s.opts.EdgeIP != EdgeIPAuto {
-		log.Printf("⚠ front proxy 开启 → EdgeIP 从 %q 回退 auto（互斥：优选 IP 与百度代理冲突）", s.opts.EdgeIP)
-		s.opts.EdgeIP = EdgeIPAuto
-	}
 
 	// 系统代理（Options.SysProxy 优先于 config.json 的 enable_system_proxy）。
 	if sysProxy := cfg.EnableSystemProxy; s.opts.SysProxy == nil || *s.opts.SysProxy == sysProxy {

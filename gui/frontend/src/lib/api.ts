@@ -422,7 +422,8 @@ export async function saveConfig(config: AppConfig): Promise<void> {
       enabled: config.frontProxy?.enabled ?? false,
       server: config.frontProxy?.server ?? "cloudnproxy.baidu.com:443",
       connect_host: config.frontProxy?.connect_host ?? "sptest.baidu.com",
-      token: config.frontProxy?.token ?? "482857715",
+      // token 无默认值：凭据不入源码（C6），留空由配置校验在启动期拦住
+      token: config.frontProxy?.token ?? "",
       user_agent: config.frontProxy?.user_agent ?? "",
     },
   });

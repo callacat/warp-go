@@ -160,7 +160,8 @@ export function fromConfig(v: any): AppConfig {
         : "system",
     perAppMode: o.per_app_mode === "allow" || o.per_app_mode === "disallow" ? o.per_app_mode : "off",
     perAppPackages: Array.isArray(o.per_app_packages) ? o.per_app_packages : [],
-    frontProxy: o.front_proxy ?? { enabled: false, server: "cloudnproxy.baidu.com:443", connect_host: "sptest.baidu.com", token: "482857715", user_agent: "" },
+    // token 兜底为空串（C6：凭据不进源码；缺失时由 Go 侧启动校验拦截）
+    frontProxy: o.front_proxy ?? { enabled: false, server: "cloudnproxy.baidu.com:443", connect_host: "sptest.baidu.com", token: "", user_agent: "" },
   };
 }
 

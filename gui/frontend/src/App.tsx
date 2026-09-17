@@ -2,6 +2,7 @@ import { useState } from "react";
 import { PanelLeftClose, PanelRightClose } from "lucide-react";
 import { NAV, TITLES } from "./lib/nav";
 import { ThemeProvider } from "./lib/ThemeContext";
+import { FrontProxyProvider } from "./lib/FrontProxyContext";
 import type { PageKey } from "./lib/nav";
 import StatusPage from "./pages/StatusPage";
 import RulesPage from "./pages/RulesPage";
@@ -16,6 +17,7 @@ export default function App() {
 
   return (
     <ThemeProvider>
+    <FrontProxyProvider>
     <div className="flex h-full bg-slate-100 text-slate-900 dark:bg-slate-950 dark:text-slate-100">
       {/* Sidebar */}
       <aside
@@ -110,6 +112,7 @@ export default function App() {
         ))}
       </nav>
     </div>
+    </FrontProxyProvider>
     </ThemeProvider>
   );
 }

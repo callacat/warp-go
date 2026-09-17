@@ -14,6 +14,7 @@ import {
 } from "../lib/api";
 import { AppConfig, PerAppConfig } from "../lib/types";
 import { useThemeContext } from "../lib/ThemeContext";
+import { useFrontProxyContext } from "../lib/FrontProxyContext";
 import type { ThemeMode } from "../lib/theme";
 import { Button, Card, Field, Toggle, inputCls } from "../components/ui";
 import { PerAppPicker } from "../components/PerAppPicker";
@@ -56,6 +57,9 @@ export default function SettingsPage() {
   const [perAppNotice, setPerAppNotice] = useState<string | null>(null);
   const [perAppError, setPerAppError] = useState<string | null>(null);
   const { mode, setMode, setModeFromConfig } = useThemeContext();
+  // front proxy 启用状态广播到 App 根：Scan 页据此置灰扫描/应用（C5）。
+  const { setEnabled: setFrontProxyEnabled, setFromConfig: setFrontProxyFromConfig } =
+    useFrontProxyContext();
 
   const load = useCallback(async () => {
     try {
@@ -64,11 +68,12 @@ export default function SettingsPage() {
       const config = await getConfig();
       setCfg(config);
       setModeFromConfig(config);
+      setFrontProxyFromConfig(config);
       setError(null);
     } catch (e) {
       setError(String(e));
     }
-  }, [setModeFromConfig]);
+  }, [setModeFromConfig, setFrontProxyFromConfig]);
 
   useEffect(() => {
     void isDemoMode().then(setDemo);
@@ -284,7 +289,11 @@ export default function SettingsPage() {
               <div className="flex items-center gap-3">
                 <Toggle
                   checked={cfg.frontProxy?.enabled ?? false}
-                  onChange={(v) => set("frontProxy", { ...(cfg.frontProxy ?? {}), "enabled": v })}
+                  onChange={(v) => {
+                    set("frontProxy", { ...(cfg.frontProxy ?? {}), "enabled": v });
+                    // 立即广播：Scan 页的扫描/应用按钮随之置灰（不必等保存）
+                    setFrontProxyEnabled(v);
+                  }}
                 />
                 <span className="text-sm text-slate-600 dark:text-slate-300">
                   {cfg.frontProxy?.enabled ? "已启用" : "已关闭"}
@@ -309,12 +318,15 @@ export default function SettingsPage() {
                     placeholder="sptest.baidu.com"
                   />
                 </Field>
-                <Field label="X-T5-Auth Token" hint="百度固定 token，失效后用户自查更新">
+                <Field
+                  label="X-T5-Auth Token"
+                  hint="百度内部凭据，需自行填入（凭据不入源码）；留空无法启动——百度端点对缺失 token 回 403，启动期即报错。失效后自行更新。"
+                >
                   <input
                     className={inputCls}
                     value={cfg.frontProxy?.token ?? ""}
                     onChange={(e) => set("frontProxy", { ...(cfg.frontProxy ?? {}), "token": e.target.value })}
-                    placeholder="482857715"
+                    placeholder="填入 X-T5-Auth token"
                   />
                 </Field>
                 <Field label="自定义 User-Agent" hint="置空使用默认 UA">
