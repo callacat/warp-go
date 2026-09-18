@@ -23,8 +23,12 @@ package tunnel
 //     直接丢弃——代理端可能已半关）；
 //  ③ 连续 3 轮全失败转长退避静默：复用 dial_retry.go 的 dialRetryPolicy，
 //     停止密集重试与预热，调用方每次仍只发起一次尝试（不能像装配循环那样
-//     把用户请求挂 30 分钟）。目标级拒绝（代理可达但对本次目标回 4xx/5xx）
-//     不计入该计数——见 DialTunnel 注释。
+//     把用户请求挂 30 分钟）。只有**通道级失败**推进计数——也就是 TCP 拨号到
+//     front proxy 本身连不通。CONNECT 阶段的一切失败（代理 TCP 可达后发生：
+//     显式 4xx/5xx、超时无响应、EOF 等）都是**单目标级**行为，不计入该计数
+//     ——否则放行名单外的一个目标（如 google 被静默黑洞、CONNECT 超时）就会
+//     让整条保命通道停掉预热 30 分钟，故障从单目标扩散到整条通道
+//     （t_9d040f48；详见 DialTunnel 注释）。
 //
 // DNS（C3）：本模式 DNS 走系统解析器、不经隧道（有泄漏），原因与实测证据见
 // ResolveDNS 注释；数据面 CONNECT 一律用域名形态（由代理侧解析）。
@@ -56,11 +60,6 @@ const (
 	// frontProxyDialTimeout 单次 TCP 拨号到 front proxy 的超时。
 	frontProxyDialTimeout = 10 * time.Second
 
-	// frontProxyHandshakeTimeout 是 CONNECT 请求→响应往返的总超时（蓝本
-	// WSHandshakeTimeout 同义）。只约束握手期，成功后清除 deadline——残留
-	// deadline 会杀掉数据面的长连接。
-	frontProxyHandshakeTimeout = 10 * time.Second
-
 	// frontProxyPoolSize 是预热连接数，只预热 1 条：预热只值「省一次握手
 	// 往返」，多条会平白占着故障网络里的半开连接。保命通道的可用性不依赖
 	// 预热（池空即现拨）。
@@ -75,6 +74,12 @@ const (
 	frontProxyDefaultConnectHost = "sptest.baidu.com"
 	frontProxyDefaultUA          = "okhttp/3.11.0"
 )
+
+// frontProxyHandshakeTimeout 是 CONNECT 请求→响应往返的总超时（蓝本
+// WSHandshakeTimeout 同义）。只约束握手期，成功后清除 deadline——残留
+// deadline 会杀掉数据面的长连接。定为变量（非常量）供单测临时调小以测超时
+// 分类路径；生产默认值不变。包内测试串行 + t.Cleanup 还原即可保证安全。
+var frontProxyHandshakeTimeout = 10 * time.Second
 
 // FrontProxyDialer 通过 HTTP CONNECT 隧道实现 dialer 接口。
 type FrontProxyDialer struct {
@@ -127,25 +132,47 @@ func (d *FrontProxyDialer) DialTunnel(ctx context.Context, target string) (net.C
 		conn, dialErr := d.takeConn(ctx)
 		if dialErr != nil {
 			lastErr = dialErr
-		} else if tunnel, connErr := d.connectTunnel(ctx, conn, target); connErr == nil {
+			// TCP 到 front proxy 失败 = **通道级故障**（代理不可达），记一轮连续
+			// 失败；达阈值转长退避（dial_retry.go 的 dialRetryPolicy）。只有这一
+			// 种失败推进计数——「通道本身连不通」才是通道健康问题的证据。
+			if d.noteFailure() {
+				break
+			}
+			continue
+		}
+		// TCP 已通 = 通道可达。此后 CONNECT 阶段的一切结果（200/4xx/5xx/超时/
+		// EOF/写失败）都是**单目标级**行为：百度放行名单按目标放行，目标被拒
+		// （显式 4xx/5xx 或黑洞静默丢弃）只说明这个目标过不去，绝不代表通道坏
+		// 了。若把这类失败计入连续失败，一个 google 超时就会让整条保命通道停
+		// 掉预热 30 分钟——故障从单目标扩散到整条通道。
+		tunnel, connErr := d.connectTunnel(ctx, conn, target)
+		if connErr == nil {
 			d.noteSuccess()
 			d.warmUp()
 			return tunnel, nil
-		} else {
-			lastErr = connErr
 		}
-		// 代理可达、但对**本次目标**回 4xx/5xx（百度白名单/瞬时过载）：这是一次
-		// 目标级拒绝，不是「front proxy 不可达」。若也计入连续失败，一次目标被拒
-		// （实测 DoH 裸 IP 一律 503）就会把整条保命通道推进长退避、停掉预热 30
-		// 分钟——故障从一个域名扩散到整条通道。故只按短退避重试一次，不推进计数。
-		if isFrontProxyRejected(lastErr) {
+		lastErr = connErr
+		if ctx.Err() != nil {
+			// 调用方已取消/超时：非目标级也非通道级，原样返回，不推进计数。
+			return nil, lastErr
+		}
+		if isFrontProxyRejected(connErr) {
+			// 显式 4xx/5xx（代理可达但对本次目标拒绝，如百度白名单 503）：
+			// 短退避重试一次骑掉瞬态过载，不推进计数（现状语义）。
 			continue
 		}
-		// 记一轮失败；连续失败达阈值即转长退避——此后不再密集重试（对齐
-		// dial_retry.go 的 dialRetryPolicy：3 轮全失败就停密集重试 + 静默）。
-		if d.noteFailure() {
+		if isFrontProxyConnectTimeout(connErr) {
+			// CONNECT 无响应是放行名单外目标的典型形态（静默丢弃、不回响应，
+			// 如 172.217.x 实测 i/o timeout）：已等满握手超时，重试只会再挂一个
+			// 超时窗口。快速失败 + 明示降级提示，不推进计数——通道健康，其他
+			// 目标不受影响。
+			log.Printf("⚠ 百度中转 CONNECT 目标 %s 超时无响应（放行名单外或被拒）——该目标降级失败，通道未受影响", target)
 			break
 		}
+		// 其余 CONNECT 阶段错误（写失败/EOF：预热连接被代理半关、协议异常等）：
+		// 代理可达，仍属目标级；短退避重试一次换条新连接隔离陈旧池连接（现状
+		// 语义），不推进计数。
+		continue
 	}
 	return nil, lastErr
 }
@@ -161,10 +188,20 @@ func (e *frontProxyRejectedError) Error() string {
 	return fmt.Sprintf("CONNECT 被拒：HTTP %d（目标 %s）", e.status, e.target)
 }
 
-// isFrontProxyRejected 报告错误是否为「代理可达但拒绝本次 CONNECT」。
+// isFrontProxyRejected 报告错误是否为「代理可达但显式拒绝本次 CONNECT」
+// （HTTP 4xx/5xx）——目标级行为的一种，不推进长退避计数（见 DialTunnel 注释）。
 func isFrontProxyRejected(err error) bool {
 	var rej *frontProxyRejectedError
 	return errors.As(err, &rej)
+}
+
+// isFrontProxyConnectTimeout 报告错误是否为「CONNECT 握手期对端无响应」
+// （读响应 i/o timeout）。放行名单外目标被静默丢弃时代理不回响应、客户端等满
+// 握手超时——与显式 4xx/5xx 同为目标级行为（代理 TCP 可达），但重试只会再挂
+// 一个超时窗口，DialTunnel 将其快速失败而非重试（见 DialTunnel 注释）。
+func isFrontProxyConnectTimeout(err error) bool {
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
 }
 
 // connectTunnel 在已拨通的 TCP 连接上发一次明文 HTTP CONNECT，成功返回隧道

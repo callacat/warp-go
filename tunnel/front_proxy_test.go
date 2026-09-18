@@ -430,3 +430,117 @@ func TestFrontProxyDialer_ResolveDNS(t *testing.T) {
 		t.Fatalf("localhost 解析 = %v，期望回环地址", ip)
 	}
 }
+
+// blackholeFrontProxy 是「放行名单外目标」的黑洞 mock：接受 TCP 连接并读掉
+// CONNECT 请求，但**永不回 HTTP 响应**——模拟真实百度端点对放行名单外目标
+// 的静默丢弃形态（t_9d040f48 真机日志 `读CONNECT响应失败 i/o timeout` 的
+// 成因：google 172.217.x 之类目标 CONNECT 超时而非显式 4xx/5xx）。
+type blackholeFrontProxy struct {
+	addr string
+	ln   net.Listener
+}
+
+func newBlackholeFrontProxy(t *testing.T) *blackholeFrontProxy {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen failed: %v", err)
+	}
+	b := &blackholeFrontProxy{addr: ln.Addr().String(), ln: ln}
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				// 读掉请求（让客户端写请求不阻塞），之后永不写响应。
+				buf := make([]byte, 1024)
+				for {
+					if _, err := c.Read(buf); err != nil {
+						return
+					}
+				}
+			}(conn)
+		}
+	}()
+	t.Cleanup(b.Close)
+	return b
+}
+
+func (b *blackholeFrontProxy) Close() { _ = b.ln.Close() }
+
+func (b *blackholeFrontProxy) dialContext() func(context.Context, string, string) (net.Conn, error) {
+	return func(ctx context.Context, network, _ string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, network, b.addr)
+	}
+}
+
+// TestFrontProxyDialer_ConnectTimeoutDoesNotBackOff 是 t_9d040f48 的回归测试：
+// 「代理可达但 CONNECT 对单个目标超时」（放行名单外目标被静默丢弃）必须按
+// **目标级**处理——不推进长退避计数、通道健康不受影响。
+//
+// 事故链：百度中转访问 google 等放行名单外目标时，真实端点不回 CONNECT
+// 响应，DialTunnel 等满握手超时后抛 `读 CONNECT 响应失败：i/o timeout`；旧
+// 实现把它当通道级失败记轮，连续 3 轮→整条保命通道进 30 分钟长退避（预热
+// 停掉、诊断静默），一个目标被拒扩散成"外网全挂"。修复后：仅 TCP 拨号到
+// front proxy 本身失败才推进计数，CONNECT 阶段一切失败均属目标级。
+func TestFrontProxyDialer_ConnectTimeoutDoesNotBackOff(t *testing.T) {
+	old := frontProxyHandshakeTimeout
+	frontProxyHandshakeTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { frontProxyHandshakeTimeout = old })
+
+	b := newBlackholeFrontProxy(t)
+	d := NewFrontProxyDialer(FrontProxyDialerConfig{
+		Server:      "front.proxy.test:443",
+		ConnectHost: "sptest.baidu.com",
+		Token:       "test-token",
+	})
+	d.dialContext = b.dialContext()
+	t.Cleanup(func() { _ = d.Close() })
+	readLog := captureLog(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// 放行名单外目标连测 4 次：每次都是 CONNECT 超时，但绝不进入长退避。
+	for i := 0; i < 4; i++ {
+		_, err := d.DialTunnel(ctx, "172.217.114.4:443")
+		if err == nil {
+			t.Fatal("黑洞目标应拨号失败")
+		}
+		if isFrontProxyRejected(err) {
+			t.Fatalf("黑洞超时不应被误判为显式 4xx/5xx 拒绝：%v", err)
+		}
+		if !isFrontProxyConnectTimeout(err) {
+			t.Fatalf("黑洞失败应识别为 CONNECT 超时，实际 %v", err)
+		}
+	}
+	if d.backing() {
+		t.Fatal("单目标 CONNECT 超时不应推进长退避（通道本身可达）")
+	}
+	d.policyMu.Lock()
+	rounds := d.policy.rounds
+	d.policyMu.Unlock()
+	if rounds != 0 {
+		t.Fatalf("连续失败轮数 = %d，期望 0（目标级超时不计入）", rounds)
+	}
+	// 明确降级提示：每条黑洞连接恰一条「放行名单外」日志。
+	if got := strings.Count(readLog(), "超时无响应（放行名单外或被拒）"); got != 4 {
+		t.Fatalf("降级提示日志应 4 条，得到 %d", got)
+	}
+
+	// 通道健康未受影响：换回正常 mock，同一拨号器应立即可用。
+	m := newMockFrontProxy(t, "sptest.baidu.com")
+	d.dialContext = m.dialContext()
+	conn, err := d.DialTunnel(ctx, "162.159.198.2:443")
+	if err != nil {
+		t.Fatalf("黑洞超时后可达目标应照常成功，实际失败：%v", err)
+	}
+	_ = conn.Close()
+	if d.backing() {
+		t.Fatal("黑洞超时后可达目标成功，不应处于长退避")
+	}
+}
