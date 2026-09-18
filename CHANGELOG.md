@@ -1,3 +1,21 @@
+## [v0.6.6] - 2026-09-18
+
+### 修复（Android DNS 拦截报错，东哥 09-18 反馈闭环）
+
+- **front-proxy 模式 × Android TUN DNS 拦截递归回环自锁修复**：Android 桥
+  `androidbridge.go` 在 `FrontProxy.Enabled` 时 TunnelDNS 换 `protect()`
+  物理 DNS 直连（复用 dns.go resolvePhysical 先例），阻断
+  198.18.0.1→TUN→HandleQuery 自我回流——修复前 front-proxy 下
+  play-fe.googleapis.com 等域名持续报 '⚠ DNS 拦截：…解析失败：no such host'。
+  规则无误判，0.6.3→0.6.5 DNS/分流代码零改动，v0.6.5 token 预填使
+  front-proxy 首次可启动才暴露。direct/proxy 分流不动、桌面/CLI 零影响。
+  防回流传单测（TunnelDNS≠kernel.ResolveDNS）+分流不变断言，CI 全绿。
+
+### 修复（构建链，Windows job）
+
+- **Windows 构建 sed 分隔符冲突**：分支名含 `/` 致 VERSION 含 `/`，
+  sed `s#...#` 校验失败构建报错——分隔符改用 `|` 并兜底 VERSION 清洗。
+
 ## [v0.6.5] - 2026-09-17
 
 ### 改进（百度中转 token 预填，东哥拍板 2026-09-17）
