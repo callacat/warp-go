@@ -416,12 +416,14 @@ jobs:
           chmod +x ./gradlew
           ./gradlew assembleRelease bundleRelease --no-daemon
           # 规范产物名（2026-09-17 东哥要求）：app-release.apk/aab → warp-gui-<version>-android.{apk,aab}
-          APK=gui/build/android/app/build/outputs/apk/release/app-release.apk
-          AAB=gui/build/android/app/build/outputs/bundle/release/app-release.aab
-          if [ -f "$APK" ]; then mv "$APK" "gui/build/android/app/build/outputs/apk/release/warp-gui-${VERSION}-android.apk"; fi
-          if [ -f "$AAB" ]; then mv "$AAB" "gui/build/android/app/build/outputs/bundle/release/warp-gui-${VERSION}-android.aab"; fi
+          # 注意：本步骤 working-directory=gui/build/android，Gradle 输出在本步相对路径
+          # app/build/outputs/...（不是 gui/build/android/app/...，后者会把路径翻倍）。
+          APK=app/build/outputs/apk/release/app-release.apk
+          AAB=app/build/outputs/bundle/release/app-release.aab
+          if [ -f "$APK" ]; then mv "$APK" "app/build/outputs/apk/release/warp-gui-${VERSION}-android.apk"; fi
+          if [ -f "$AAB" ]; then mv "$AAB" "app/build/outputs/bundle/release/warp-gui-${VERSION}-android.aab"; fi
           echo "重命名后："
-          ls -la gui/build/android/app/build/outputs/apk/release/ gui/build/android/app/build/outputs/bundle/release/
+          ls -la app/build/outputs/apk/release/ app/build/outputs/bundle/release/
 
       - name: 上传 Android 产物
         uses: actions/upload-artifact@v4
