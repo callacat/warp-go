@@ -64,6 +64,11 @@ var defaultPhysicalDNSServers = []netip.Addr{
 	netip.MustParseAddr("114.114.114.114"),
 }
 
+// physicalDNSPort 是物理 DNS 上游端口。生产恒 53（UDP DNS 标准端口）；
+// 单测可改指向内存 mock 服务器（避免绑定 <1024 低端口的权限限制）。与
+// socketProtector 同为包级依赖注入缝，生产不变。
+var physicalDNSPort = "53"
+
 // dnsInterceptor 拦截 TUN 内 UDP:53 查询：按域名走隧道 DoH 或物理 DNS
 // 解析 + IP→域名映射。
 type dnsInterceptor struct {
@@ -111,6 +116,26 @@ func NewDNSInterceptor(resolve ResolveFunc, route RouteFunc, physicalDNS []netip
 	}
 	d.physicalResolver = d.resolvePhysical
 	return d
+}
+
+// NewPhysicalDNSResolver 创建走保护 socket 的物理 DNS 直连解析器（front proxy
+// 模式替换 ResolveFunc，v0.6.6 DNS 回流修复）。返回的 ResolveFunc 复用
+// resolvePhysical/physicalQuery：多上游逐个试、socketProtector 豁免 VPN 路由、
+// A 无记录时 AAAA 兜底。servers 为空用 defaultPhysicalDNSServers 兜底（国内
+// 公共 DNS，与 NewDNSInterceptor 默认一致）。
+//
+// 适用场景：百度中转（front proxy）开启时，kernel.ResolveDNS 委托
+// FrontProxyDialer.ResolveDNS = 系统解析器，系统 DNS 又指向 TUN 内
+// 198.18.0.1 → HandleQuery 递归回流自锁（v0.6.5 Android DNS 拦截报错根因）。
+// Android 桥在 cfg.FrontProxy.Enabled 时用它替换 TunnelDNS，阻断回流；
+// HandleQuery 的 usePhysical 分流语义不变（见其注释）。
+func NewPhysicalDNSResolver(servers []netip.Addr) ResolveFunc {
+	d := &dnsInterceptor{}
+	d.physicalServers = servers
+	if len(d.physicalServers) == 0 {
+		d.physicalServers = defaultPhysicalDNSServers
+	}
+	return d.resolvePhysical
 }
 
 // LookupDomain 查询 IP→域名映射；未命中或已过期返回 ok=false。
@@ -319,7 +344,7 @@ func (d *dnsInterceptor) physicalQuery(ctx context.Context, server netip.Addr, h
 			})
 		}
 	}
-	conn, err := dialer.DialContext(ctx, "udp", net.JoinHostPort(server.String(), "53"))
+	conn, err := dialer.DialContext(ctx, "udp", net.JoinHostPort(server.String(), physicalDNSPort))
 	if err != nil {
 		return nil, err
 	}

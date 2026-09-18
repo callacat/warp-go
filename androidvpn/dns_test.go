@@ -7,6 +7,8 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -447,4 +449,174 @@ func mustName(t *testing.T, s string) dnsmessage.Name {
 		t.Fatalf("NewName(%q) 失败：%v", s, err)
 	}
 	return n
+}
+
+// startPhysicalDNSMock 在 127.0.0.1 临时端口起一个 UDP DNS mock：对 A 查询
+// 回 answerIP，其余（AAAA 等）回 NOERROR 空应答。零真实网络（仅 loopback）。
+// t.Cleanup 关闭连接（goroutine 随之退出）。
+func startPhysicalDNSMock(t *testing.T, answerIP netip.Addr) (net.PacketConn, *net.UDPAddr) {
+	t.Helper()
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("监听物理 DNS mock 失败：%v", err)
+	}
+	t.Cleanup(func() { _ = pc.Close() })
+	ip4 := answerIP.As4()
+	go func() {
+		buf := make([]byte, 512)
+		for {
+			n, clientAddr, err := pc.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			var q dnsmessage.Message
+			if err := q.Unpack(buf[:n]); err != nil {
+				continue
+			}
+			resp := dnsmessage.Message{
+				Header: dnsmessage.Header{
+					ID:                 q.Header.ID,
+					Response:           true,
+					OpCode:             q.Header.OpCode,
+					RecursionDesired:   q.Header.RecursionDesired,
+					RecursionAvailable: true,
+				},
+				Questions: q.Questions,
+			}
+			if len(q.Questions) == 1 && q.Questions[0].Type == dnsmessage.TypeA {
+				resp.Answers = []dnsmessage.Resource{{
+					Header: dnsmessage.ResourceHeader{
+						Name:  q.Questions[0].Name,
+						Type:  dnsmessage.TypeA,
+						Class: dnsmessage.ClassINET,
+						TTL:   300,
+					},
+					Body: &dnsmessage.AResource{A: ip4},
+				}}
+			}
+			wire, err := resp.Pack()
+			if err != nil {
+				continue
+			}
+			_, _ = pc.WriteTo(wire, clientAddr)
+		}
+	}()
+	return pc, pc.LocalAddr().(*net.UDPAddr)
+}
+
+// setPhysicalDNSPort 把物理 DNS 上游端口缝指到 mock 端口（避免绑定 <1024 的
+// 权限限制），测试结束还原。包级依赖注入缝，详见 dns.go physicalDNSPort。
+func setPhysicalDNSPort(t *testing.T, port int) {
+	t.Helper()
+	prev := physicalDNSPort
+	physicalDNSPort = strconv.Itoa(port)
+	t.Cleanup(func() { physicalDNSPort = prev })
+}
+
+// udpAddrIP 提取 UDP 监听地址的 netip.Addr（4 字节 v4 → Unmap 成纯 v4）。
+func udpAddrIP(a *net.UDPAddr) netip.Addr {
+	ip, ok := netip.AddrFromSlice(a.IP)
+	if !ok {
+		panic("mock 本地地址非法")
+	}
+	return ip.Unmap()
+}
+
+// setSocketProtector 注入 fake socketProtector（记录 protect 调用），测试结束还原。
+func setSocketProtector(t *testing.T, fn func(int) error) {
+	t.Helper()
+	prev := socketProtector
+	socketProtector = fn
+	t.Cleanup(func() { socketProtector = prev })
+}
+
+// TestPhysicalDNSResolverDirectUpstream 验证 NewPhysicalDNSResolver 返回的
+// 解析器直连配置的物理 DNS 上游（内存 mock），不经系统解析器：返回 mock 的
+// IP、且 socket 经 protect() 豁免（不会重新进入 TUN 环路）。
+func TestPhysicalDNSResolverDirectUpstream(t *testing.T) {
+	_, serverAddr := startPhysicalDNSMock(t, netip.MustParseAddr("1.2.3.4"))
+	setPhysicalDNSPort(t, serverAddr.Port)
+
+	var protectCalls atomic.Int32
+	setSocketProtector(t, func(int) error { protectCalls.Add(1); return nil })
+
+	resolver := NewPhysicalDNSResolver([]netip.Addr{udpAddrIP(serverAddr)})
+	ip, err := resolver(context.Background(), "www.example.com")
+	if err != nil {
+		t.Fatalf("物理直连解析失败：%v", err)
+	}
+	if got := ip.String(); got != "1.2.3.4" {
+		t.Fatalf("解析结果 = %s，期望 mock 上游的 1.2.3.4（直连物理 DNS 而非系统解析器）", got)
+	}
+	if protectCalls.Load() == 0 {
+		t.Fatal("物理 DNS socket 未走 protect() 豁免 → 查询会重新进入 TUN 环路")
+	}
+}
+
+// TestDNSInterceptorFrontProxyNoLoop 是防回流回归（TunnelDNS ≠
+// kernel.ResolveDNS 的语义侧）：模拟 front-proxy 装配（TunnelDNS =
+// NewPhysicalDNSResolver + proxy 域名走该解析器）。proxy 域名若回流会经
+// 隧道/系统解析器自锁——这里断言隧道解析器零调用、解析结果来自物理 DNS
+// mock、socket 走 protect 豁免。direct 域名同样走物理上游（分流判定不变）。
+func TestDNSInterceptorFrontProxyNoLoop(t *testing.T) {
+	_, serverAddr := startPhysicalDNSMock(t, netip.MustParseAddr("1.2.3.4"))
+	setPhysicalDNSPort(t, serverAddr.Port)
+
+	var protectCalls atomic.Int32
+	setSocketProtector(t, func(int) error { protectCalls.Add(1); return nil })
+
+	// 隧道解析器：若回流路径存在，proxy 域名会经它（=kernel.ResolveDNS → 系统
+	// 解析器）解析；断言它零调用。
+	tunnel := &fakeResolve{v4: map[string]string{"www.google.com": "142.250.72.4"}}
+	mockUpstream := []netip.Addr{udpAddrIP(serverAddr)}
+
+	// 模拟 Android 桥 front-proxy 装配：TunnelDNS = NewPhysicalDNSResolver，
+	// PhysicalDNS 同步传入拦截器（direct 分支的 physicalResolver 也用同一上游）。
+	d := NewDNSInterceptor(NewPhysicalDNSResolver(mockUpstream), splitTestRoute, mockUpstream)
+
+	// proxy 域名（回流高危路径：旧装配走 d.resolve = kernel.ResolveDNS）。
+	resp := d.HandleQuery(packAQuery(0x30, "www.google.com"))
+	if resp == nil {
+		t.Fatal("front-proxy 装配下 proxy 域名查询应返回响应")
+	}
+	var m dnsmessage.Message
+	if err := m.Unpack(resp); err != nil {
+		t.Fatalf("解包响应失败：%v", err)
+	}
+	if len(m.Answers) != 1 {
+		t.Fatalf("应恰有 1 条应答，得到 %d", len(m.Answers))
+	}
+	a, ok := m.Answers[0].Body.(*dnsmessage.AResource)
+	if !ok {
+		t.Fatalf("应答应为 A 记录，得到 %T", m.Answers[0].Body)
+	}
+	if got := net.IP(a.A[:]).String(); got != "1.2.3.4" {
+		t.Fatalf("proxy 域名应返回物理 DNS 上游的 1.2.3.4（而非隧道/系统解析器），得到 %s", got)
+	}
+	if len(tunnel.called) != 0 {
+		t.Fatalf("隧道解析器被调用 %v 次 → 回流路径未阻断（front-proxy 下 TunnelDNS 必须≠ kernel.ResolveDNS）", tunnel.called)
+	}
+	if protectCalls.Load() == 0 {
+		t.Fatal("物理 DNS socket 未走 protect() 豁免 → 查询会重新进入 TUN 环路")
+	}
+
+	// direct 域名：分流判定不变，仍走物理（d.physicalResolver 用同一 mock）。
+	resp = d.HandleQuery(packAQuery(0x31, "www.example.com"))
+	if resp == nil {
+		t.Fatal("direct 域名查询应返回响应")
+	}
+	var m2 dnsmessage.Message
+	if err := m2.Unpack(resp); err != nil {
+		t.Fatalf("解包 direct 响应失败：%v", err)
+	}
+	if len(m2.Answers) != 1 {
+		t.Fatalf("direct 应恰有 1 条应答，得到 %d", len(m2.Answers))
+	}
+	a2, ok := m2.Answers[0].Body.(*dnsmessage.AResource)
+	if !ok {
+		t.Fatalf("direct 应答应为 A 记录，得到 %T", m2.Answers[0].Body)
+	}
+	if got := net.IP(a2.A[:]).String(); got != "1.2.3.4" {
+		t.Fatalf("direct 域名应返回物理 DNS 上游的 1.2.3.4，得到 %s", got)
+	}
 }

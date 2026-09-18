@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"testing"
@@ -265,6 +266,48 @@ func TestNewKernelContextUsesFrontProxyDialer(t *testing.T) {
 	}
 	// 未启用（MASQUE）分支不发真实 QUIC 拨号就无法断言，由 kernel_test.go
 	// 的 fakeDialer 注入用例覆盖装配缝。
+}
+
+// TestKernelRouteUnchangedWhenFrontProxyEnabled 是 v0.6.6 DNS 回流修复的
+// 分流回归：front-proxy 开启（拨号器换 FrontProxyDialer）不得改变 Route
+// 判定——proxy 域名仍 → ("proxy", true)、direct 域名仍 → ("direct", true)、
+// 未命中仍 → ("", false)。Android 桥在 front-proxy 下只替换 TunnelDNS
+// （物理直连阻断回流），分流语义由此证保持原样。
+func TestKernelRouteUnchangedWhenFrontProxyEnabled(t *testing.T) {
+	tmp := t.TempDir()
+	rulesPath := filepath.Join(tmp, "rules.txt")
+	if err := os.WriteFile(rulesPath, []byte("proxy,domain:proxy.example\ndirect,domain:direct.example\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &Config{
+		RulesPath: rulesPath,
+		GeoDir:    filepath.Join(tmp, "geo"),
+		FrontProxy: FrontProxyConfig{
+			Enabled:     true,
+			Server:      "cloudnproxy.baidu.com:443",
+			ConnectHost: "sptest.baidu.com",
+			Token:       "t",
+		},
+	}
+	reg := &registration.Registration{
+		AssignedIPv4: "172.16.0.2",
+		AssignedIPv6: "2606:4700:110:8a2e:fb70:7a34:2f7e:1",
+	}
+	k, err := NewKernelContext(context.Background(), cfg, reg, []string{"162.159.192.1:443"}, &tls.Config{})
+	if err != nil {
+		t.Fatalf("NewKernelContext（front_proxy 开启）失败：%v", err)
+	}
+	t.Cleanup(func() { _ = k.Close() })
+
+	if action, matched := k.Route("proxy.example", netip.Addr{}); action != "proxy" || !matched {
+		t.Errorf("front_proxy 下 Route(proxy.example) = (%q, %v)，期望 (\"proxy\", true)", action, matched)
+	}
+	if action, matched := k.Route("direct.example", netip.Addr{}); action != "direct" || !matched {
+		t.Errorf("front_proxy 下 Route(direct.example) = (%q, %v)，期望 (\"direct\", true)", action, matched)
+	}
+	if action, matched := k.Route("unmatched.example", netip.Addr{}); action != "" || matched {
+		t.Errorf("front_proxy 下 Route(未命中) = (%q, %v)，期望 (\"\", false)", action, matched)
+	}
 }
 
 // TestServerStartFrontProxyFlagAppliesBeforeKernel 是 C1 的 Start 级回归防线：
