@@ -333,6 +333,12 @@ warp-go/
 
 | 版本 | 日期 | 摘要 |
 |---|---|---|
+| [v0.6.6](CHANGELOG.md#v066---2026-09-18) | 2026-09-18 | **Android front-proxy DNS 拦截报错修复**（front-proxy × TUN DNS 拦截递归回环自锁 → TunnelDNS 换 `protect()` 物理直连，play-fe.googleapis.com 等不再报 no such host）、Windows 构建 sed 分隔符冲突修复 |
+| [v0.6.5](CHANGELOG.md#v065---2026-09-17) | 2026-09-17 | **百度中转 X-T5-Auth token 预填开箱即用**（空/缺失一律回填）、APK/AAB 产物规范命名（warp-gui-\<version\>-android） |
+| [v0.6.4](CHANGELOG.md#v064---2026-09-17) | 2026-09-17 | Android 构建门禁修复（SDK `tools` 包下架）——补齐 v0.6.3 缺失的 Android 资产，二进制无代码变化 |
+| [v0.6.3](CHANGELOG.md#v063---2026-09-17) | 2026-09-17 | CI 测试环境兼容修复（v0.6.2 发布失败根因） |
+| [v0.6.1](CHANGELOG.md#v061---2026-09-03) | 2026-09-03 | 边缘自动测试与自动切换（v4/v6 failover）、拨号长退避（3 轮失败 → 30min 长退避 + 逐端口日志静默） |
+| [v0.6.0](CHANGELOG.md#v060---2026-08-27) | 2026-08-27 | 分应用代理（VpnService 应用过滤 + Go TUN 零改动） |
 | [v0.5.17](CHANGELOG.md#v0517---2026-08-04) | 2026-08-04 | **Android `udpnat` panic 崩溃修复**（`UDPTimeout/ICMPTimeout` 未设 → `udpnat.New` 对 timeout=0 panic → SIGABRT；对齐 sing-box 默认 5m/10s）+ 异步启动 `recover` 兜底；**GUI 保存配置后切页看不到变更修复**（`SaveConfig`/`applyConfigReload` 同步 `s.cfg` 内存快照 + 路径锚定） |
 | [v0.5.14](CHANGELOG.md#v0514---2026-08-03) | 2026-08-03 | **Android 连接失败根因修复**（自路由 → `VpnService.protect` 拨号 socket）、启动失败通知残留修复（kernelFailed 自拆除）、拨号超时可配置（`dial_timeout_seconds`，默认 60s） |
 | [v0.5.13](CHANGELOG.md#v0513---2026-08-03) | 2026-08-03 | 运行时文件统一 `config/` 子目录（Docker 修复 + 旧布局迁移）、Android 规则页"分流引擎未初始化"修复（ReloadRules 路由到 androidRuntime.kernel） |
