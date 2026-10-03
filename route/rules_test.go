@@ -3,6 +3,7 @@ package route
 import (
 	"errors"
 	"io"
+	"net/netip"
 	"io/fs"
 	"log"
 	"os"
@@ -154,8 +155,8 @@ func TestDefaultRulesParses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("默认模板必须可解析：%v", err)
 	}
-	if len(rules) != 9 {
-		t.Fatalf("默认模板应有 9 条规则，得到 %d：%+v", len(rules), rules)
+	if len(rules) != 10 {
+		t.Fatalf("默认模板应有 10 条规则，得到 %d：%+v", len(rules), rules)
 	}
 	want := []Rule{
 		{Action: "reject", Kind: "geosite", Value: "category-ads-all"},
@@ -165,6 +166,7 @@ func TestDefaultRulesParses(t *testing.T) {
 		{Action: "proxy", Kind: "geoip", Value: "google"},
 		{Action: "proxy", Kind: "geosite", Value: "geolocation-!cn"},
 		{Action: "proxy", Kind: "geoip", Value: "telegram"},
+		{Action: "proxy", Kind: "ip-cidr", Value: "1.1.1.1/32", Prefix: netip.MustParsePrefix("1.1.1.1/32")},
 		{Action: "direct", Kind: "geosite", Value: "cn"},
 		{Action: "direct", Kind: "geoip", Value: "cn"},
 	}
@@ -317,5 +319,51 @@ func TestParseRulesDefault(t *testing.T) {
 	// 非法行为报错。
 	if _, err := ParseRules("default:banana\n"); err == nil {
 		t.Fatal("default 非法行为应报错")
+	}
+}
+
+// TestParseRulesIPCIDR 锁定 ip-cidr 条件：现网曾因裸写 `proxy,1.1.1.1/32`
+// （无前缀）触发解析错误 + 启动崩溃循环（CT103 NRestarts=6，40000 无监听），
+// 也曾因缺少该条件类型而无法表达「1.1.1.1 走隧道」。
+func TestParseRulesIPCIDR(t *testing.T) {
+	rules, err := ParseRules("proxy,ip-cidr:1.1.1.1/32\ndirect,ip-cidr:10.0.0.0/8\n")
+	if err != nil {
+		t.Fatalf("ip-cidr 规则应可解析：%v", err)
+	}
+	if len(rules) != 2 {
+		t.Fatalf("应解析出 2 条规则，得到 %d", len(rules))
+	}
+	if got := rules[0].Prefix.String(); got != "1.1.1.1/32" {
+		t.Errorf("第 1 条 Prefix = %q，期望 1.1.1.1/32", got)
+	}
+	if got := rules[1].Prefix.String(); got != "10.0.0.0/8" {
+		t.Errorf("第 2 条 Prefix = %q，期望 10.0.0.0/8", got)
+	}
+
+	// 非法值必须在解析期就报错（拖到匹配期会让脏规则静默不生效）。
+	for _, bad := range []string{"proxy,ip-cidr:1.1.1.1", "proxy,ip-cidr:not-an-ip", "proxy,ip-cidr:"} {
+		if _, err := ParseRules(bad + "\n"); err == nil {
+			t.Errorf("非法 ip-cidr 行 %q 应报错", bad)
+		}
+	}
+}
+
+// TestDefaultRulesParseAndEngineInit 锁定默认模板可被解析且引擎能初始化——
+// 模板里新增的条件类型若拼错，启动路径会直接失败。
+func TestDefaultRulesParseAndEngineInit(t *testing.T) {
+	if _, err := ParseRules(DefaultRules); err != nil {
+		t.Fatalf("默认规则模板应可解析：%v", err)
+	}
+	e := newTestEngine(t, DefaultRules)
+
+	// 1.1.1.1 必须走隧道，且不能被后面的 direct,geoip:cn 抢走。
+	act, _, matched := e.Match("1.1.1.1", netip.Addr{})
+	if !matched || act != ActionProxy {
+		t.Errorf("1.1.1.1 应命中 proxy,ip-cidr:1.1.1.1/32，得到 (%s, matched=%v)", act, matched)
+	}
+	// 同网段外仍由 geoip 兜底，CIDR 规则不越界。
+	act, _, _ = e.Match("1.0.0.1", netip.Addr{})
+	if act == ActionProxy && matched {
+		t.Errorf("1.0.0.1 不应命中 /32 规则，得到 %s", act)
 	}
 }

@@ -82,6 +82,8 @@ const (
 	// www.cloudflare.com 是 Cloudflare 自家 anycast 域名，任意边缘到它必达；
 	// CONNECT 由边缘侧解析域名 → 本地零 DNS 依赖。注意：自家域与「该边缘国际
 	// 出口是否受限」弱相关，选边缘判别力待部署后核验（审查 t_865ee6a1 major）。
+	// 该目标会回 403（自家域被边缘策略性拒绝），探测判据只看「有无 HTTP 响应」
+	// 不看状态码，见 probeVerdict。
 	probeEgressTarget  = "www.cloudflare.com:443"
 	probeEgressTimeout = 5 * time.Second
 
@@ -533,11 +535,24 @@ func (c *MasqueClient) probeInternationalEgress(ctx context.Context, bundle *con
 	}
 	defer releaseStream(stream)
 	resp, err := connectThroughEdge(stream, req, connectDeadline(probeCtx, probeEgressTimeout))
+	return probeVerdict(resp, err)
+}
+
+// probeVerdict 判定一次探测 CONNECT 的结果：判据是「有没有收到 HTTP 响应」
+// 而非「是不是 2xx」。出口真被掐时的表现是 CONNECT 超时 / 流错误 / 无响应
+// （压根读不回状态行）；只要边缘交回了状态行，就证明这条 H3 连接活着、边缘
+// 在应答——把它当失败是把目标侧的策略性拒绝误判成边缘死亡。
+//
+// v0.6.7 实锤：www.cloudflare.com 回 403 导致 IPv6 边缘全部被判失败 → MASQUE
+// 所有边缘失败 → CT103 数据面 0/30（02:13 回滚）。同期经隧道 curl 同一主机的
+// /cdn-cgi/trace 是 200，证明链路真通。
+func probeVerdict(resp *http.Response, err error) error {
 	if err != nil {
 		return fmt.Errorf("国际出口探测 %s 失败：%w", probeEgressTarget, err)
 	}
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("国际出口探测 %s 返回 %d", probeEgressTarget, resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		// 非 2xx 不再判失败，只留一条诊断（quiet 时由调用方不打）。
+		log.Printf("国际出口探测 %s 返回 %d（按响应可达放行）", probeEgressTarget, resp.StatusCode)
 	}
 	return nil
 }

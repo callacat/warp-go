@@ -22,6 +22,7 @@ package route
 //	geoip:<cc>      匹配 geoip 分类的 IP 段（如 cn）；private 为库内真实条目
 //	geoip:lan       内置内网判定（IsPrivate/IsLoopback/IsUnspecified/IsMulticast/IsLinkLocalUnicast）
 //	domain:<suffix> 按域名后缀匹配（带标签边界，如 example.com 匹配 a.example.com）
+//	ip-cidr:<cidr>  IP 网段字面量（如 1.1.1.1/32），geoip 之外的精确网段
 
 import (
 	"crypto/sha256"
@@ -29,6 +30,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"net/netip"
 	"os"
 	"strings"
 	"sync"
@@ -47,6 +49,11 @@ const (
 	KindGeoSite = "geosite" // 域名分类匹配
 	KindGeoIP   = "geoip"   // IP 段匹配
 	KindDomain  = "domain"  // 域名后缀匹配
+	// KindIPCIDR 是 IP 网段字面量匹配（如 1.1.1.1/32）。geoip 条件只能按 GEO
+	// 库的粗分类命中，无法表达「某个具体 IP 走隧道」——1.1.1.1 在 CT103 被
+	// geoip:cn 命中判 direct（物理黑洞，10-03 共 2175 次 CONNECT 超时），
+	// 裸写 `proxy,1.1.1.1/32` 会被解析器拒绝并导致启动崩溃循环。
+	KindIPCIDR = "ip-cidr"
 	// KindDefault 是无条件的兜底声明（`default:<action>` 行），没有匹配
 	// 条件：Match 全部未命中时返回其 Action。不参与逐条匹配（无 case 跳过）。
 	KindDefault = "default"
@@ -61,6 +68,9 @@ type Rule struct {
 	Action string // proxy 或 direct
 	Kind   string // geosite / geoip / domain
 	Value  string // 条件值（不含前缀）
+	// Prefix 是 KindIPCIDR 的解析结果（其余 Kind 零值）。解析期即校验，
+	// 非法 CIDR 直接报错，不会拖到匹配期。
+	Prefix netip.Prefix
 }
 
 // DefaultRules 是首次初始化写入 rules.txt 的默认规则模板。
@@ -79,6 +89,9 @@ proxy,geosite:google
 proxy,geoip:google
 proxy,geosite:geolocation-!cn
 proxy,geoip:telegram
+# Cloudflare DNS 走隧道：geoip 库把它归到 cn 判 direct，直连路径黑洞
+# （CT103 10-03 共 2175 次 CONNECT 超时）。CIDR 字面量必须放在 direct,geoip:cn 之前。
+proxy,ip-cidr:1.1.1.1/32
 direct,geosite:cn
 direct,geoip:cn
 `
@@ -86,12 +99,13 @@ direct,geoip:cn
 // 可用的行为与条件类型（大小写不敏感地接受，统一归一化为小写）。
 var (
 	validActions = map[string]bool{ActionProxy: true, ActionDirect: true, ActionReject: true}
-	validKinds   = map[string]bool{KindGeoSite: true, KindGeoIP: true, KindDomain: true}
+	validKinds   = map[string]bool{KindGeoSite: true, KindGeoIP: true, KindDomain: true, KindIPCIDR: true}
 )
 
 // ParseRules 解析规则文本。空行与 `#` 开头的注释行被忽略；每行格式
 // `行为,条件`，行为必须是 proxy/direct，条件必须是 geosite:<name> /
-// geoip:<cc> / geoip:lan / geoip:private / domain:<suffix> 之一。
+// geoip:<cc> / geoip:lan / geoip:private / domain:<suffix> /
+// ip-cidr:<cidr> 之一。
 // 另有 `default:<action>` 兜底声明行（至多一条，见 KindDefault）。
 // 非法行返回错误，错误信息带行号（从 1 起）。
 func ParseRules(rulesText string) ([]Rule, error) {
@@ -138,14 +152,22 @@ func ParseRules(rulesText string) ([]Rule, error) {
 		}
 		kind = strings.ToLower(strings.TrimSpace(kind))
 		if !validKinds[kind] {
-			return nil, fmt.Errorf("第 %d 行条件类型 %q 非法（仅支持 geosite / geoip / domain）", lineNo, kind)
+			return nil, fmt.Errorf("第 %d 行条件类型 %q 非法（仅支持 geosite / geoip / domain / ip-cidr）", lineNo, kind)
 		}
 		value = strings.TrimSpace(value)
 		if value == "" {
 			return nil, fmt.Errorf("第 %d 行条件值不能为空（格式: %s:<name>）", lineNo, kind)
 		}
 
-		rules = append(rules, Rule{Action: action, Kind: kind, Value: value})
+		rule := Rule{Action: action, Kind: kind, Value: value}
+		if kind == KindIPCIDR {
+			prefix, err := netip.ParsePrefix(value)
+			if err != nil {
+				return nil, fmt.Errorf("第 %d 行 ip-cidr %q 非法（需要 CIDR，如 1.1.1.1/32）", lineNo, value)
+			}
+			rule.Prefix = prefix.Masked()
+		}
+		rules = append(rules, rule)
 	}
 	return rules, nil
 }

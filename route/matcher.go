@@ -113,6 +113,14 @@ func (e *Engine) Match(host string, ip netip.Addr) (string, Rule, bool) {
 			if geoIP != nil && geoIP.Contains(r.Value, ip) {
 				return e.hit(r)
 			}
+
+		case KindIPCIDR:
+			if !ip.IsValid() {
+				continue // 域名且未解析：没有 IP 可与 CIDR 比对
+			}
+			if r.Prefix.Contains(ip) {
+				return e.hit(r)
+			}
 		}
 	}
 

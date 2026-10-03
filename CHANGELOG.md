@@ -1,5 +1,37 @@
 ## [Unreleased]
 
+### 修复（出口探测把 403 判失败 → 选边缘全跳过 → 数据面瘫，v0.6.7 现网事故，t_794f439e）
+
+- **探测判据改「收到任意 HTTP 响应即出口可达」**：`tunnel/client_conn.go`
+  `probeInternationalEgress` 原要求 CONNECT 必须回 200。v0.6.7 把探测目标换成
+  www.cloudflare.com 后，该目标在边缘侧被策略性拒绝回 **403** → 判失败 →
+  IPv6 边缘全部跳过 → MASQUE 所有边缘失败 → **CT103 数据面 0/30**
+  （2026-10-04 02:08-02:13，02:13 回滚 v0.6.1-edgeauto 恢复）。
+  现在只要交换完成（读回了状态行）即视为出口可达，4xx/5xx 仅留一条诊断日志；
+  **只有传输层失败（超时 / 流错误 / 无响应）才判失败**——出口真被掐时的表现
+  本来就是读不回状态行，不会被状态码混淆。同期经隧道实测同一主机的
+  `/cdn-cgi/trace` 为 200，佐证链路真通、403 是目标侧拒绝而非链路故障。
+  新增 `TestProbeVerdictStatusCodeLocked` 锁死双判据（403/5xx → 成功，
+  超时 → 失败）。探测量身（5s）、失败阈值与周期均未变。
+- **探测目标保持 www.cloudflare.com:443**（未换 github.com——审查 t_865ee6a1
+  建议的 github.com 在 WARP 出口实测 000 超时）。
+
+### 新增（`ip-cidr:` 规则条件，让 1.1.1.1 走隧道）
+
+- **`ip-cidr:<cidr>` 条件类型**：`route/rules.go` + `route/matcher.go`。此前
+  规则条件只有 geosite / geoip / domain / geoip:lan，**无法表达「某个具体 IP
+  走隧道」**：1.1.1.1 在 CT103 被 `direct,geoip:cn` 命中判 direct（直连路径是
+  物理黑洞，10-03 共 2175 次 CONNECT 超时，t_cd86bd83 审查 minor 攒批）。
+  现网首试的裸写法 `proxy,1.1.1.1/32` 会被解析器拒绝（缺 `:` 前缀）并导致
+  **启动崩溃循环**（NRestarts=6、40000 无监听），正确写法是
+  `proxy,ip-cidr:1.1.1.1/32`，已并入默认模板（**放在 `direct,geoip:cn` 之前**，
+  first-match-wins）。CIDR 在解析期校验并 `Masked()`，非法值启动即报错而不是
+  静默不生效。**存量 rules.txt 不被覆盖**（`EnsureRulesFile` 只在缺失时写模板），
+  已在用的部署需自行加这一行。
+- 新增测试 `TestParseRulesIPCIDR`（合法值 + 三种非法值）、
+  `TestDefaultRulesParseAndEngineInit`（模板可解析 + 引擎可初始化 + 1.1.1.1
+  命中 proxy 且不越界）。
+
 ### 修复（运行期国际出口探测打裸 IP 恒假失败，t_2addd92d）
 
 - **探测目标 8.8.8.8:443 → www.cloudflare.com:443**：`tunnel/client_conn.go`
