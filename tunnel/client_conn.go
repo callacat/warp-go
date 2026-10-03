@@ -76,9 +76,11 @@ const (
 	reconnectRetryMax     = 5 * time.Second
 
 	// 国际出口探测配置：验证边缘节点是否真的能连通境外目标。
-	// 使用 Google 公共 DNS IP (8.8.8.8:443) 作为探测目标——它在边缘网络内必达，
-	// 且不依赖 DNS 解析（避免循环依赖）。
-	probeEgressTarget  = "8.8.8.8:443"
+	// 目标必须是域名而非裸 IP：Cloudflare 边缘对 CONNECT 到裸 IP
+	// （8.8.8.8 / 1.1.1.1，同 front_proxy.go 所述）不回响应，探测恒在 5s 上
+	// 假失败（CT103 48h 65 次）。www.cloudflare.com 是 Cloudflare 自家 anycast
+	// 域名，任意边缘到它必达；CONNECT 由边缘侧解析域名 → 本地零 DNS 依赖。
+	probeEgressTarget  = "www.cloudflare.com:443"
 	probeEgressTimeout = 5 * time.Second
 
 	// egressProbeInterval 是运行期国际出口活性探测周期：每 20s 在共享 QUIC
@@ -498,7 +500,7 @@ func unroutableFamily(err error) bool {
 }
 
 // probeInternationalEgress 在指定 bundle 上做一次到 probeEgressTarget
-// （8.8.8.8:443，WARP 边缘网内必达的境外目标）的 H3 CONNECT 探测，验证该
+// （www.cloudflare.com:443，任意 WARP 边缘必达的境外目标）的 H3 CONNECT 探测，验证该
 // 边缘的国际出口真的可用——握手成功但境外流量被掐（国内边缘节点国际出口
 // 受限/故障）会让后续所有用户 CONNECT 在边缘侧被重置，拨号时探测一次就能
 // 在选边缘阶段排除它们。成功返回 nil（探测流已释放），失败返回错误。

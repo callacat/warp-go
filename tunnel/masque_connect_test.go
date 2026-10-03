@@ -143,7 +143,19 @@ func TestProbeInternationalEgressNilBundle(t *testing.T) {
 	}
 }
 
-// TestProbeEgressOnceFailureTriggersReconnect 锁定运行期探测失败 → 置 dead
+// TestProbeEgressTargetIsDomain 锁定探测目标必须是域名：Cloudflare 边缘对 CONNECT
+// 到裸 IP（8.8.8.8 / 1.1.1.1）不回响应，裸 IP 目标会让运行期探测恒假失败
+// （CT103 48h 65 次瞬时失败告警）。
+func TestProbeEgressTargetIsDomain(t *testing.T) {
+	host, _, err := net.SplitHostPort(probeEgressTarget)
+	if err != nil {
+		t.Fatalf("探测目标 %q 不是 host:port 形式：%v", probeEgressTarget, err)
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		t.Fatalf("探测目标 %q 是裸 IP——边缘不回响应，探测恒假失败", probeEgressTarget)
+	}
+}
+
 // + retire + reconnect（不等用户请求在死连接上白等）：静默死会话（KeepAlive
 // 往返仍在但出口已坏）由周期探测发现，这是 debugdiag 隧道被掐后浏览器
 // connection reset 风暴的主动侧修复。

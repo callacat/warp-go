@@ -1,5 +1,16 @@
 ## [Unreleased]
 
+### 修复（运行期国际出口探测打裸 IP 恒假失败，t_2addd92d）
+
+- **探测目标 8.8.8.8:443 → www.cloudflare.com:443**：`tunnel/client_conn.go`
+  `probeEgressTarget` 原用 Google DNS 裸 IP，Cloudflare 边缘对 CONNECT 到裸 IP
+  （同 `front_proxy.go` 已记载的 1.1.1.1 / 162.159.36.1）不回响应 → 20s 周期的
+  运行期活性探测每次都在 5s 上超时（CT103 实测 48h 内 65 次
+  「运行期出口探测瞬时失败」）。探测目标改为 Cloudflare 自家 anycast 域名
+  （任意边缘必达，CONNECT 由边缘侧解析 → 本地零 DNS 依赖），国内边缘的国际出口
+  探测语义不变。新增回归测试 `TestProbeEgressTargetIsDomain` 锁死「目标不得是
+  裸 IP」，防止同类回归再次静默上线。
+
 ### 修复（百度中转 CONNECT 超时误判通道级故障 → 长退避误杀整条通道，t_9d040f48）
 
 - **只认「TCP 拨号到 front proxy 失败」为通道级故障**：`tunnel/front_proxy.go`
