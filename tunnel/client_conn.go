@@ -435,7 +435,7 @@ func (c *MasqueClient) dial(ctx context.Context, quiet bool) (*connBundle, error
 		if err == nil {
 			// 国际出口探测：验证该边缘能否连通境外目标。
 			// 避免国内边缘节点国际出口受限/故障（握手成功但境外流量被重置）。
-			if err := c.probeEgress(ctx, bundle); err != nil {
+			if err := c.probeEgress(ctx, bundle, quiet); err != nil {
 				if !quiet {
 					log.Printf("边缘 %s 国际出口探测失败（%v），尝试下一个 ...", addr, err)
 				}
@@ -515,7 +515,7 @@ func unroutableFamily(err error) bool {
 // probeInternationalEgress 的无限递归。探测只关心"CONNECT 能否建立"，成功
 // 立即 releaseStream 归还边缘并发流配额；失败由调用方决定丢弃 bundle 或
 // 标记 dead。
-func (c *MasqueClient) probeInternationalEgress(ctx context.Context, bundle *connBundle) error {
+func (c *MasqueClient) probeInternationalEgress(ctx context.Context, bundle *connBundle, quiet bool) error {
 	if bundle == nil || bundle.h3Client == nil {
 		return errors.New("国际出口探测：bundle 未就绪")
 	}
@@ -535,7 +535,7 @@ func (c *MasqueClient) probeInternationalEgress(ctx context.Context, bundle *con
 	}
 	defer releaseStream(stream)
 	resp, err := connectThroughEdge(stream, req, connectDeadline(probeCtx, probeEgressTimeout))
-	return probeVerdict(resp, err)
+	return probeVerdict(resp, err, quiet)
 }
 
 // probeVerdict 判定一次探测 CONNECT 的结果：判据是「有没有收到 HTTP 响应」
@@ -546,12 +546,14 @@ func (c *MasqueClient) probeInternationalEgress(ctx context.Context, bundle *con
 // v0.6.7 实锤：www.cloudflare.com 回 403 导致 IPv6 边缘全部被判失败 → MASQUE
 // 所有边缘失败 → CT103 数据面 0/30（02:13 回滚）。同期经隧道 curl 同一主机的
 // /cdn-cgi/trace 是 200，证明链路真通。
-func probeVerdict(resp *http.Response, err error) error {
+func probeVerdict(resp *http.Response, err error, quiet bool) error {
 	if err != nil {
 		return fmt.Errorf("国际出口探测 %s 失败：%w", probeEgressTarget, err)
 	}
-	if resp.StatusCode != http.StatusOK {
-		// 非 2xx 不再判失败，只留一条诊断（quiet 时由调用方不打）。
+	if resp.StatusCode != http.StatusOK && !quiet {
+		// 非 2xx 不判失败，只留一条诊断；quiet（长退避静默重试）时抑制，
+		// 遵守 dial 逐候选日志的 quiet 契约（审查 t_794f439e major#1：
+		// 此前无条件打 + 注释谎称"由调用方不打"）。
 		log.Printf("国际出口探测 %s 返回 %d（按响应可达放行）", probeEgressTarget, resp.StatusCode)
 	}
 	return nil
@@ -559,11 +561,12 @@ func probeVerdict(resp *http.Response, err error) error {
 
 // probeEgress 是国际出口探测的统一入口：生产走 probeInternationalEgress，
 // 测试可注入 probeFn 假实现（egressProbeLoop 与 dial 共用）。
-func (c *MasqueClient) probeEgress(ctx context.Context, bundle *connBundle) error {
+func (c *MasqueClient) probeEgress(ctx context.Context, bundle *connBundle, quiet bool) error {
 	if c.probeFn != nil {
+		// 测试缝忽略 quiet（同 dialFn 先例）：注入只关心成功/失败结果
 		return c.probeFn(ctx, bundle)
 	}
-	return c.probeInternationalEgress(ctx, bundle)
+	return c.probeInternationalEgress(ctx, bundle, quiet)
 }
 
 // egressProbeLoop 运行期活性探测：每 egressProbeInterval 做一次
@@ -603,7 +606,7 @@ func (c *MasqueClient) probeEgressOnce() {
 // 独立成方法便于单测：probeEgressOnce 的 currentConnection 需要真实
 // quic.Conn，无法在单测中构造（与 handleProbeFailure 独立成方法的理由相同）。
 func (c *MasqueClient) probeEgressOn(bundle *connBundle) {
-	perr := c.probeEgress(c.lifeCtx, bundle)
+	perr := c.probeEgress(c.lifeCtx, bundle, false) // 运行期恒打 403 诊断：v0.6.8 部署后核验 403 覆盖面的依据（审查 major#2）
 	if perr != nil {
 		if bundle.noteProbeFailure() < probeFailureThreshold {
 			log.Printf("运行期出口探测瞬时失败（%v），连续 %d 次失败后判定连接死亡并重连",

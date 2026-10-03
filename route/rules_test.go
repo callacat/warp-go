@@ -3,9 +3,9 @@ package route
 import (
 	"errors"
 	"io"
-	"net/netip"
 	"io/fs"
 	"log"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -361,9 +361,11 @@ func TestDefaultRulesParseAndEngineInit(t *testing.T) {
 	if !matched || act != ActionProxy {
 		t.Errorf("1.1.1.1 应命中 proxy,ip-cidr:1.1.1.1/32，得到 (%s, matched=%v)", act, matched)
 	}
-	// 同网段外仍由 geoip 兜底，CIDR 规则不越界。
-	act, _, _ = e.Match("1.0.0.1", netip.Addr{})
-	if act == ActionProxy && matched {
-		t.Errorf("1.0.0.1 不应命中 /32 规则，得到 %s", act)
+	// 同网段外不得命中 /32 规则：matched2 必须取本次结果（复用旧 matched 会让
+	// 断言静默失效——审查 t_794f439e minor），并区分「命中错规则」与「未命中」。
+	act2, _, matched2 := e.Match("1.0.0.1", netip.Addr{})
+	if matched2 {
+		t.Errorf("1.0.0.1 应完全未命中（模板无匹配规则），得到 act=%s matched=%v——若命中需区分是 ip-cidr 越界还是其他规则误配", act2, matched2)
 	}
+	_ = act // act 已在上方断言使用，保留变量避免改动前段
 }

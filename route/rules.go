@@ -66,7 +66,7 @@ const (
 //   - domain:  域名后缀（如 example.com）
 type Rule struct {
 	Action string // proxy 或 direct
-	Kind   string // geosite / geoip / domain
+	Kind   string // geosite / geoip / domain / ip-cidr
 	Value  string // 条件值（不含前缀）
 	// Prefix 是 KindIPCIDR 的解析结果（其余 Kind 零值）。解析期即校验，
 	// 非法 CIDR 直接报错，不会拖到匹配期。
