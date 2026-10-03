@@ -3,13 +3,18 @@
 ### 修复（运行期国际出口探测打裸 IP 恒假失败，t_2addd92d）
 
 - **探测目标 8.8.8.8:443 → www.cloudflare.com:443**：`tunnel/client_conn.go`
-  `probeEgressTarget` 原用 Google DNS 裸 IP，Cloudflare 边缘对 CONNECT 到裸 IP
-  （同 `front_proxy.go` 已记载的 1.1.1.1 / 162.159.36.1）不回响应 → 20s 周期的
-  运行期活性探测每次都在 5s 上超时（CT103 实测 48h 内 65 次
-  「运行期出口探测瞬时失败」）。探测目标改为 Cloudflare 自家 anycast 域名
-  （任意边缘必达，CONNECT 由边缘侧解析 → 本地零 DNS 依赖），国内边缘的国际出口
-  探测语义不变。新增回归测试 `TestProbeEgressTargetIsDomain` 锁死「目标不得是
-  裸 IP」，防止同类回归再次静默上线。
+  `probeEgressTarget` 原用 Google DNS 裸 IP，20s 周期的运行期活性探测每次都在
+  5s 上超时（CT103 实测 48h 内 65 次「运行期出口探测瞬时失败：读取 CONNECT 响应
+  失败 http3 deadline」——**现象实测，裸 IP 失败的确切机制未独立证实**；早前引用
+  `front_proxy.go` 的裸 IP 记载属主体误植，那段记的是百度 front proxy 而非
+  CF 边缘，且 162.159.198.2 在本仓是常规可用 CONNECT 目标）。探测目标改为
+  Cloudflare 自家 anycast 域名（任意边缘必达，CONNECT 由边缘侧解析 → 本地零
+  DNS 依赖）。**口径（审查 t_865ee6a1 major 采纳）：运行期探测恒假失败已修复；
+  选边缘判别力待部署后核验**——www.cloudflare.com 走 CF 自有网络，与「该边缘
+  国际出口是否受限」弱相关，选边缘用途的鉴别力可能弱化（部署后若发现选边缘
+  从未因探测失败跳过候选即证实，届时换非 CF 国际目标或双目标）。新增回归测试
+  `TestProbeEgressTargetIsDomain` 锁死「目标不得是裸 IP」，防止同类回归再次
+  静默上线。
 
 ### 修复（百度中转 CONNECT 超时误判通道级故障 → 长退避误杀整条通道，t_9d040f48）
 

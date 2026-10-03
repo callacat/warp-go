@@ -76,10 +76,12 @@ const (
 	reconnectRetryMax     = 5 * time.Second
 
 	// 国际出口探测配置：验证边缘节点是否真的能连通境外目标。
-	// 目标必须是域名而非裸 IP：Cloudflare 边缘对 CONNECT 到裸 IP
-	// （8.8.8.8 / 1.1.1.1，同 front_proxy.go 所述）不回响应，探测恒在 5s 上
-	// 假失败（CT103 48h 65 次）。www.cloudflare.com 是 Cloudflare 自家 anycast
-	// 域名，任意边缘到它必达；CONNECT 由边缘侧解析域名 → 本地零 DNS 依赖。
+	// 目标必须是域名而非裸 IP：打裸 IP（8.8.8.8:443）的运行期探测恒在 5s 上
+	// 假失败（CT103 48h 65 次，现象实测；确切机制未独立证实——勿再引用
+	// front_proxy.go 佐证，那段记的是百度 front proxy 而非 CF 边缘）。
+	// www.cloudflare.com 是 Cloudflare 自家 anycast 域名，任意边缘到它必达；
+	// CONNECT 由边缘侧解析域名 → 本地零 DNS 依赖。注意：自家域与「该边缘国际
+	// 出口是否受限」弱相关，选边缘判别力待部署后核验（审查 t_865ee6a1 major）。
 	probeEgressTarget  = "www.cloudflare.com:443"
 	probeEgressTimeout = 5 * time.Second
 
