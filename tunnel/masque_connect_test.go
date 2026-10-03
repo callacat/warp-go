@@ -135,10 +135,10 @@ func TestEnsureServiceableClosedFalse(t *testing.T) {
 // 返回错误（不 panic）：dialAddr 的 bundle 在 h3Client 建立前不得被探测。
 func TestProbeInternationalEgressNilBundle(t *testing.T) {
 	c := newTestMasqueClient(t)
-	if err := c.probeEgress(context.Background(), nil); err == nil {
+	if err := c.probeEgress(context.Background(), nil, false); err == nil {
 		t.Fatal("nil bundle 探测应返回错误")
 	}
-	if err := c.probeInternationalEgress(context.Background(), newTestBundle()); err == nil {
+	if err := c.probeInternationalEgress(context.Background(), newTestBundle(), false); err == nil {
 		t.Fatal("未就绪 bundle（nil h3Client）探测应返回错误")
 	}
 }
