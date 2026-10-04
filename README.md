@@ -162,6 +162,8 @@ direct,geoip:cn
 
 | 条件 | 含义 | 例子 |
 |---|---|---|
+| [v0.6.8](CHANGELOG.md#v068---2026-10-04) | 2026-10-04 | **出口探测判据改收响应即通**（修 v0.6.7 的 403 误杀→选边缘全跳→数据面 0/30 事故，CT103 已部署验收 30/30、P95 0.68s）+ 新增 **ip-cidr 规则条件**（1.1.1.1 走隧道，直连黑洞 2175 次/日归零） |
+| [v0.6.7](CHANGELOG.md#v067---2026-10-03) | 2026-10-03 | 运行期出口探测目标裸 IP 改域名（8.8.8.8 恒假失败 48h 65 次）。⚠️ 该版 www.cloudflare.com 回 403 被判失败致现网事故，已由 v0.6.8 修复 |
 | `geosite:<name>` | 域名匹配 geosite 分类（后缀匹配，含子域） | `proxy,geosite:google` |
 | `geoip:<cc>` | IP 国家匹配 | `direct,geoip:cn` |
 | `geoip:private` | 内网/保留地址段（库内真实条目） | `direct,geoip:private` |
