@@ -104,6 +104,25 @@ const (
 	probeFailureThreshold = 2
 )
 
+// probeWatchdogTimeout 是单轮运行期探测的硬存活上界，也是本包里探测相关
+// 参数的统一调谐口：探针自己超过此时长仍未返回即判定僵死，强制
+// retire + reconnect（t_f0a0102b）。
+//
+// 为什么需要它：探测循环是「一个 goroutine 串行跑每轮」（egressProbeLoop）。
+// 黑洞路径下任何一环都可能不返回，一旦卡住，整条运行期探测就此停摆——
+// 进程照常监听、照收 SOCKS5 请求，但再也没有任何判据会把这条死连接拆掉。
+// CT103 实测：00:45 连接死掉后到 02:40 全程无自愈（1h55m），恢复靠
+// systemctl restart + 30min 退避，是运气不是机制。
+//
+// 与 probeEgressTimeout 是两件事，不可互相替代：后者是「探针正常跑完、
+// 但出口不可达」（可判定的失败）；本上界是「探针自己回不来」，只能由调用
+// 方独立计时——探针内部的超时在它僵死时同样不生效。
+//
+// 取 3×egressProbeInterval：留足 probeEgressTimeout(5s) 加一次重试的余裕，
+// 同时把最坏发现延迟压在探测周期量级（60s）内。声明为 var 而非 const，
+// 与 frontProxyHandshakeTimeout 同例——单测要把它调小到秒级。
+var probeWatchdogTimeout = 3 * egressProbeInterval
+
 // connBundle groups everything owned by a single QUIC connection attempt so the
 // whole set can be torn down together on reconnect.
 type connBundle struct {
@@ -590,13 +609,49 @@ func (c *MasqueClient) egressProbeLoop() {
 // 航班——不等用户请求在死连接上白等（debugdiag：隧道被掐后 m.youtube.com
 // 连续 2 条 connection reset by peer、dn=0）。无当前连接（重连中/已关闭）
 // 时跳过。
+//
+// 探测在独立 goroutine 里跑，由 probeEgressWatchdog 计时：探针自身僵死
+// （卡在 resolveDNS / 流打开 / CONNECT 交换且内部超时同样失效）时，调用方
+// 不能陪着一起挂死——那正是 t_f0a0102b 里 1h55m 零自愈的形态。
 func (c *MasqueClient) probeEgressOnce() {
 	bundle, err := c.currentConnection()
 	if err != nil {
 		return // 无当前连接（重连中/已关闭），下轮再探
 	}
-	c.probeEgressOn(bundle)
+	c.probeEgressWatchdog(bundle)
 }
+
+// probeEgressWatchdog 在硬上界内跑一轮探测：正常完成即返回；超过
+// probeWatchdogTimeout 仍未完成则判定探针僵死，按「探测失败」的同一处置
+// 置 dead + retire + 重连（handleProbeFailure）。
+//
+// 之所以不直接把探测放在循环里串行跑：egressProbeLoop 只有一个 goroutine，
+// 它一卡，整条运行期探测就永久停摆。这里让每轮都跑在自己的 goroutine 上，
+// 由看门狗负责收口——探针僵死时损失的是「本轮结论」，不是「后续所有轮」。
+//
+// 卡死的探测 goroutine 不做强制回收：它持有 bundle 的流引用，retire 后
+// close 会解开阻塞中的 I/O（connBundle.close 的既有契约），自然返回。
+func (c *MasqueClient) probeEgressWatchdog(bundle *connBundle) {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		c.probeEgressOn(bundle)
+	}()
+
+	timer := time.NewTimer(probeWatchdogTimeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+		log.Printf("运行期出口探测超过 %s 未完成，判定探针僵死，标记连接死亡并重连", probeWatchdogTimeout)
+		c.handleProbeFailure(bundle, errProbeStalled)
+	case <-c.lifeCtx.Done():
+	}
+}
+
+// errProbeStalled 是探针硬存活上界到期时交给 handleProbeFailure 的原因，
+// 与「探测跑完但出口不可达」区分开：前者说明判据本身失效，后者说明出口坏。
+var errProbeStalled = errors.New("出口探测超时未完成（探针僵死）")
 
 // probeEgressOn 对指定 bundle 做一次国际出口探测，并按连续失败阈值决定是否
 // retire：单次失败（手机网络 UDP 抖动 / 边缘偶发慢响应）只记数不拆共享连接

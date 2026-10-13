@@ -1,5 +1,37 @@
 ## [Unreleased]
 
+### 修复（运行期黑洞连接零自愈：探针硬存活上界 + 接单路径看门狗，t_23f63270）
+
+现网事故（t_f0a0102b）：CT103 上 00:45 MASQUE QUIC 连接死掉后，进程**毫无
+反应 1h55m**（00:45→02:40）——仍在 40000 监听、照常接 SOCKS5 并打
+`SOCKS5 CONNECT` 日志，但所有走 proxy 规则的请求**永久挂在 CONNECT 交换里**。
+这次靠 `systemctl restart warp-go` + 30min 退避才恢复，是运气不是机制。
+
+- **探针硬存活上界（`probeWatchdogTimeout`，默认 3×周期 = 60s）**：
+  `tunnel/client_conn.go` `egressProbeLoop` 是「一个 goroutine 串行跑每轮」。
+  黑洞路径下探针任何一环都可能不返回（现场 goroutine dump 停在 `resolveDNS`，
+  且**探针内部的超时在它僵死时同样不失效**），一轮卡住就意味着整条运行期
+  探测**从此停摆**——再也没有任何判据会把死连接拆掉。现在每轮探测跑在自己的
+  goroutine 上，由看门狗计时：超过上界未完成即判探针僵死，走与探测失败
+  同一处置（置 dead → retire → 唤醒重连航班）。损失的是「本轮结论」而非
+  「后续所有轮」。与 `probeEgressTimeout`（探测正常跑完但出口不可达）是两件
+  事，不可互相替代。新增 `TestProbeWatchdogRetiresWedgedProbe`（构造 dead 未
+  置位、quicConn 为 nil 的「判据全失效」场景，断言有界 retire+重连）、
+  `TestProbeWatchdogNormalProbeUnaffected`（锁看门狗不误伤正常探测——少了
+  它，一次慢但正常的探测就会拆掉共享连接、把它上面所有在途流一起连坐）、
+  `TestProbeWatchdogTimeoutDocumented`（锁上界必须 > 单次探测超时）。
+- **接单路径看门狗（`proxy.dialTimeout`，默认 35s）**：三个 handler
+  （SOCKS5 CONNECT / HTTP CONNECT / HTTP 转发）此前都用**服务器级 ctx**
+  拨号，而它只在 `Close` 时取消。隧道侧 `reconnect()` 因此会一直等那个每
+  30min 才探一次、故障期永不结束的重连航班——单次请求无限期挂起。现在
+  `proxy.dial` 这一个漏斗给每次拨号套上界（隧道 / 本地直连 / reject 三条
+  路径共用，装一处即可），超时以 SOCKS5 0x04 / HTTP 502 收口，客户端可自行
+  重试。预算与隧道侧 `socksSetupTimeout`（同为 35s，含 DNS ~5s 重试一次 +
+  两次 10s CONNECT 尝试）保持一致，避免在健康但偏慢的链路上误杀正常请求。
+  新增 `TestSOCKS5RequestCannotHangForever` / `TestHTTPConnectCannotHangForever`
+  （黑洞连接下单次请求不得无限挂起，且 TunnelDial 必须收到带截止时间的 ctx）、
+  `TestDialTimeoutBudgetCoversTunnelSetup`。
+
 ## [v0.6.8] - 2026-10-04
 
 ### 修复（出口探测把 403 判失败 → 选边缘全跳过 → 数据面瘫，v0.6.7 现网事故，t_794f439e）

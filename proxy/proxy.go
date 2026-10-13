@@ -25,6 +25,27 @@ import (
 // afterwards, and a leftover deadline would kill it mid-transfer.
 const handshakeTimeout = 15 * time.Second
 
+// dialTimeout bounds ONE request's establishment of a connection to its target,
+// whether that goes through the tunnel or straight out of the local machine.
+//
+// It exists because the handlers used to dial with the server's own context,
+// which is only canceled by Close. Everything downstream inherits that
+// unbounded lifetime: DoH resolution waits on a shared-flight channel, and
+// TunnelDial's reconnect path waits on the reconnect flight — which, during an
+// edge outage, keeps retrying on the 30-minute long-backoff rhythm and never
+// finishes. A single request therefore parked forever: warp-go stayed alive and
+// kept accepting SOCKS5, logging "SOCKS5 CONNECT", while every request through
+// the tunnel hung in its CONNECT exchange and nothing ever tore the dead
+// connection down (t_f0a0102b, CT103 00:45→02:40).
+//
+// The budget matches the tunnel's own socksSetupTimeout (35s) so the two ends
+// agree on how long a well-formed setup may take: DNS (~5s, retried once) plus
+// two CONNECT attempts at connectExchangeTimeout (10s each), with headroom.
+// Past it the client gets a SOCKS5/HTTP error and can retry, which is strictly
+// better than a request that never returns. var, not const, so tests can shrink
+// it (cf. tunnel.frontProxyHandshakeTimeout).
+var dialTimeout = 35 * time.Second
+
 // maxAcceptBackoff bounds the exponential backoff for transient Accept errors.
 const maxAcceptBackoff = time.Second
 
@@ -328,7 +349,14 @@ var errRejected = errors.New("connection rejected by ruleset")
 // 只有显式命中 "proxy" 才进隧道；未命中（matched=false）按引擎的隐式 direct
 // 兜底本地直连；命中 "reject" 直接返回 errRejected（不建立连接）；Router 为
 // nil 时保持原行为——全部走隧道。
+//
+// 每一次拨号都套 dialTimeout 上界（见其注释：t_f0a0102b 的 1h55m 挂死）。
+// 三条路径（隧道 / 本地直连 / reject）共用这一个漏斗，所以看门狗只需要装
+// 在这一处。
 func (s *Server) dial(ctx context.Context, targetAddr string) (net.Conn, error) {
+	ctx, cancel := context.WithTimeout(ctx, dialTimeout)
+	defer cancel()
+
 	if s.cfg.Router != nil {
 		host, _, err := net.SplitHostPort(targetAddr)
 		if err != nil {
