@@ -12,9 +12,9 @@ import (
 
 // TestDialRetryPolicyEscalateRhythm 锁定拨号重试的「快速节奏 → 长退避」切换韵律
 // （recvu2HKHM5zIj，2026-09-02 CT103 事故修复）：连续失败前 2 轮按 100ms→200ms
-// 指数退避立即重试，第 3 轮起停止密集重试、切入 retryLongBackoff(30min) 低频
+// 指数退避立即重试，第 3 轮起停止密集重试、切入 retryLongBackoff 低频
 // 探测，且仅第一次切入时报 firstBackoff=true（调用方借此打「进入长退避」日志），
-// 此后每一轮 wait 恒为 30min、firstBackoff 恒 false（静默）。事故背景：边缘全
+// 此后每一轮 wait 恒为 retryLongBackoff、firstBackoff 恒 false（静默）。事故背景：边缘全
 // 端口不可达时旧逻辑永不停止、每 5s 一轮 7+ 条日志紧循环刷 journal 4 天——本
 // 测试锁死「3 轮即停 + 只播报一次」这两个防刷屏关键点。
 func TestDialRetryPolicyEscalateRhythm(t *testing.T) {
@@ -29,7 +29,7 @@ func TestDialRetryPolicyEscalateRhythm(t *testing.T) {
 		{200 * time.Millisecond, false}, // 第 2 轮失败：指数翻倍
 		{retryLongBackoff, true},        // 第 3 轮失败：达阈值切入长退避，首次播报
 		{retryLongBackoff, false},       // 第 4 轮：退避期静默，不重复播报
-		{retryLongBackoff, false},       // 第 5 轮：退避期恒 30min、恒静默
+		{retryLongBackoff, false},       // 第 5 轮：退避期恒 retryLongBackoff、恒静默
 	}
 	for i, tt := range tests {
 		gotWait, gotFirst := p.afterFailure(prev)
@@ -94,7 +94,7 @@ func TestDialRetryPolicyReset(t *testing.T) {
 		t.Fatalf("reset 后第 2 轮失败应回到 200ms 且不播报：期望 wait=200ms first=false，得到 wait=%v first=%v", wait, first)
 	}
 	if wait, first := p.afterFailure(200 * time.Millisecond); wait != retryLongBackoff || !first {
-		t.Fatalf("reset 后第 3 轮失败应重新切入长退避并播报：期望 wait=30min first=true，得到 wait=%v first=%v", wait, first)
+		t.Fatalf("reset 后第 3 轮失败应重新切入长退避并播报：期望 wait=%v first=true，得到 wait=%v first=%v", retryLongBackoff, wait, first)
 	}
 	if _, first := p.afterFailure(retryLongBackoff); first {
 		t.Fatal("同一故障期第二次长退避不应重复播报：期望 firstBackoff=false，得到 true")
@@ -122,6 +122,21 @@ func TestEscalateBackoff(t *testing.T) {
 		if got := escalateBackoff(tt.prev); got != tt.want {
 			t.Fatalf("escalateBackoff(%v) 用例 %d：期望 %v，得到 %v", tt.prev, i, tt.want, got)
 		}
+	}
+}
+
+// TestLongBackoffWithinRecoveryBudget 锁定长退避间隔的上下界（CMP-34，2026-10-14
+// CT103 事故）：1h57m 中断里，边缘 02:40 恢复后仍要等满一个退避周期才被探到——
+// 上界就是「已恢复但还没探到」的尾巴，必须留在分钟级（≤5min）；下界防止把长
+// 退避改得过小，让边缘长时间真不可达时退化成探测风暴（journal/tmpfs 教训，
+// recvu2HKHM5zIj）。上界放宽到 15min 也意味着恢复延迟重新进入「刻钟级」——
+// 那正是本卡要修的东西。
+func TestLongBackoffWithinRecoveryBudget(t *testing.T) {
+	if retryLongBackoff > 5*time.Minute {
+		t.Fatalf("长退避上界应在 5min 内（恢复延迟 ≤5min），得到 %v", retryLongBackoff)
+	}
+	if retryLongBackoff < time.Minute {
+		t.Fatalf("长退避下界不应低于 1min（防探测风暴），得到 %v", retryLongBackoff)
 	}
 }
 

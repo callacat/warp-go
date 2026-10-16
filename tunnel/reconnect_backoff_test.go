@@ -11,8 +11,8 @@ import (
 )
 
 // retryTestWindow 覆盖 3 轮快速失败（0ms+100ms+200ms ≈ 300ms）外加约 2.7s
-// 静默观察：窗口内长退避（30min）绝不可能到期，之后的任何日志/拨号都是
-// 回归信号。
+// 静默观察：窗口内长退避（retryLongBackoff，分钟级）绝不可能到期，之后的任何
+// 日志/拨号都是回归信号。
 const retryTestWindow = 3 * time.Second
 
 // captureLog 把标准日志重定向到缓冲区，返回读取函数；测试结束自动还原。
@@ -28,7 +28,7 @@ func captureLog(t *testing.T) func() string {
 // TestReconnectLongBackoffStopsDialing 锁定重连航班的「重试 3 次不通即停」
 // （recvu2HKHM5zIj，CT103 事故）：边缘 QUIC 全端口不可达时，旧逻辑每 5s 一轮
 // 紧循环重试、每轮 7+ 条日志连刷 journal 4 天。新行为：3 轮全失败后停止密集
-// 重试进入 30min 长退避，且整个故障期只打 1 条「进入长退避」边界日志。
+// 重试进入 retryLongBackoff 长退避，且整个故障期只打 1 条「进入长退避」边界日志。
 func TestReconnectLongBackoffStopsDialing(t *testing.T) {
 	c := newTestMasqueClient(t)
 	var calls int
@@ -56,7 +56,7 @@ func TestReconnectLongBackoffStopsDialing(t *testing.T) {
 		t.Fatalf("静默观察窗口内应恰 3 行（2 轮快速失败+1 条边界），得到 %d（全文：%s）", len(lines), out)
 	}
 	if calls != 3 {
-		t.Fatalf("窗口内 dial 应恰 3 次（3 轮失败即停，等 30min 长退避），得到 %d", calls)
+		t.Fatalf("窗口内 dial 应恰 3 次（3 轮失败即停，等 retryLongBackoff 长退避），得到 %d", calls)
 	}
 }
 

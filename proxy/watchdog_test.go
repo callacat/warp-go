@@ -31,8 +31,8 @@ func blackholeTunnelDial(t *testing.T, sawDeadline *bool) func(context.Context, 
 // 现场形态（CT103 00:45→02:40，1h55m 无自愈）：warp-go 进程活着、照常监听
 // 40000、照常打 "SOCKS5 CONNECT" 日志，但所有走 proxy 规则的请求永久挂在
 // CONNECT 交换里。根因是 handleSOCKS5 用「服务器级 ctx」拨号——它只在
-// Close 时取消，于是隧道侧 reconnect() 会一直等那个每 30min 才探一次的
-// 重连航班，永远等不到。
+// Close 时取消，于是隧道侧 reconnect() 会一直等那个要等满长退避周期才起下一轮
+// 探测的重连航班，永远等不到。
 func TestSOCKS5RequestCannotHangForever(t *testing.T) {
 	// 上界调到 300ms：与真实 35s 同语义（给 TunnelDial 一个有界的等待），
 	// 但让单测在秒级跑完。

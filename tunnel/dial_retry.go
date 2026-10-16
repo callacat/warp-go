@@ -13,19 +13,24 @@ import "time"
 // 本策略按东哥要求改为「重试 3 次不通即停」：
 //   - 一「轮」= 一次完整 dial（扫全部候选边缘地址，全失败记 1 轮）；
 //   - 连续 dialRoundFailureLimit 轮全失败 → 停止密集重试，切入
-//     retryLongBackoff 长退避（每 30 分钟低频探测一轮，期间完全静默）；
+//     retryLongBackoff 长退避（低频探测一轮，期间完全静默）；
 //   - 任一轮成功 → 计数清零，自动回到原有快速节奏（拆线瞬间尽快恢复）。
 //
 // journal 占用对比：旧 = 故障期每分钟 ~96 条、永不停止；新 = 密集期 3 轮
-// 详细日志 + 1 条「进入长退避」+ 之后每 30 分钟 0 条，恢复时 1 条「已重建」。
+// 详细日志 + 1 条「进入长退避」+ 之后退避期 0 条，恢复时 1 条「已重建」。
 const (
 	// dialRoundFailureLimit 是连续全失败轮数阈值：达到即停止密集重试。
 	dialRoundFailureLimit = 3
 
-	// retryLongBackoff 是密集重试停止后的低频探测间隔。取 30 分钟：边缘
-	// 级故障（路由/防火墙/CF 侧问题）的恢复以小时计，30 分钟一轮足以在
-	// 恢复后半小时内自动接上，又不会对故障网络构成任何可感知压力。
-	retryLongBackoff = 30 * time.Minute
+	// retryLongBackoff 是密集重试停止后的低频探测间隔。取 5 分钟（原 30
+	// 分钟，CMP-34 后改短）：长退避期的每一轮探测都完全静默，低频轮本身
+	// 对故障网络无压力，「探测太密」的代价只在恢复时间上——而长退避的
+	// 代价同样是恢复时间，且是**整条 :40000 出口**的恢复时间。
+	// 10-14 事故（CMP-34）：00:44 边缘失联 → 30 分钟长退避，02:40 边缘
+	// 恢复，中间 ~1h57m 全程无出口；退避期内即使边缘已恢复也要等满一个
+	// 周期才探测。5 分钟把这段「已恢复但还没探到」的尾巴从 ≤30min 压到
+	// ≤5min（12 轮/小时，每轮一次全候选 dial，量级可忽略）。
+	retryLongBackoff = 5 * time.Minute
 )
 
 // dialRetryPolicy 封装两个拨号循环共用的重试节奏（见包级常量注释）。非并发
@@ -40,8 +45,7 @@ type dialRetryPolicy struct {
 // afterFailure 在一轮拨号失败后调用，返回下一轮拨号前应等待的时长。
 // firstBackoff 为 true 表示本次恰好切入长退避，调用方应打一条进入退避的
 // 边界日志；此后 wait 等于 retryLongBackoff 的每一轮都属退避期，调用方应
-// 静默（调用方以 wait >= retryLongBackoff 判定——正常指数退避封顶 5s，
-// 远小于它）。
+// 静默（调用方以 backing() 判定——正常指数退避封顶 5s，远小于 retryLongBackoff）。
 func (p *dialRetryPolicy) afterFailure(prev time.Duration) (wait time.Duration, firstBackoff bool) {
 	p.rounds++
 	if p.rounds < dialRoundFailureLimit {
