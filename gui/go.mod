@@ -1,6 +1,6 @@
 module warp/gui
 
-go 1.26.5
+go 1.26.10
 
 require (
 	github.com/wailsapp/wails/v3 v3.0.0-alpha2.119
