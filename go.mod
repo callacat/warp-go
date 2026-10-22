@@ -1,6 +1,6 @@
 module warp
 
-go 1.26.5
+go 1.26.10
 
 require (
 	github.com/quic-go/quic-go v0.61.0

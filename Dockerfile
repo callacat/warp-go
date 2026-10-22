@@ -8,6 +8,9 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 # CGO 纯静态：alpine 无 glibc 也能直接跑；-trimpath/-s/-w 去调试信息缩体积
+# go version 打日志：构建日志留工具链版本证据（CVE-2026-111943 要求 ≥1.26.10）；
+# go.mod 的 go 1.26.10 指令同时兜底——工具链低于该版本时构建直接失败（GOTOOLCHAIN=auto 会自动拉新工具链）
+RUN go version
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/warp .
 
 # ── runtime stage: 免特权、无 TUN、无 NET_ADMIN ──
