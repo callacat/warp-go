@@ -31,7 +31,7 @@ jobs:
       - name: 设置 Go 1.26
         uses: actions/setup-go@v6
         with:
-          go-version: '1.26.x'
+          go-version: '1.26.10'
           check-latest: true
           cache: true # 依赖模块缓存：go.sum 不变则复用 runner 缓存，省全量重编依赖
 
@@ -73,7 +73,7 @@ jobs:
       - name: 设置 Go 1.26
         uses: actions/setup-go@v6
         with:
-          go-version: '1.26.x'
+          go-version: '1.26.10'
           check-latest: true
           cache: true # 依赖模块缓存：go.sum 不变则复用 runner 缓存，省全量重编依赖
 
@@ -145,7 +145,7 @@ jobs:
       - name: 设置 Go 1.26
         uses: actions/setup-go@v6
         with:
-          go-version: '1.26.x'
+          go-version: '1.26.10'
           check-latest: true
           cache: true # 依赖模块缓存：go.sum 不变则复用 runner 缓存，省全量重编依赖
 
@@ -273,7 +273,7 @@ jobs:
       - name: 设置 Go 1.26
         uses: actions/setup-go@v6
         with:
-          go-version: '1.26.x'
+          go-version: '1.26.10'
           check-latest: true
           cache: true # 依赖模块缓存：go.sum 不变则复用 runner 缓存，省全量重编依赖
 
